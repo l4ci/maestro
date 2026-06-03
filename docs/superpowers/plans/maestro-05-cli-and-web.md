@@ -1294,12 +1294,16 @@ describe('addCommand', () => {
     const configPath = tempConfigFile(baseConfig);
     const forge = fakeForge();
     const execaCalls: Array<{ file: string; args: string[] }> = [];
+    // Forge-CLI clone: `gh repo clone <project> <dest> -- --depth 1`. The clone
+    // creates a dir WITHOUT a WORKFLOW.md; `git rev-parse` reports the default branch.
     const fakeExeca = vi.fn((file: string, args: string[], opts?: { cwd?: string }) => {
       execaCalls.push({ file, args });
-      // simulate `git clone` creating a dir WITHOUT a WORKFLOW.md
-      if (file === 'git' && args[0] === 'clone') {
-        const dest = args[args.length - 1];
+      if (file === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+        const dest = args[3];
         mkdirSync(dest, { recursive: true });
+      }
+      if (file === 'git' && args.includes('rev-parse')) {
+        return Promise.resolve({ exitCode: 0, stdout: 'main\n' });
       }
       return Promise.resolve({ exitCode: 0, stdout: '' });
     });
@@ -1318,6 +1322,11 @@ describe('addCommand', () => {
       { commit: true },
     );
 
+    // cloned via the forge CLI, not a bare https git clone
+    const clone = execaCalls.find((c) => c.file === 'gh' && c.args[0] === 'repo' && c.args[1] === 'clone');
+    expect(clone).toBeTruthy();
+    expect(clone!.args).toEqual(['repo', 'clone', 'org/web', expect.any(String), '--', '--depth', '1']);
+    expect(execaCalls.find((c) => c.file === 'git' && c.args.includes('clone'))).toBeUndefined();
     // createForge gets the contract repo object + ForgeDeps; review falls back
     // to the schema default since the clone has no WORKFLOW.md yet.
     expect(createForge).toHaveBeenCalledWith(
@@ -1334,8 +1343,9 @@ describe('addCommand', () => {
     const commit = execaCalls.find((c) => c.file === 'git' && c.args.includes('commit'));
     expect(commit).toBeTruthy();
     expect(commit!.args.join(' ')).toMatch(/maestro\.config\.yaml/);
-    // guidance printed because no WORKFLOW.md found
+    // guidance printed (with resolved default branch) because no WORKFLOW.md found
     expect(lines.join('\n')).toMatch(/WORKFLOW\.md.*onboard|onboarding/i);
+    expect(lines.join('\n')).toContain('default branch: main');
   });
 
   it('respects --no-commit', async () => {
@@ -1344,8 +1354,11 @@ describe('addCommand', () => {
     const execaCalls: Array<{ file: string; args: string[] }> = [];
     const fakeExeca = vi.fn((file: string, args: string[]) => {
       execaCalls.push({ file, args });
-      if (file === 'git' && args[0] === 'clone') {
-        mkdirSync(args[args.length - 1], { recursive: true });
+      if (file === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+        mkdirSync(args[3], { recursive: true });
+      }
+      if (file === 'git' && args.includes('rev-parse')) {
+        return Promise.resolve({ exitCode: 0, stdout: 'main\n' });
       }
       return Promise.resolve({ exitCode: 0, stdout: '' });
     });
@@ -1384,10 +1397,13 @@ concurrency: { maxActive: 1 }
 ---
 body`;
     const fakeExeca = vi.fn((file: string, args: string[]) => {
-      if (file === 'git' && args[0] === 'clone') {
-        const dest = args[args.length - 1];
+      if (file === 'gh' && args[0] === 'repo' && args[1] === 'clone') {
+        const dest = args[3];
         mkdirSync(dest, { recursive: true });
         writeFileSync(join(dest, 'WORKFLOW.md'), workflowMd);
+      }
+      if (file === 'git' && args.includes('rev-parse')) {
+        return Promise.resolve({ exitCode: 0, stdout: 'main\n' });
       }
       return Promise.resolve({ exitCode: 0, stdout: '' });
     });
@@ -1443,22 +1459,27 @@ export interface AddOpts {
   commit: boolean;        // commander maps --no-commit to commit:false
 }
 
-// Derive forge, project path, clone url, and clone dir name from a repo url like "github.com/org/web".
-function parseRepoUrl(url: string): { forge: 'gitlab' | 'github'; project: string; cloneUrl: string; dirName: string } {
+// Derive forge, project path, and clone dir name from a repo url like "github.com/org/web".
+function parseRepoUrl(url: string): { forge: 'gitlab' | 'github'; project: string; dirName: string } {
   const host = url.split('/')[0];
   const forge = host.includes('gitlab') ? 'gitlab' : 'github';
   const project = url.slice(host.length + 1);   // path after host, e.g. "org/web"
   const dirName = url.replace(/[^A-Za-z0-9]+/g, '_');
-  const cloneUrl = `https://${url}.git`;
-  return { forge, project, cloneUrl, dirName };
+  return { forge, project, dirName };
 }
 
 export async function addCommand(deps: AddDeps, url: string, opts: AddOpts): Promise<void> {
-  const { forge, project, cloneUrl, dirName } = parseRepoUrl(url);
+  const { forge, project, dirName } = parseRepoUrl(url);
   const dest = join(deps.cloneRoot, dirName);
 
-  deps.log(`Cloning ${url} ...`);
-  await deps.execa('git', ['clone', '--depth', '1', cloneUrl, dest]);
+  // Clone via the forge CLI (contract A7 transport) so the CLI handles auth — never a
+  // bare https URL. Args after `--` are forwarded to `git clone`.
+  const cli = forge === 'gitlab' ? 'glab' : 'gh';
+  deps.log(`Cloning ${url} via ${cli} ...`);
+  await deps.execa(cli, ['repo', 'clone', project, dest, '--', '--depth', '1']);
+
+  // Default branch is read from the clone and handed to onboarding (M7).
+  const defaultBranch = (await deps.execa('git', ['-C', dest, 'rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
 
   const config = loadConfig(deps.configPath);
   const botUser = config.defaults.botUser;
@@ -1484,12 +1505,19 @@ export async function addCommand(deps: AddDeps, url: string, opts: AddOpts): Pro
   if (existsSync(join(dest, 'WORKFLOW.md'))) {
     deps.log(`${url} already has a WORKFLOW.md — fully onboarded.`);
   } else {
-    deps.log(`No WORKFLOW.md found in ${url}. Run onboarding to create one (maestro onboarding, M7).`);
+    // `add` does not seed the template itself — that is M7 onboarding's job
+    // (`onboardRepo`, which uses `loadDefaultTemplate()` and the resolved defaultBranch).
+    deps.log(
+      `No WORKFLOW.md found in ${url} (default branch: ${defaultBranch}). ` +
+        `Run onboarding to create one (maestro onboarding, M7).`,
+    );
   }
 }
 ```
 
 > **`createForge` signature:** per the contract `forge/factory.ts`, `createForge(forge, { url, project, botUser }, deps)` — the repo object is `{ url; project; botUser }` and `deps` is `ForgeDeps { config; review; runner?; fetchImpl? }`. The adapter derives `MergeRequest.changesRequested` from `review.changesSignal`, and `ensureLabels` uses it to decide whether to also create the changes-requested label — so `review` is **required**. `maestro add` clones a repo that may not have a `WORKFLOW.md` yet (M7 onboarding creates it later), so it sources `review` via `loadWorkflow(dest, forge)?.review ?? { changesSignal: 'label' }` — the schema default when the file is absent. Token resolution happens inside the adapter via `config.forges[forge].tokenEnv`; `manageBoard` is enforced by the caller (here, `add` calls `ensureBoard` unconditionally for setup). The test fakes `createForge`, so the adapter internals don't block M5. `loadWorkflow(repoDir, forgeHint?)` is the contract `workflow/load.ts` export (re-exported from `@maestro/core`; add `export { loadWorkflow } from './workflow/load.js';` to `packages/core/src/index.ts` if not yet present).
+>
+> **Clone transport (contract A7):** `add` clones via the forge CLI — `glab repo clone <project> <dest> -- --depth 1` / `gh repo clone <project> <dest> -- --depth 1` — the same transport as `WorkspaceManager`, so the CLI handles auth and private repos work; there is no bare `https` clone. The repo's **default branch** is then read from the clone (`git -C <dest> rev-parse --abbrev-ref HEAD`) and surfaced for onboarding — M7's `onboardRepo` is what actually seeds `WORKFLOW.md`, using `core`'s `loadDefaultTemplate()` (which resolves `templates/WORKFLOW.md` relative to its own module) and the resolved `defaultBranch`. `add` itself only prints guidance, so it does not call `loadDefaultTemplate()`; M5 surfaces `defaultBranch` for the handoff.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1645,7 +1673,7 @@ git commit -m "feat(cli): wire commander program with all five commands"
 Append to `packages/cli/src/index.ts`:
 
 ```ts
-import { WorkspaceManager } from '@maestro/core';
+import { createWorkspaceManager, execaRunner, type Forge } from '@maestro/core';
 import { defaultCliDeps } from './deps.js';
 import { addCommand } from './commands/add.js';
 import { listCommand } from './commands/list.js';
@@ -1654,10 +1682,14 @@ import { logsCommand } from './commands/logs.js';
 import { runCommand } from './commands/run.js';
 import { resolve, dirname } from 'node:path';
 
+// Derive a repo's forge from its url host (same rule as parseRepoUrl in add.ts).
+const forgeOf = (repoUrl: string): Forge => (repoUrl.split('/')[0].includes('gitlab') ? 'gitlab' : 'github');
+
 export async function main(argv: string[] = process.argv): Promise<void> {
   const deps = defaultCliDeps();
   const cloneRoot = resolve(dirname(deps.configPath), 'workspaces');
-  const ws = new WorkspaceManager({ root: cloneRoot } as never);
+  // Contract M3 factory — resolves each repo's forge via forgeOf; runner from util/exec.ts.
+  const ws = createWorkspaceManager({ root: cloneRoot, runner: execaRunner, forgeOf });
 
   const program = buildProgram({
     add: (url, opts) =>
@@ -1694,7 +1726,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 }
 ```
 
-> **`WorkspaceManager` construction note:** the contract declares the `WorkspaceManager` interface (and that it takes a `CommandRunner` + `forge`) but not its concrete constructor. `new WorkspaceManager({ root })` is the assumed shape; flagged in Open questions (item 1). If M3 exports a factory or a different constructor, swap the construction here — no command handler changes needed since `pathFor` is injected.
+> **`WorkspaceManager` construction:** built via the contract M3 factory `createWorkspaceManager({ root, runner, forgeOf })` (not `new WorkspaceManager(...)`). `runner` is `execaRunner` from `util/exec.ts`; `forgeOf` maps each watched repo's url to its forge so one manager serves repos across both forges. Command handlers stay decoupled — `run` only receives the injected `pathFor`, so the construction shape never leaks into them.
 
 - [ ] **Step 2: Run the full CLI test suite to confirm nothing broke**
 
@@ -1836,8 +1868,8 @@ git commit -m "chore: lint and format cli and web packages"
 
 ## Open questions
 
-These are gaps the reconciled contract (`maestro-00-contracts.md`) still does not cover. The plan picked reasonable defaults where it had to, marked here so the contract can be updated rather than treating any of these as settled. (Items previously listed for `RunState`, web port, status IPC, `createForge` deps, log path, and `run --repo` are now defined by the contract and have been removed.)
+None. Every gap this plan previously flagged is now pinned by the reconciled contract (`maestro-00-contracts.md`):
 
-1. **`WorkspaceManager` constructor is undefined.** The contract specifies the `WorkspaceManager` interface and that it takes a `CommandRunner` + the repo's `forge`, but not the concrete constructor/factory signature. `maestro run` and `add` need `pathFor`/clone dirs. This plan assumes `new WorkspaceManager({ root })` and injects `pathFor` into the `run` handler so tests don't depend on it. Contracts should pin the constructor or a factory (M3 owns it).
-
-2. **Clone transport for `maestro add`.** The contract says `WorkspaceManager` clones via the **forge CLI** (`glab repo clone` / `gh repo clone`) so tokens are handled by the CLI and never embedded in URLs. `maestro add` currently does its own `git clone https://<url>.git` for the one-shot inspection clone, which (a) does not match the forge-CLI convention and (b) won't authenticate private repos. This should be reconciled — either reuse the forge CLI for `add`'s clone or have `add` delegate to `WorkspaceManager`/the forge CLI. Flagged for M3/M2 alignment.
+- `RunState`/`RunningEntry` shape, web port (`DefaultsCfg.web`), status IPC (`GET /api/state`), `createForge` deps (`ForgeDeps { config; review; runner?; fetchImpl? }`), log path/format (`logs/maestro.log` JSON-lines), and `run --repo` — all defined in the contract.
+- `WorkspaceManager` construction — pinned to the `createWorkspaceManager({ root, runner, forgeOf })` factory.
+- `maestro add` clone transport — pinned to the forge CLI (`glab`/`gh repo clone ... -- --depth 1`, contract A7), with `defaultBranch` read from the clone and `loadDefaultTemplate()` owned by M7 onboarding.

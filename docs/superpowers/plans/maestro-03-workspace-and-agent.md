@@ -4,7 +4,7 @@
 
 **Goal:** Build the REAL `WorkspaceManager` (clone via forge CLI / reuse / branch / LRU-cap), the Claude `AgentResult` parser, the `ClaudeRunner` (headless `claude -p --output-format stream-json` over the shared `CommandRunner`), the `DEFAULT_PROTOCOL` prompt fragments, and fill the reconciler's `work` case (which M1 owns and stubbed with fakes) — running the agent and acting on its result inline in the same tick.
 
-**Architecture:** Three independently-testable seams under `packages/core/src`, all subprocesses going through the shared `CommandRunner` seam (`util/exec.ts`, injectable for tests): `workspace/manager.ts` shells out to the forge CLI (`glab`/`gh`) for clone and to `git` for branch/fetch/push against per-issue clone dirs under `config.defaults.workspaces.root`; `agent/contract.ts` parses the final fenced JSON `{"status","summary"}` out of `claude` stream-json stdout; `agent/runner.ts` runs `<command> -p --output-format stream-json --permission-mode <mode> --max-turns <n>` via the `CommandRunner`, pipes the prompt on stdin, collects stdout, and returns `parseAgentResult(stdout)`. **Commits happen in two distinct places: the Claude agent makes atomic git commits INSIDE the workspace during its run (it has the `git` tool and the working tree); AFTER the run returns, the reconciler `work` executor runs `git push` to publish the branch.** The `work` executor builds the agent prompt (issue body + current MR description + `workflow.promptBody` + `DEFAULT_PROTOCOL` + git diff context), runs Claude, pushes the branch, and then acts on the `AgentResult` **inline in the same tick**: `needs_input` → block (set `blocked` label + comment); `done` → run the handoff routine inline (proof → commit/push `proof/` → comment with `blobUrl` links → `assignReviewer` → `setMrReady` → label `in_review`; M4 owns the routine body, M3 leaves the seam); `in_progress` → leave `in_progress` for the next tick. The daemon never overwrites the MR description — that is the agent's living plan.
+**Architecture:** Three independently-testable seams under `packages/core/src`, all subprocesses going through the shared `CommandRunner` seam (`util/exec.ts`, injectable for tests): `workspace/manager.ts` (built via the `createWorkspaceManager({ root, runner, forgeOf })` factory) shells out to the per-repo forge CLI — `forgeOf(repoUrl)` picks `glab`/`gh` — for clone, and to `git` for branch/fetch/push against per-issue clone dirs under `config.defaults.workspaces.root`; `agent/contract.ts` parses the final fenced JSON `{"status","summary"}` out of `claude` stream-json stdout; `agent/runner.ts` runs `<command> -p --output-format stream-json --permission-mode <mode> --max-turns <n>` via the `CommandRunner`, pipes the prompt on stdin, collects stdout, and returns `parseAgentResult(stdout)`. **Commits happen in two distinct places: the Claude agent makes atomic git commits INSIDE the workspace during its run (it has the `git` tool and the working tree); AFTER the run returns, the reconciler `work` executor runs `git push` to publish the branch.** The `work` executor builds the agent prompt (issue body + current MR description + `workflow.promptBody` + `DEFAULT_PROTOCOL` + git diff context), runs Claude, pushes the branch, and then acts on the `AgentResult` **inline in the same tick**: `needs_input` → block (set `blocked` label + comment); `done` → run the handoff routine inline (proof → commit/push `proof/` → comment with `blobUrl` links → `assignReviewer` → `setMrReady` → label `in_review`; M4 owns the routine body, M3 leaves the seam); `in_progress` → leave `in_progress` for the next tick. The daemon never overwrites the MR description — that is the agent's living plan.
 
 **Tech Stack:** Node 20+, TypeScript 5.x, ESM, pnpm workspaces, Vitest (`*.test.ts` colocated). All `git`/`glab`/`gh`/`claude` subprocesses go through the shared `CommandRunner` seam (`packages/core/src/util/exec.ts`, default `execaRunner`) — no plan imports `execa` directly. Package: `@maestro/core`.
 
@@ -23,7 +23,7 @@
 | `packages/core/src/agent/runner.ts` | `RunnerOpts`, `ClaudeRunner` interface + `RealClaudeRunner` impl (takes a `CommandRunner`) | Create |
 | `packages/core/src/agent/runner.test.ts` | Runner driven against a stub script emitting canned stream-json | Create |
 | `packages/core/src/agent/__fixtures__/stub-claude.mjs` | Test stub that emits canned stream-json on stdout | Create |
-| `packages/core/src/workspace/manager.ts` | `WorkspaceManager` interface + `RealWorkspaceManager` (forge-CLI clone + git via `CommandRunner`, LRU cap, path sanitize) | Create |
+| `packages/core/src/workspace/manager.ts` | `WorkspaceManager` interface + `createWorkspaceManager({ root, runner, forgeOf })` factory + `RealWorkspaceManager` (per-repo forge-CLI clone via `forgeOf` + git via `CommandRunner`, LRU cap, path sanitize) | Create |
 | `packages/core/src/workspace/manager.test.ts` | Temp-dir tests: ensure/reuse/remove/path-escape/LRU | Create |
 | `packages/core/src/reconciler/index.ts` | Fill the `work` case inside M1's `executeAction` (REAL WorkspaceManager + ClaudeRunner + inline handoff) + add `buildAgentPrompt` | Modify |
 | `packages/core/src/reconciler/index.test.ts` | `work`-case integration test (fakes for forge, real WorkspaceManager, fake runner via the `ReconcileDeps` bag) | Modify |
@@ -516,13 +516,13 @@ git commit -m "test(core): drive RealClaudeRunner via injected CommandRunner + s
 // packages/core/src/workspace/manager.test.ts
 import { describe, it, expect } from 'vitest';
 import { resolve } from 'node:path';
-import { RealWorkspaceManager } from './manager.js';
+import { createWorkspaceManager, RealWorkspaceManager } from './manager.js';
 import { execaRunner } from '../util/exec.js';
 
 describe('RealWorkspaceManager.pathFor', () => {
   const root = resolve('/tmp/maestro-ws-root');
-  // Constructor: (root, runner, forge) — CommandRunner from util/exec.ts + repo forge.
-  const mgr = new RealWorkspaceManager(root, execaRunner, 'gitlab');
+  // Factory takes { root, runner, forgeOf }. Single-repo tests pass forgeOf: () => 'gitlab'.
+  const mgr = createWorkspaceManager({ root, runner: execaRunner, forgeOf: () => 'gitlab' });
 
   it('produces a sanitized path under root', () => {
     const p = mgr.pathFor('https://gitlab.com/group/api.git', 42);
@@ -570,17 +570,24 @@ function slugForRepo(repoUrl: string): string {
   return slug;
 }
 
+export interface WorkspaceManagerOpts {
+  root: string;
+  runner: CommandRunner;                  // shared seam (util/exec.ts)
+  forgeOf: (repoUrl: string) => Forge;    // resolve each repo's forge (daemon watches both)
+}
+
 export class RealWorkspaceManager implements WorkspaceManager {
   readonly root: string;
+  private readonly runner: CommandRunner;
+  private readonly forgeOf: (repoUrl: string) => Forge;
 
-  // Takes the shared CommandRunner (util/exec.ts) and the repo's forge so clone
-  // can shell out to `glab repo clone` / `gh repo clone` (tokens handled by the CLI).
-  constructor(
-    root: string,
-    private readonly runner: CommandRunner,
-    private readonly forge: Forge,
-  ) {
-    this.root = resolve(root);
+  // The daemon watches many repos across both forges, so clone resolves each
+  // repo's forge via `forgeOf(repoUrl)` to pick `glab repo clone` / `gh repo clone`
+  // (tokens handled by the CLI, never embedded in URLs or logs).
+  constructor(opts: WorkspaceManagerOpts) {
+    this.root = resolve(opts.root);
+    this.runner = opts.runner;
+    this.forgeOf = opts.forgeOf;
   }
 
   // Resolve `<root>/<segment>/issue-<n>` and reject anything that escapes root.
@@ -611,6 +618,11 @@ export class RealWorkspaceManager implements WorkspaceManager {
     throw new Error('not implemented');
   }
 }
+
+// Factory (M3-owned, per contract). Single-repo callers pass `forgeOf: () => theForge`.
+export function createWorkspaceManager(opts: WorkspaceManagerOpts): WorkspaceManager {
+  return new RealWorkspaceManager(opts);
+}
 ```
 
 > `pathFor` sanitizes the repo URL before building the path, so a malicious URL
@@ -625,7 +637,8 @@ export class RealWorkspaceManager implements WorkspaceManager {
 // append to manager.test.ts
 describe('RealWorkspaceManager path guard', () => {
   const root = resolve('/tmp/maestro-ws-root');
-  const mgr = new RealWorkspaceManager(root, execaRunner, 'gitlab');
+  // resolveUnderRoot is a concrete-class method, so construct RealWorkspaceManager directly.
+  const mgr = new RealWorkspaceManager({ root, runner: execaRunner, forgeOf: () => 'gitlab' });
 
   it('resolveUnderRoot throws when a crafted segment escapes root', () => {
     // A segment that genuinely climbs out of root must trip the guard.
@@ -660,12 +673,12 @@ git commit -m "feat(core): add WorkspaceManager pathFor sanitization + traversal
 - Modify: `packages/core/src/workspace/manager.ts`
 - Modify: `packages/core/src/workspace/manager.test.ts`
 
-Clone goes through the forge CLI (`glab repo clone` / `gh repo clone`) over the
-injected `CommandRunner`, so tokens are handled by the CLI and never embedded in
-URLs or logs. Tests use a real local "remote" (a bare git repo in a temp dir) and
-inject a `CommandRunner` that maps the forge-clone invocation to a local
-`git clone`, exercising the real reuse/branch logic offline without needing
-`glab`/`gh` installed.
+Clone goes through the per-repo forge CLI — `forgeOf(repoUrl)` selects
+`glab repo clone` / `gh repo clone` — over the injected `CommandRunner`, so tokens
+are handled by the CLI and never embedded in URLs or logs. Tests use a real local
+"remote" (a bare git repo in a temp dir) and inject a `CommandRunner` that maps the
+forge-clone invocation to a local `git clone`, exercising the real reuse/branch
+logic offline without needing `glab`/`gh` installed.
 
 - [ ] **Step 1: Add the failing test**
 
@@ -711,7 +724,7 @@ describe('RealWorkspaceManager.ensure', () => {
   it('clones via the forge CLI and creates the issue branch on first call', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maestro-ensure-'));
     const remote = await makeBareRemote();
-    const mgr = new RealWorkspaceManager(root, localRunner, 'gitlab');
+    const mgr = createWorkspaceManager({ root, runner: localRunner, forgeOf: () => 'gitlab' });
 
     const dir = await mgr.ensure(remote, 11, 'maestro/issue-11');
     expect(dir).toBe(mgr.pathFor(remote, 11));
@@ -727,7 +740,7 @@ describe('RealWorkspaceManager.ensure', () => {
   it('reuses the existing clone on the second call (no re-clone)', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maestro-reuse-'));
     const remote = await makeBareRemote();
-    const mgr = new RealWorkspaceManager(root, localRunner, 'gitlab');
+    const mgr = createWorkspaceManager({ root, runner: localRunner, forgeOf: () => 'gitlab' });
 
     const dir1 = await mgr.ensure(remote, 12, 'maestro/issue-12');
     await writeFile(join(dir1, 'marker.txt'), 'kept');
@@ -764,7 +777,8 @@ import { existsSync } from 'node:fs';
     if (!isClone) {
       await mkdir(this.root, { recursive: true });
       // Clone via the forge CLI so the token is handled by the CLI, never in the URL/logs.
-      const cli = this.forge === 'github' ? 'gh' : 'glab';
+      // Resolve this repo's forge — the daemon may watch both gitlab and github.
+      const cli = this.forgeOf(repoUrl) === 'github' ? 'gh' : 'glab';
       const clone = await this.runner.run(cli, ['repo', 'clone', repoUrl, dir]);
       if (clone.exitCode !== 0) {
         throw new Error(`${cli} repo clone failed (${clone.exitCode}): ${clone.stderr}`);
@@ -814,7 +828,7 @@ describe('RealWorkspaceManager.remove', () => {
   it('deletes the issue workspace dir and is idempotent', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maestro-remove-'));
     const remote = await makeBareRemote();
-    const mgr = new RealWorkspaceManager(root, localRunner, 'gitlab');
+    const mgr = createWorkspaceManager({ root, runner: localRunner, forgeOf: () => 'gitlab' });
 
     const dir = await mgr.ensure(remote, 21, 'maestro/issue-21');
     expect(existsSync(dir)).toBe(true);
@@ -883,7 +897,7 @@ import { utimes, stat } from 'node:fs/promises';
 describe('RealWorkspaceManager.enforceDiskCap', () => {
   it('evicts the oldest workspace(s) until under the cap', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maestro-cap-'));
-    const mgr = new RealWorkspaceManager(root, execaRunner, 'gitlab');
+    const mgr = createWorkspaceManager({ root, runner: execaRunner, forgeOf: () => 'gitlab' });
 
     // Two fake workspaces with known sizes and mtimes.
     const older = mgr.pathFor('host/a', 1);
@@ -909,7 +923,7 @@ describe('RealWorkspaceManager.enforceDiskCap', () => {
 
   it('is a no-op when already under the cap', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maestro-cap2-'));
-    const mgr = new RealWorkspaceManager(root, execaRunner, 'gitlab');
+    const mgr = createWorkspaceManager({ root, runner: execaRunner, forgeOf: () => 'gitlab' });
     const ws = mgr.pathFor('host/a', 1);
     await mkdir(ws, { recursive: true });
     await writeFile(join(ws, 'blob'), Buffer.alloc(100));
@@ -1028,10 +1042,11 @@ import { describe, it, expect } from 'vitest';
 import * as core from './index.js';
 
 describe('core barrel exports M3 symbols', () => {
-  it('exports parseAgentResult, DEFAULT_PROTOCOL, RealClaudeRunner, RealWorkspaceManager', () => {
+  it('exports parseAgentResult, DEFAULT_PROTOCOL, RealClaudeRunner, createWorkspaceManager', () => {
     expect(typeof core.parseAgentResult).toBe('function');
     expect(typeof core.DEFAULT_PROTOCOL).toBe('string');
     expect(typeof core.RealClaudeRunner).toBe('function');
+    expect(typeof core.createWorkspaceManager).toBe('function');
     expect(typeof core.RealWorkspaceManager).toBe('function');
   });
 });
@@ -1051,8 +1066,8 @@ export type { AgentResult, AgentStatus } from './agent/contract.js';
 export { DEFAULT_PROTOCOL } from './agent/protocol.js';
 export { RealClaudeRunner } from './agent/runner.js';
 export type { ClaudeRunner, RunnerOpts } from './agent/runner.js';
-export { RealWorkspaceManager } from './workspace/manager.js';
-export type { WorkspaceManager } from './workspace/manager.js';
+export { createWorkspaceManager, RealWorkspaceManager } from './workspace/manager.js';
+export type { WorkspaceManager, WorkspaceManagerOpts } from './workspace/manager.js';
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1212,7 +1227,8 @@ plan. The executor reads it back (`mr.description`) for prompt context only.
 ```ts
 // append to packages/core/src/reconciler/index.test.ts
 import { executeAction } from './index.js';
-import { RealWorkspaceManager } from '../workspace/manager.js';
+import { createWorkspaceManager } from '../workspace/manager.js';
+import type { WorkspaceManager } from '../workspace/manager.js';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1286,7 +1302,7 @@ async function bareRemote(): Promise<string> {
 
 // Build a ReconcileDeps bag + snapshot for the `work` action.
 function makeDeps(remote: string, root: string, forge: any, runner: ClaudeRunner) {
-  const wm = new RealWorkspaceManager(root, localRunner, 'gitlab');
+  const wm = createWorkspaceManager({ root, runner: localRunner, forgeOf: () => 'gitlab' });
   return {
     adapter: forge,
     workspace: wm,
@@ -1319,7 +1335,7 @@ describe('executeAction — work case', () => {
     await executeAction({ kind: 'work', issueNumber: 5 }, snapshot as any, deps as any);
 
     // workspace created on the issue branch
-    const dir = (deps.workspace as RealWorkspaceManager).pathFor(remote, 5);
+    const dir = (deps.workspace as WorkspaceManager).pathFor(remote, 5);
     const { stdout: branch } = await execa('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD']);
     expect(branch.trim()).toBe('maestro/issue-5');
 
@@ -1492,28 +1508,26 @@ git commit -m "test(core): verify M3 workspace+agent suite green"
 - **`work` case wiring (ensure → prompt → run → push; needs_input→block; done→inline handoff in the SAME tick; in_progress→leave)** → Tasks 11–12, against M1's single `ReconcileDeps` bag and `executeAction`.
 - **No description clobber** → Task 12 reads `mr.description` for context only and never calls `updateMrDescription` with the summary (asserted in the test).
 - **Shared exec seam** → `ClaudeRunner` and `WorkspaceManager` take a `CommandRunner` from `util/exec.ts` (default `execaRunner`); reconciler-level git (diff/push) uses the injectable `deps.exec` off the `ReconcileDeps` bag, not a module-level `execaRunner` import; no `execa` import in M3 production code, no `argsPrefix` hack.
-- **Types/paths** — all collaborator symbols (`AgentResult`, `AgentStatus`, `PermissionMode`, `WorkflowConfig`, `ForgeAdapter`, `WorkspaceManager`, `ClaudeRunner`, `RunnerOpts`, `CommandRunner`, `ReconcileDeps`, `runHandoff`) come from contracts/owning modules; only `RealWorkspaceManager`, `RealClaudeRunner`, `buildAgentPrompt`, and `AgentPromptParts` are new to M3. No `WorkDeps`/`executeWork` — the `work` case lives inside M1's `executeAction`.
+- **Workspace construction** → `createWorkspaceManager({ root, runner, forgeOf })` (contract-pinned, M3-owned); the manager resolves each repo's forge via `forgeOf(repoUrl)` so a multi-forge daemon clones with the right CLI. Single-repo callers pass `forgeOf: () => theForge`.
+- **Types/paths** — all collaborator symbols (`AgentResult`, `AgentStatus`, `PermissionMode`, `WorkflowConfig`, `ForgeAdapter`, `Forge`, `WorkspaceManager`, `ClaudeRunner`, `RunnerOpts`, `CommandRunner`, `ReconcileDeps`, `runHandoff`) come from contracts/owning modules; only `createWorkspaceManager`, `WorkspaceManagerOpts`, `RealWorkspaceManager`, `RealClaudeRunner`, `buildAgentPrompt`, and `AgentPromptParts` are new to M3. No `WorkDeps`/`executeWork` — the `work` case lives inside M1's `executeAction`.
 
 ---
 
 ## Open questions
 
-These are gaps the contracts (`maestro-00-contracts.md`) still do not cover. The
-former Q1 (MR description read-back), Q2 (reconciler DI shape), Q3 (clone auth),
-Q4 (push remote/force), and Q5 (`enforceDiskCap` call site + size parser) are now
-**resolved by the reconciled contract** — `MergeRequest.description` +
-`getMrDescription`; one `ReconcileDeps` bag with `executeAction`; forge-CLI clone;
-plain `git push -u origin` (no amends/force); `parseSize` + `enforceDiskCap`
-per-tick in `daemon/loop.ts`.
+The contract (`maestro-00-contracts.md`) now resolves the items M3 once flagged:
+former Q1 (MR description read-back) → `MergeRequest.description` + `getMrDescription`;
+Q2 (reconciler DI shape) → one `ReconcileDeps` bag with `executeAction`; Q3 (clone
+auth) → per-repo forge-CLI clone; Q4 (push remote/force) → plain `git push -u origin`
+(no amends/force); Q5 (`enforceDiskCap` call site + size parser) → `parseSize` +
+`enforceDiskCap` per-tick in `daemon/loop.ts`; cleanup-mode routing → `on_terminal`
+has the `cleanup` action call `workspace.remove`, `lru` has `daemon/loop.ts` call
+`enforceDiskCap` per tick (both may coexist; M3 provides both `remove` and
+`enforceDiskCap`, the wiring lives in M4/M5).
 
-1. **`cleanup: on_terminal` vs `lru` routing.** `WorkspacesCfg.cleanup` has two
-   modes; the contract says both may coexist (`cleanup` action calls
-   `workspace.remove`; `lru` calls `enforceDiskCap` per tick). M3 implements both
-   `remove` and `enforceDiskCap`, but which executor invokes `remove` on
-   `on_terminal` (the `cleanup` action, M4) vs the daemon loop is a wiring detail
-   left to M4/M5 — not an M3 concern.
+Only one genuinely-open item remains:
 
-2. **stream-json result shape stability.** `parseAgentResult` assumes the final
+1. **stream-json result shape stability.** `parseAgentResult` assumes the final
    status lives in a fenced \`\`\`json block inside the `type:"result"` line's
    `result` string (with a whole-output fallback). If a future `claude` version
    changes the stream-json envelope, the parser's line/field assumptions may need

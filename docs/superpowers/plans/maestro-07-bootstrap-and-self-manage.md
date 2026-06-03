@@ -18,12 +18,12 @@
 |---|---|---|
 | `templates/WORKFLOW.md` | Default `WORKFLOW.md` template: front matter matching `WorkflowConfig` (placeholders `{{project}}`/`{{forge}}`/`{{botUser}}`/`{{defaultBranch}}`/`{{proofType}}`/`{{proofCommand}}`) + prompt body embedding `DEFAULT_PROTOCOL`. | Create |
 | `packages/core/src/agent/protocol.ts` | `DEFAULT_PROTOCOL` prompt fragment (the §9 operating protocol). Owned here per contracts; M7 consumes it for the template body. | Create |
-| `packages/core/src/bootstrap/onboard.ts` | `inferTestCommand`, `inferFramework`, `seedWorkflow`, `buildOnboardingPrompt`, `onboardRepo`. Pure inference + one issue-create call. | Create |
+| `packages/core/src/bootstrap/onboard.ts` | `inferTestCommand`, `inferFramework`, `seedWorkflow`, `buildOnboardingPrompt`, `onboardRepo`, `loadDefaultTemplate` (core-owned template resolver). Pure inference + one issue-create call. | Create |
 | `packages/core/src/bootstrap/onboard.test.ts` | Unit tests: inference helpers, seeding, `onboardRepo` against a fake forge. | Create |
 | `packages/core/src/agent/protocol.test.ts` | `DEFAULT_PROTOCOL` shape assertions. | Create |
 | `packages/core/src/config/load.ts` | Add `validateConfig` gate so a broken config is rejected before the hot-reload callback fires. | Modify |
 | `packages/core/src/config/load.test.ts` | Test: malformed config rejected before reload; valid config reloads. | Modify (or create if absent) |
-| `packages/core/src/index.ts` | Export `onboardRepo`, `seedWorkflow`, inference helpers, `DEFAULT_PROTOCOL`, `validateConfig`. | Modify |
+| `packages/core/src/index.ts` | Export `onboardRepo`, `seedWorkflow`, inference helpers, `loadDefaultTemplate`, `DEFAULT_PROTOCOL`, `validateConfig`. | Modify |
 | `packages/cli/src/commands/add.ts` | After clone + label/board setup, when no `WORKFLOW.md`, call `onboardRepo`. | Modify |
 | `packages/cli/src/commands/add.test.ts` | Test: `add` triggers `onboardRepo` only when `WORKFLOW.md` absent. | Modify (or create if absent) |
 
@@ -805,6 +805,33 @@ export async function onboardRepo(args: OnboardArgs): Promise<OnboardResult> {
 }
 ```
 
+> **Template resolution (M7-owned per contracts):** the canonical
+> `templates/WORKFLOW.md` lives at the monorepo/install root. `core` owns the
+> resolver so callers never guess a path. Add this helper to the same module:
+>
+> ```ts
+> // append to packages/core/src/bootstrap/onboard.ts
+> import { readFileSync } from 'node:fs';
+> import { fileURLToPath } from 'node:url';
+> import { dirname, join } from 'node:path';
+>
+> /**
+>  * Load the canonical default WORKFLOW.md template (contracts file tree:
+>  * `templates/WORKFLOW.md`). Resolved relative to THIS module via import.meta.url
+>  * so it works the same from the source tree and a packaged/installed daemon
+>  * (`/opt/maestro`, spec §14) — the template ships alongside `packages/`.
+>  * From packages/core/src/bootstrap/onboard.ts → ../../../../templates/WORKFLOW.md.
+>  */
+> export function loadDefaultTemplate(): string {
+>   const here = dirname(fileURLToPath(import.meta.url));
+>   return readFileSync(join(here, '../../../../templates/WORKFLOW.md'), 'utf8');
+> }
+> ```
+>
+> A unit test stubbing the file isn't worthwhile (it's a thin `readFileSync`); the
+> Task 12 typecheck + the real `add` path exercise it. Adjust the `../` depth to
+> match the actual build layout if `dist/` flattens differently.
+
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pnpm --filter @maestro/core test -- src/bootstrap/onboard.test.ts`
@@ -839,6 +866,7 @@ describe('core barrel — bootstrap exports', () => {
     expect(typeof core.inferTestCommand).toBe('function');
     expect(typeof core.inferFramework).toBe('function');
     expect(typeof core.buildOnboardingPrompt).toBe('function');
+    expect(typeof core.loadDefaultTemplate).toBe('function');
     expect(typeof core.DEFAULT_PROTOCOL).toBe('string');
     expect(core.ONBOARD_ISSUE_TITLE).toBe('Define my maestro workflow');
   });
@@ -860,6 +888,7 @@ export {
   buildOnboardingPrompt,
   inferTestCommand,
   inferFramework,
+  loadDefaultTemplate,
   ONBOARD_ISSUE_TITLE,
 } from './bootstrap/onboard.js';
 export type {
@@ -1248,10 +1277,11 @@ Then, in the existing `add` command action (after clone, `RepoEntry` append, and
 // inside the add action, after setup:
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadDefaultTemplate } from '@maestro/core';
 
 // `dest` is M5's clone dir (parseRepoUrl → join(cloneRoot, dirName)); `forge`
 // is the ForgeAdapter from createForge(); `log` is M5's logger.
-const template = readFileSync(resolveTemplatePath(), 'utf8'); // see Open question Q3
+const template = loadDefaultTemplate(); // core-owned; resolves templates/WORKFLOW.md via import.meta.url
 
 let packageJson: string | null = null;
 try {
@@ -1263,7 +1293,7 @@ try {
 const onboardResult = await maybeOnboard({
   repoDir: dest,
   forge,                      // the ForgeAdapter built via createForge() in M5
-  defaultBranch,              // see Open question Q6 — M5 add does not resolve this today
+  defaultBranch,              // resolved by M5's add via `git rev-parse --abbrev-ref HEAD` on the clone
   packageJson,
   template,
   // no deps override in production — uses real onboardRepo + loadWorkflow
@@ -1274,11 +1304,11 @@ if (onboardResult.onboarded) {
 }
 ```
 
-> `dest`, `forge`, and `log` exist in M5's `add.ts` — reuse them. Two values M5
-> does NOT currently provide are flagged in Open questions: the template path
-> (Q3) and `defaultBranch` (Q6). The real `ForgeAdapter` already exposes
-> `createIssue`, so production passes it straight to `onboardRepo`; the
-> `maybeOnboard` unit test injects fakes.
+> `dest`, `forge`, `defaultBranch`, and `log` all exist in M5's `add.ts` — reuse
+> them (M5 reads `defaultBranch` from the clone). The template comes from core's
+> `loadDefaultTemplate()`, so the CLI never resolves a path itself. The real
+> `ForgeAdapter` already exposes `createIssue`, so production passes it straight to
+> `onboardRepo`; the `maybeOnboard` unit test injects fakes.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1370,24 +1400,7 @@ flagged here rather than invented into canonical interfaces.
    issue body is incorporated into the runner prompt. Assumed: the standard
    "Orient" step (reads the issue) suffices. Confirm.
 
-2. **`templates/WORKFLOW.md` location at runtime.** Task 11 reads the template via
-   a `resolveTemplatePath()` placeholder. M5's `add.ts` does NOT define a
-   `repoRoot` (verified against `maestro-05-cli-and-web.md` — it has `cloneRoot`/
-   `dest`, no install-root anchor), so M7 cannot "reuse" one. In a packaged daemon
-   (`/opt/maestro`, spec §14) the template ships alongside `packages/`. Contracts
-   define `templates/WORKFLOW.md` as the canonical path (file tree) but no
-   resolution helper. Proposed: `core` exports `loadDefaultTemplate()` resolving
-   relative to its own module (`import.meta.url`) rather than the CLI reading a
-   path it has to guess. Confirm approach + helper ownership.
-
-3. **Default-branch detection during `add`.** Task 11 passes `defaultBranch` into
-   onboarding. Verified against `maestro-05-cli-and-web.md`: M5's `add` clones
-   `--depth 1` and does NOT resolve a default branch — so this value is not
-   available today. Either M5 must add detection (e.g. `git symbolic-ref
-   refs/remotes/origin/HEAD` or the forge API) or M7 must resolve it before
-   calling `maybeOnboard`. Where should default-branch resolution live?
-
-4. **Package-manager detection for `inferTestCommand`.** The helper accepts a
+2. **Package-manager detection for `inferTestCommand`.** The helper accepts a
    `packageManager` option but `onboardRepo` currently always infers `npm`.
    Detecting pnpm/yarn requires inspecting lockfiles in the clone, which the
    contracts do not model. Assumed `npm` as the safe default; the agent corrects

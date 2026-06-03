@@ -470,11 +470,19 @@ export interface WorkspaceManager {
   enforceDiskCap(capBytes: number): Promise<void>;                  // LRU eviction of terminal/oldest
   pathFor(repoUrl: string, issueNumber: number): string;            // sanitized, MUST stay under root
 }
+
+// Construction (M3 owns). The daemon watches many repos across both forges, so the
+// manager resolves each repo's forge via a `forgeOf` callback (derived from config).
+export function createWorkspaceManager(opts: {
+  root: string;
+  runner: CommandRunner;                       // from util/exec.ts
+  forgeOf: (repoUrl: string) => Forge;         // single-repo callers pass `() => theForge`
+}): WorkspaceManager;
 ```
 
 - **Clone uses the forge CLI** (`glab repo clone` / `gh repo clone`) so tokens are
   handled by the CLI and never embedded in URLs or logs. `WorkspaceManager` takes the
-  `CommandRunner` (from `util/exec.ts`) + the repo's `forge`.
+  `CommandRunner` (from `util/exec.ts`) and resolves each repo's `forge` via `forgeOf`.
 - **Push:** plain `git push -u origin <branch>` (fast-forward). Agents must not amend
   pushed history; no `--force`.
 - **Cleanup:** `cleanup: 'on_terminal'` → the `cleanup` action calls `workspace.remove`;
@@ -493,6 +501,15 @@ export interface SlotManager {
 }
 ```
 
+- **Slots are keyed by `(repoUrl, issueNumber)`** — never issue number alone (issues
+  collide across watched repos). The in-memory implementing class (M1 owns; do NOT name
+  it `RunState` — that's the data interface above) is constructed with the global cap and
+  a `watchedRepos: () => number` source so `snapshot()` can fill `totals.watchedRepos`:
+  `createSlotManager({ globalMax, watchedRepos })` or equivalent. `snapshot().running`
+  entries carry `lifecycle: 'in_progress'` (a held slot = an actively-working issue);
+  `queued` is empty until queueing exists. State is rebuilt from the forge on restart.
+- **`daemon/loop.ts`** builds a `ForgeAdapter` per `RepoEntry` via `createForge` (never
+  `MemoryForge` in production) and calls `reconcileRepo` per repo per tick.
 - `maestro status` reaches the daemon via HTTP `GET http://<web.host>:<web.port>/api/state`
   (`MAESTRO_DAEMON_URL` overrides). Web is **read-only**, loopback by default.
 - The web/CLI dashboard view derives its rows by mapping `RunningEntry` → its display
@@ -537,6 +554,14 @@ with the caveat that committed video bloats git history permanently (use git LFS
   field shapes (a setup task in M2/M6).
 - Booting/seeding a local instance for proof is **deferred**; M4 assumes an already-running
   instance at `environment.baseUrl`.
+- **`maestro add` inspection clone:** `add` clones via the **forge CLI**
+  (`glab repo clone <project> <dest> -- --depth 1` / `gh repo clone <project> <dest> -- --depth 1`)
+  — same transport as `WorkspaceManager`, so private repos authenticate. The repo's
+  **default branch** is read from that clone (`git -C <dest> rev-parse --abbrev-ref HEAD`)
+  and passed into onboarding; there is no bare `https` clone.
+- **Default WORKFLOW.md template:** `core` exports `loadDefaultTemplate(): string` (M7 owns),
+  resolving `templates/WORKFLOW.md` relative to its own module (`import.meta.url`). Callers
+  (`maestro add`) use it instead of guessing a filesystem path.
 
 ## Conventions for all plans
 
@@ -583,3 +608,11 @@ isn't lost. The body is the single source of truth; nothing below overrides it.
   per-repo review config to the adapter (so `changesRequested` derivation needs no workflow arg);
   `ReconcileDeps.exec` and `ProofContext.exec` carry the shared `CommandRunner` for git ops in the
   handoff routine and subprocesses in proof strategies. (closed M2/M6 review-threading + M3/M4 git-runner gaps)
+- **Daemon state model (from open-questions re-audit, 2026-06-03)** — `SlotManager` is keyed by
+  `(repoUrl, issueNumber)` (fixes the multi-repo issue-number collision); the M1 impl class is NOT
+  named `RunState` (that's the data interface) and is constructed with a `watchedRepos` source so
+  `snapshot(): RunState` fills `totals`. (closed M1 daemon-state divergence)
+- **`add`/onboarding bootstrap seam (from open-questions re-audit, 2026-06-03)** — `maestro add`
+  clones via the forge CLI (private-repo auth, A7 transport) and reads the default branch from the
+  clone; `createWorkspaceManager({ root, runner, forgeOf })` is the M3-owned factory; `core` exports
+  `loadDefaultTemplate()` for the seed template. (closed M5#1/#2, M7#2/#3 cross-plan gaps)

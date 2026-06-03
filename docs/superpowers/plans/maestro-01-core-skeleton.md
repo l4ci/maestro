@@ -43,7 +43,7 @@ packages/core/src/
   reconciler/derive.ts                ✦ deriveLifecycle (pure)
   reconciler/decide.ts                ✦ decideAction (pure)
   reconciler/index.ts                 ✦ reconcileRepo(deps): Promise<void> — derive+decide+executeAction
-  daemon/state.ts                     ✦ SlotManager + RunState (in-memory slots, rebuilt from forge)
+  daemon/state.ts                     ✦ SlotManager/RunState/RunningEntry + InMemorySlots (rebuilt from forge)
   daemon/scheduler.ts                 ✦ per-repo active/idle cadence + jitter (injected clock)
   daemon/loop.ts                      ✦ tick()
   logger.ts                           ✦ structured logger
@@ -1985,13 +1985,12 @@ interface Fakes {
   removed: number[];
 }
 
-// Minimal SlotManager fake (real RunState lands in Task 14). M1's reconciler
-// does not call slot methods, so a no-op gate suffices here.
+// Minimal SlotManager fake (real InMemorySlots lands in Task 14). Always grants a
+// slot so the work executor runs; the gate itself is unit-tested in Task 14.
 const fakeSlots: SlotManager = {
-  tryClaimSlot: () => true,
-  releaseSlot: () => {},
-  isActive: () => false,
-  activeCount: () => 0,
+  tryAcquire: () => true,
+  release: () => {},
+  snapshot: () => ({ running: [], queued: [], totals: { active: 0, watchedRepos: 1 } }),
 };
 
 // Minimal CommandRunner fake (git ops are exercised by M4's handoff impl, not M1).
@@ -2265,15 +2264,30 @@ export interface CommandRunner {
 }
 ```
 
-Also create `packages/core/src/daemon/state.ts` with **just the `SlotManager` interface** now (the `RunState` class that implements it is added in Task 14, which appends to this file):
+Also create `packages/core/src/daemon/state.ts` with **the contract's data interfaces + the `SlotManager` interface** now (the implementing class `InMemorySlots` is added in Task 14, which appends to this file):
 
 ```ts
+import type { LifecycleState } from '../domain/types.js';
+
+// The daemon's read-only state snapshot (also the shape served at GET /api/state in M5).
+export interface RunningEntry {
+  repoUrl: string;
+  issueNumber: number;
+  lifecycle: LifecycleState;
+  startedAt: number; // ms epoch
+}
+export interface RunState {
+  running: RunningEntry[];
+  queued: RunningEntry[];
+  totals: { active: number; watchedRepos: number };
+}
+
 // Concurrency gate consumed by the reconciler (contract bag field `slots`).
+// Slots are keyed by (repoUrl, issueNumber) so multiple repos don't collide.
 export interface SlotManager {
-  tryClaimSlot(issueNumber: number): boolean;
-  releaseSlot(issueNumber: number): void;
-  isActive(issueNumber: number): boolean;
-  activeCount(): number;
+  tryAcquire(repoUrl: string, issueNumber: number): boolean;
+  release(repoUrl: string, issueNumber: number): void;
+  snapshot(): RunState;
 }
 ```
 
@@ -2353,20 +2367,26 @@ export async function reconcileRepo(deps: ReconcileDeps): Promise<void> {
 async function runWork(snapshot: IssueSnapshot, deps: ReconcileDeps): Promise<void> {
   const { adapter, workflow, repoUrl } = deps;
   const n = snapshot.issue.number;
-  const branch = branchFor(n);
-  const dir = await deps.workspace.ensure(repoUrl, n, branch);
-  const result: AgentResult = await deps.runner.run(dir, workflow.promptBody, {
-    command: workflow.claude.command,
-    maxTurns: workflow.claude.maxTurns,
-    permissionMode: workflow.claude.permissionMode,
-  });
-  if (result.status === 'needs_input') {
-    await adapter.setLifecycleLabel(n, 'blocked');
-    await adapter.comment({ type: 'issue', number: n }, result.summary);
-  } else if (result.status === 'done') {
-    await handoff(snapshot, deps);
+  // Concurrency gate: skip this tick if no slot is available (keyed by repoUrl+issue).
+  if (!deps.slots.tryAcquire(repoUrl, n)) return;
+  try {
+    const branch = branchFor(n);
+    const dir = await deps.workspace.ensure(repoUrl, n, branch);
+    const result: AgentResult = await deps.runner.run(dir, workflow.promptBody, {
+      command: workflow.claude.command,
+      maxTurns: workflow.claude.maxTurns,
+      permissionMode: workflow.claude.permissionMode,
+    });
+    if (result.status === 'needs_input') {
+      await adapter.setLifecycleLabel(n, 'blocked');
+      await adapter.comment({ type: 'issue', number: n }, result.summary);
+    } else if (result.status === 'done') {
+      await handoff(snapshot, deps);
+    }
+    // 'in_progress' → leave label in_progress (nothing to do).
+  } finally {
+    deps.slots.release(repoUrl, n);
   }
-  // 'in_progress' → leave label in_progress (nothing to do).
 }
 
 // The inline handoff routine (contract "Handoff order").
@@ -2449,13 +2469,13 @@ git commit -m "feat(core): add reconcileRepo executor over injected collaborator
 
 ---
 
-## Task 14: daemon RunState (in-memory slots, rebuilt from forge)
+## Task 14: daemon SlotManager (in-memory slots, rebuilt from forge)
 
 **Files:**
-- Modify: `packages/core/src/daemon/state.ts` (append `RunState`; the `SlotManager` interface was created in Task 13)
+- Modify: `packages/core/src/daemon/state.ts` (append `InMemorySlots`; the `SlotManager`/`RunState`/`RunningEntry` interfaces were created in Task 13)
 - Test: `packages/core/src/daemon/state.test.ts`
 
-> No persistence. `RunState implements SlotManager` and tracks running slots (issues currently `in_progress`) and counts. `rebuildFromForge(forge)` derives the active set from the forge (issues whose derived lifecycle is `in_progress`) — proving restart-safety. `tryClaimSlot` / `releaseSlot` enforce `globalMax`.
+> No persistence. `InMemorySlots implements SlotManager` and tracks held slots keyed by `(repoUrl, issueNumber)`. `tryAcquire`/`release` enforce `globalMax`; `snapshot()` returns the contract `RunState` data shape. `rebuildFromForge(repoUrl, forge)` re-derives the held set for a repo from the forge (issues whose derived lifecycle is `in_progress`) — proving restart-safety. Constructed via `createSlotManager({ globalMax, watchedRepos })` where `watchedRepos` is a `() => number` so the snapshot's `totals.watchedRepos` reflects live config.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2463,10 +2483,13 @@ git commit -m "feat(core): add reconcileRepo executor over injected collaborator
 
 ```ts
 import { describe, it, expect, beforeEach } from 'vitest';
-import { RunState } from './state.js';
+import { createSlotManager } from './state.js';
+import type { SlotManager } from './state.js';
 import { MemoryForge } from '../forge/memory.js';
 import { lifecycleLabel } from '../domain/lifecycle.js';
 import type { Issue } from '../domain/types.js';
+
+const REPO = 'gitlab.com/group/api';
 
 function seed(forge: MemoryForge, n: number, labels: string[] = []): void {
   const i: Issue = {
@@ -2484,45 +2507,63 @@ function seed(forge: MemoryForge, n: number, labels: string[] = []): void {
   forge.seedIssue(i);
 }
 
-describe('RunState slots', () => {
-  let state: RunState;
+describe('SlotManager slots', () => {
+  let slots: SlotManager;
   beforeEach(() => {
-    state = new RunState(2);
+    slots = createSlotManager({ globalMax: 2, watchedRepos: () => 1 });
   });
 
-  it('claims up to globalMax then refuses', () => {
-    expect(state.tryClaimSlot(1)).toBe(true);
-    expect(state.tryClaimSlot(2)).toBe(true);
-    expect(state.tryClaimSlot(3)).toBe(false);
-    expect(state.activeCount()).toBe(2);
+  it('acquires up to globalMax then refuses', () => {
+    expect(slots.tryAcquire(REPO, 1)).toBe(true);
+    expect(slots.tryAcquire(REPO, 2)).toBe(true);
+    expect(slots.tryAcquire(REPO, 3)).toBe(false);
+    expect(slots.snapshot().totals.active).toBe(2);
   });
 
-  it('claiming the same issue twice is idempotent', () => {
-    expect(state.tryClaimSlot(1)).toBe(true);
-    expect(state.tryClaimSlot(1)).toBe(true);
-    expect(state.activeCount()).toBe(1);
+  it('acquiring the same (repo, issue) twice is idempotent', () => {
+    expect(slots.tryAcquire(REPO, 1)).toBe(true);
+    expect(slots.tryAcquire(REPO, 1)).toBe(true);
+    expect(slots.snapshot().totals.active).toBe(1);
+  });
+
+  it('keys slots by repoUrl (same issue number in two repos counts twice)', () => {
+    expect(slots.tryAcquire('repo-a', 1)).toBe(true);
+    expect(slots.tryAcquire('repo-b', 1)).toBe(true);
+    expect(slots.snapshot().totals.active).toBe(2);
   });
 
   it('releasing frees a slot', () => {
-    state.tryClaimSlot(1);
-    state.tryClaimSlot(2);
-    state.releaseSlot(1);
-    expect(state.activeCount()).toBe(1);
-    expect(state.tryClaimSlot(3)).toBe(true);
+    slots.tryAcquire(REPO, 1);
+    slots.tryAcquire(REPO, 2);
+    slots.release(REPO, 1);
+    expect(slots.snapshot().totals.active).toBe(1);
+    expect(slots.tryAcquire(REPO, 3)).toBe(true);
+  });
+
+  it('snapshot reports running entries and watchedRepos', () => {
+    slots.tryAcquire(REPO, 7);
+    const snap = slots.snapshot();
+    expect(snap.totals.watchedRepos).toBe(1);
+    expect(snap.queued).toEqual([]);
+    expect(snap.running).toHaveLength(1);
+    expect(snap.running[0]!.repoUrl).toBe(REPO);
+    expect(snap.running[0]!.issueNumber).toBe(7);
+    expect(snap.running[0]!.lifecycle).toBe('in_progress');
+    expect(typeof snap.running[0]!.startedAt).toBe('number');
   });
 });
 
-describe('RunState.rebuildFromForge', () => {
-  it('derives active slots from in_progress issues (restart-safe)', async () => {
+describe('SlotManager.rebuildFromForge', () => {
+  it('derives held slots from a repo\'s in_progress issues (restart-safe)', async () => {
     const forge = new MemoryForge({ forge: 'gitlab', project: 'group/api', botUser: 'maestro-bot' });
     seed(forge, 1, [lifecycleLabel('gitlab', 'in_progress')]);
     seed(forge, 2, [lifecycleLabel('gitlab', 'in_review')]);
     seed(forge, 3, []);
-    const state = new RunState(5);
-    await state.rebuildFromForge(forge);
-    expect(state.activeCount()).toBe(1);
-    expect(state.isActive(1)).toBe(true);
-    expect(state.isActive(2)).toBe(false);
+    const slots = createSlotManager({ globalMax: 5, watchedRepos: () => 1 });
+    await slots.rebuildFromForge(REPO, forge);
+    const snap = slots.snapshot();
+    expect(snap.totals.active).toBe(1);
+    expect(snap.running.map((e) => e.issueNumber)).toEqual([1]);
   });
 });
 ```
@@ -2532,65 +2573,86 @@ describe('RunState.rebuildFromForge', () => {
 Run: `npx vitest run packages/core/src/daemon/state.test.ts`
 Expected: FAIL — `Failed to resolve import "./state.js"`.
 
-- [ ] **Step 3: Write minimal implementation (append `RunState` to `state.ts`)**
+- [ ] **Step 3: Write minimal implementation (append `InMemorySlots` to `state.ts`)**
 
-Append to `packages/core/src/daemon/state.ts` (the `SlotManager` interface already lives there from Task 13). M1 keys slots by `issueNumber`; M5 reconciles the full `(repoUrl, issueNumber)` `SlotManager` + `RunState` data-shape split from the contract.
+Append to `packages/core/src/daemon/state.ts` (the `SlotManager`/`RunState`/`RunningEntry` interfaces already live there from Task 13). Slots are keyed by `(repoUrl, issueNumber)` via a `\`${repoUrl} ${issueNumber}\`` map so multiple repos don't collide.
 
 ```ts
 import type { ForgeAdapter } from '../forge/adapter.js';
 import { deriveLifecycle } from '../reconciler/derive.js';
-// SlotManager is declared above in this same file (added in Task 13).
+// SlotManager / RunState / RunningEntry are declared above in this same file (Task 13).
+
+const key = (repoUrl: string, issueNumber: number): string => `${repoUrl} ${issueNumber}`;
+
+export interface SlotManagerInit {
+  globalMax: number;
+  watchedRepos: () => number; // live count for snapshot().totals.watchedRepos
+}
 
 // In-memory only. The single piece of daemon state; rebuilt from the forge on
-// restart (no persistence). Tracks which issues currently hold an active slot.
-export class RunState implements SlotManager {
-  private active = new Set<number>();
+// restart (no persistence). Holds one slot per actively-worked (repo, issue).
+export class InMemorySlots implements SlotManager {
+  private readonly held = new Map<string, RunningEntry>();
 
-  constructor(private readonly globalMax: number) {}
+  constructor(private readonly init: SlotManagerInit) {}
 
-  activeCount(): number {
-    return this.active.size;
-  }
-  isActive(issueNumber: number): boolean {
-    return this.active.has(issueNumber);
-  }
-
-  // Claim a slot for an issue. Idempotent. Returns false if at capacity.
-  tryClaimSlot(issueNumber: number): boolean {
-    if (this.active.has(issueNumber)) return true;
-    if (this.active.size >= this.globalMax) return false;
-    this.active.add(issueNumber);
+  // Acquire a slot for (repoUrl, issue). Idempotent. Returns false if at capacity.
+  tryAcquire(repoUrl: string, issueNumber: number): boolean {
+    const k = key(repoUrl, issueNumber);
+    if (this.held.has(k)) return true;
+    if (this.held.size >= this.init.globalMax) return false;
+    this.held.set(k, { repoUrl, issueNumber, lifecycle: 'in_progress', startedAt: Date.now() });
     return true;
   }
 
-  releaseSlot(issueNumber: number): void {
-    this.active.delete(issueNumber);
+  release(repoUrl: string, issueNumber: number): void {
+    this.held.delete(key(repoUrl, issueNumber));
   }
 
-  // Restart-safety: re-derive active set from the forge's in_progress issues.
-  async rebuildFromForge(forge: ForgeAdapter): Promise<void> {
-    this.active.clear();
+  snapshot(): RunState {
+    return {
+      running: [...this.held.values()],
+      queued: [],
+      totals: { active: this.held.size, watchedRepos: this.init.watchedRepos() },
+    };
+  }
+
+  // Restart-safety: re-derive held slots for a repo from its in_progress issues.
+  async rebuildFromForge(repoUrl: string, forge: ForgeAdapter): Promise<void> {
+    for (const k of [...this.held.keys()]) {
+      if (k.startsWith(`${repoUrl} `)) this.held.delete(k);
+    }
     const issues = await forge.listAssignedOpenIssues();
     for (const issue of issues) {
       const mr = await forge.getMrForIssue(issue.number);
       if (deriveLifecycle(forge.forge, issue, mr) === 'in_progress') {
-        this.active.add(issue.number);
+        this.held.set(key(repoUrl, issue.number), {
+          repoUrl,
+          issueNumber: issue.number,
+          lifecycle: 'in_progress',
+          startedAt: Date.now(),
+        });
       }
     }
   }
+}
+
+// Factory matching the contract's construction shape.
+export function createSlotManager(init: SlotManagerInit): InMemorySlots {
+  return new InMemorySlots(init);
 }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run packages/core/src/daemon/state.test.ts`
-Expected: PASS — `5 passed`.
+Expected: PASS — `6 passed`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add packages/core/src/daemon/state.ts packages/core/src/daemon/state.test.ts
-git commit -m "feat(core): add in-memory RunState rebuilt from forge"
+git commit -m "feat(core): add in-memory SlotManager rebuilt from forge"
 ```
 
 ---
@@ -2812,7 +2874,7 @@ Expected: PASS — `2 passed`.
 import { describe, it, expect } from 'vitest';
 import { tick, type TickDeps } from './loop.js';
 import { Scheduler } from './scheduler.js';
-import { RunState } from './state.js';
+import { createSlotManager, type InMemorySlots } from './state.js';
 import { MemoryForge } from '../forge/memory.js';
 import { lifecycleLabel } from '../domain/lifecycle.js';
 import type { DefaultsCfg } from '../config/schema.js';
@@ -2846,7 +2908,7 @@ const workflow: WorkflowConfig = {
   promptBody: 'do the work',
 };
 
-function reconcileDeps(forge: MemoryForge, slots: RunState): ReconcileDeps {
+function reconcileDeps(forge: MemoryForge, slots: InMemorySlots): ReconcileDeps {
   return {
     adapter: forge,
     workflow,
@@ -2877,7 +2939,7 @@ describe('tick', () => {
     forge.seedIssue(issue);
 
     const scheduler = new Scheduler(defaults, () => 0);
-    const state = new RunState(2);
+    const state = createSlotManager({ globalMax: 2, watchedRepos: () => 1 });
     const deps: TickDeps = {
       now: 1000,
       scheduler,
@@ -2901,7 +2963,7 @@ describe('tick', () => {
     });
     const scheduler = new Scheduler(defaults, () => 0);
     scheduler.schedule('gitlab.com/group/api', 1000, false); // due at 301000
-    const state = new RunState(2);
+    const state = createSlotManager({ globalMax: 2, watchedRepos: () => 1 });
     const deps: TickDeps = {
       now: 2000,
       scheduler,
@@ -2929,7 +2991,7 @@ Expected: FAIL — `Failed to resolve import "./loop.js"`.
 ```ts
 import { reconcileRepo, type ReconcileDeps } from '../reconciler/index.js';
 import { Scheduler } from './scheduler.js';
-import { RunState } from './state.js';
+import type { InMemorySlots } from './state.js';
 
 export interface RepoTickEntry {
   repoUrl: string;
@@ -2939,7 +3001,7 @@ export interface RepoTickEntry {
 export interface TickDeps {
   now: number; // injected clock (ms epoch)
   scheduler: Scheduler;
-  state: RunState;
+  state: InMemorySlots;
   repos: RepoTickEntry[];
 }
 
@@ -2950,9 +3012,9 @@ export async function tick(deps: TickDeps): Promise<void> {
   for (const entry of deps.repos) {
     if (!deps.scheduler.isDue(entry.repoUrl, deps.now)) continue;
     await reconcileRepo(entry.reconcile);
-    // Active cadence iff the forge shows in_progress work after reconcile.
-    await deps.state.rebuildFromForge(entry.reconcile.adapter);
-    const hasActiveWork = deps.state.activeCount() > 0;
+    // Active cadence iff the forge shows in_progress work for this repo after reconcile.
+    await deps.state.rebuildFromForge(entry.repoUrl, entry.reconcile.adapter);
+    const hasActiveWork = deps.state.snapshot().totals.active > 0;
     deps.scheduler.schedule(entry.repoUrl, deps.now, hasActiveWork);
   }
 }
@@ -3029,8 +3091,8 @@ export type { ProofArtifact, ProofContext, ProofStrategy } from './proof/index.j
 export type { WorkspaceManager } from './workspace/manager.js';
 export type { CommandRunner } from './util/exec.js';
 
-export { RunState } from './daemon/state.js';
-export type { SlotManager } from './daemon/state.js';
+export { InMemorySlots, createSlotManager } from './daemon/state.js';
+export type { SlotManager, RunState, RunningEntry, SlotManagerInit } from './daemon/state.js';
 export { Scheduler } from './daemon/scheduler.js';
 export { tick } from './daemon/loop.js';
 export type { TickDeps, RepoTickEntry } from './daemon/loop.js';
@@ -3110,7 +3172,7 @@ git commit -m "feat(core): add daemon tick loop, structured logger, public expor
 ```ts
 import {
   MemoryForge,
-  RunState,
+  createSlotManager,
   Scheduler,
   tick,
   createLogger,
@@ -3119,6 +3181,7 @@ import {
   type WorkflowConfig,
   type ReconcileDeps,
   type TickDeps,
+  type InMemorySlots,
 } from '@maestro/core';
 
 // --- demo config (in real use: loadConfig / loadWorkflow) ---
@@ -3149,7 +3212,7 @@ const workflow: WorkflowConfig = {
 
 // --- M3/M4 SEAMS: inline stubs. Replaced by real ClaudeRunner (M3),
 //     runProof (M4), and WorkspaceManager (M3). ---
-function buildReconcileDeps(forge: MemoryForge, slots: RunState): ReconcileDeps {
+function buildReconcileDeps(forge: MemoryForge, slots: InMemorySlots): ReconcileDeps {
   return {
     adapter: forge,
     workflow,
@@ -3199,15 +3262,19 @@ async function main(): Promise<void> {
     webUrl: 'https://memory/group/api/issues/1',
   });
 
+  const repoUrl = 'gitlab.com/group/api';
   const scheduler = new Scheduler(defaults);
-  const state = new RunState(defaults.concurrency.globalMax ?? 2);
-  await state.rebuildFromForge(forge);
+  const state = createSlotManager({
+    globalMax: defaults.concurrency.globalMax ?? 2,
+    watchedRepos: () => 1,
+  });
+  await state.rebuildFromForge(repoUrl, forge);
 
   const deps: TickDeps = {
     now: Date.now(),
     scheduler,
     state,
-    repos: [{ repoUrl: 'gitlab.com/group/api', reconcile: buildReconcileDeps(forge, state) }],
+    repos: [{ repoUrl, reconcile: buildReconcileDeps(forge, state) }],
   };
 
   // Run a few ticks to walk the lifecycle. The runner stub reports `done`, so the
@@ -3287,7 +3354,8 @@ git commit -m "chore: apply prettier formatting"
 - **Domain types/lifecycle/ForgeAdapter/derive/decide/config/workflow schemas:** all derived from the contracts (camelCase TS, snake_case YAML mapping) — including `MergeRequest.description`, `WorkflowConfig.review`, schema names `MaestroConfigSchema`/`WorkflowConfigSchema`. ✓
 - **State machine coverage:** `derive.test.ts` covers all five states; `decide.test.ts` covers the lifecycle→action table (`in_progress → work` always); `reconciler/index.test.ts` exercises a single-tick lifecycle new→in_progress→(work+done→inline handoff)→in_review→merge→done plus blocked and changes-requested. ✓
 - **Pure reconciler:** `derive.ts` and `decide.ts` import only domain types (+ `labeledStateOf`), do no I/O; `DecideContext` is `triggerOk`-only (no agent status). ✓
-- **No persistence / no cross-tick memory:** only `daemon/state.ts` holds in-memory slots; agent status is consumed in the same tick by the `work` executor; `rebuildFromForge` proves restart-safety. ✓
+- **No persistence / no cross-tick memory:** only `daemon/state.ts` holds in-memory slots; agent status is consumed in the same tick by the `work` executor; `rebuildFromForge(repoUrl, forge)` proves restart-safety. ✓
+- **SlotManager matches the contract:** `tryAcquire(repoUrl, issueNumber)`/`release(repoUrl, issueNumber)`/`snapshot(): RunState`, keyed by `(repoUrl, issueNumber)` so multiple repos don't collide; `InMemorySlots` implements it, `createSlotManager({ globalMax, watchedRepos })` constructs it. The `work` executor actually acquires/releases the slot (try-acquire gate + `finally` release). ✓
 - **Collaborator seams:** one `ReconcileDeps` bag with `adapter`/`workspace`/`runner`/`runProof`/`exec`/`slots`/`config`/`clock`; collaborator types imported from owning modules (`agent/runner.ts`, `proof/index.ts`, `workspace/manager.ts`, `util/exec.ts`, `daemon/state.ts`) as type-only seams; CLI uses clearly-marked inline stubs. ✓
 - **Commits:** Conventional Commits, explicit `git add <paths>`, no `Co-Authored-By`. ✓
 - **Out of scope respected:** no `glab`/`gh`/`claude`/proof/workspace real modules, no CLI commands beyond the daemon demo, no web. ✓
@@ -3300,4 +3368,4 @@ These are gaps the contracts (plan 00) did not fully specify; M1 made the minima
 
 1. **`enforceDiskCap` / LRU eviction is unexercised in M1.** `WorkspaceManager.enforceDiskCap` is declared (type-only seam) and the CLI stub no-ops it. The real LRU policy (`workspaces.cleanup: lru | on_terminal`, `disk_cap`) is M3's `WorkspaceManager`. No action needed in M1; flagged so M3 owns it.
 
-2. **`SlotManager`/`RunState` data-shape split.** M1's `SlotManager` keys slots by `issueNumber` and `RunState` is the implementing class. The contract's `daemon/state.ts` also defines a `RunState` *data* interface (`{ running, queued, totals }`) and a `SlotManager` keyed by `(repoUrl, issueNumber)` with `snapshot(): RunState`. M5 owns the HTTP `/api/state` surface and must reconcile these shapes; M1 deliberately kept the gate minimal since the reconciler does not yet call slot methods.
+2. **`RunState`/`/api/state` HTTP surface is deferred to M5.** M1 implements the contract `SlotManager` (`tryAcquire`/`release`/`snapshot(): RunState`) and the `RunState`/`RunningEntry` data shapes, but does not yet serve them over HTTP. `snapshot().queued` is always empty in M1 (no queueing policy yet); M5 owns `GET /api/state` and any queue semantics.
