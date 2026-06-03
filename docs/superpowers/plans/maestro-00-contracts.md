@@ -519,4 +519,64 @@ export interface SlotManager { tryAcquire(repoUrl: string, issueNumber: number):
   embed inline, vs. v1 text-reference-only (artifacts stay on the branch).
 - **changes-requested signal** (M2 Q3): forge-native "request changes" review vs.
   a reserved label vs. treating unapproval-after-approval as changes.
+
+---
+
+# Addendum B — user decisions resolved (2026-06-03)
+
+Resolves the A9 PENDING items. OVERRIDES A3/A9 where they conflict.
+
+## B1. Proof artifacts live in the repo, not via upload (resolves A9 / M4 Q1)
+
+No `uploadArtifact` on `ForgeAdapter` — **remove it from A3.** Instead:
+
+1. Proof strategies write artifacts into `<workspaceDir>/proof/` (e.g.
+   `proof/issue-<n>-<slug>.png`).
+2. The `handoff` routine **commits** `proof/` to the MR branch
+   (`chore: add proof artifacts for #<n>`) and pushes, so artifacts are
+   versioned on the branch.
+3. The proof comment (posted to **both** the issue and the MR) links to each
+   committed file via a new pure helper on `ForgeAdapter`:
+
+```ts
+blobUrl(branch: string, path: string): string;
+// GitLab:  https://<host>/<project>/-/blob/<branch>/<path>
+// GitHub:  https://<host>/<project>/blob/<branch>/<path>
+```
+
+Clicking a link opens the file in the forge's viewer (images render; video
+downloads/plays). Inline `![](…)` embedding is NOT guaranteed for private repos
+(raw URLs need auth) — links are the contract. Artifacts may be removed in a
+later commit after merge; they persist in history regardless.
+
+⚠️ **Default proof type stays `screenshot`-oriented.** Video proof is opt-in per
+repo (`proof.type: playwright` may record video) — with the documented caveat
+that committed video bloats git history permanently (use git LFS if heavy video
+proof is wanted). The default WORKFLOW.md template (M7) prefers screenshots.
+
+`ProofArtifact.path` is relative to `workspaceDir` (as A8). M4's handoff order
+becomes: runProof → **commit+push `proof/`** → comment (issue + MR) with
+`blobUrl` links → assignReviewer → setMrReady → label `in_review`.
+
+## B2. changes-requested signal is per-repo (resolves A9 / M2 Q3)
+
+`WorkflowConfig` gains:
+
+```ts
+review: {
+  changesSignal: 'native' | 'label';   // default: 'label'
+  changesLabel?: string;                // used when changesSignal==='label'; default maestro <scoped|flat> 'changes-requested'
+};
+```
+
+The forge adapter's `changesRequested` derivation reads `changesSignal`:
+- `'native'` → GitHub PR `reviewDecision === 'CHANGES_REQUESTED'`; GitLab →
+  unapproval after a prior approval + an unresolved reviewer thread.
+- `'label'` → the `changesLabel` is present on the issue/MR.
+
+When `changesSignal: 'label'`, `ensureLabels` also creates the changes-requested
+label (scoped on GitLab, flat on GitHub). Both adapters (M2/M6) implement both
+paths.
+
+**A9 is now fully resolved; no PENDING items remain.**
 ```
