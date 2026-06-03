@@ -377,4 +377,146 @@ export interface WorkspaceManager {
 - **No persistence:** state lives in the forge + `maestro.config.yaml`. The only in-memory daemon state is `daemon/state.ts` (running slots), rebuilt from the forge on restart.
 - **Pure reconciler:** `derive.ts` and `decide.ts` perform no I/O and import no adapter — unit-tested with plain objects.
 - **Each plan ends with an "Open questions" section** listing anything the contracts did not cover (do NOT invent it in the plan).
+
+---
+
+# Addendum A — resolutions from cross-plan review (2026-06-03)
+
+Filling gaps the M1–M7 plan-writers surfaced. These OVERRIDE the bodies above
+where they conflict. Items marked **PENDING** await a user decision (see report).
+
+## A1. Reconciler architecture (resolves M1 Q1/Q2, M3 Q2, M4 Q2)
+
+`reconciler/index.ts` (owned by M1; `work` case filled by M3; `handoff`/
+`review_check`/`merge` cases filled by M4) exports exactly:
+
+```ts
+export interface ReconcileDeps {
+  adapter: ForgeAdapter;
+  workflow: WorkflowConfig;
+  config: MaestroConfig;
+  repoUrl: string;
+  workspace: WorkspaceManager;          // from workspace/manager.ts (M3)
+  runner: ClaudeRunner;                  // from agent/runner.ts (M3)
+  runProof: typeof import('../proof/index.js').runProof;  // (M4)
+  slots: SlotManager;                    // concurrency gate, from daemon/state.ts
+  clock: () => number;
+}
+export async function reconcileRepo(deps: ReconcileDeps): Promise<void>;
+// internal: executeAction(action: Action, snapshot: IssueSnapshot, deps: ReconcileDeps): Promise<void>
+```
+
+There are **no per-executor deps bags**. Collaborator types are **imported from
+their owning modules**, never re-declared structurally.
+
+## A2. Agent status is consumed in the SAME tick (resolves M1 Q2)
+
+The agent's `done`/`needs_input` is **not** remembered across ticks. The `work`
+executor runs the agent, gets `AgentResult`, and acts immediately:
+- `done` → run the **handoff** routine inline (proof → comment → assign reviewer →
+  setMrReady → label `in_review`).
+- `needs_input` → `block` (label + comment).
+- `in_progress` → leave `in_progress`.
+
+Therefore `DecideContext` drops `agentDone`/`agentNeedsInput`; `decideAction` maps
+**only forge-derived lifecycle → action**: `in_progress → work` always. `handoff`
+is an internal routine invoked by the `work` executor, **not** a decided Action
+(the `Action.handoff` variant is retained as the routine's internal label but is
+never returned by `decideAction`). This keeps state forge-durable and removes
+cross-tick memory.
+
+## A3. ForgeAdapter additions
+
+Add to the `ForgeAdapter` interface:
+
+```ts
+createIssue(args: { title: string; body: string; assignee?: string }): Promise<Issue>;  // (M7 onboarding)
+getMrDescription(mrNumber: number): Promise<string>;                                     // (M3 context read)
+uploadArtifact(path: string): Promise<string>;  // returns markdown-embeddable ref — PENDING (see A9)
+```
+
+Add to `MergeRequest`: `description: string;` (the agent's living plan/checklist).
+
+`getMrForIssue` locates the MR/PR **by head branch `maestro/issue-<number>`**
+(both forges) — resolves M2 Q2 / M6 Q4. `reviewers` = **requested** reviewers
+(resolves M6 Q7). `assignReviewer` MAY perform a username→id lookup on GitLab
+(one extra call accepted — resolves M2 Q5).
+
+## A4. Shared exec seam (resolves M2 Q8, M3, M6 Q2)
+
+`packages/core/src/util/exec.ts` exports the single subprocess seam used by ALL
+adapters and runners (injectable for tests):
+
+```ts
+export interface CommandRunner { run(cmd: string, args: string[], opts?: { cwd?: string; input?: string; env?: Record<string,string> }): Promise<{ stdout: string; stderr: string; exitCode: number }>; }
+export const execaRunner: CommandRunner;   // production impl over execa
+```
+
+`createForge` and `ClaudeRunner` take a `CommandRunner` (default `execaRunner`).
+No plan declares its own `ExecFn`/`CommandRunner`.
+
+## A5. createForge signature (resolves M2 Q8, M5 Q4, M6 Q1)
+
+```ts
+// forge/factory.ts
+export interface ForgeDeps { config: MaestroConfig; runner?: CommandRunner; fetchImpl?: typeof fetch; }
+export function createForge(forge: Forge, repo: { url: string; project: string; botUser: string }, deps: ForgeDeps): ForgeAdapter;
+```
+
+`manageBoard` is enforced by the **caller** (daemon / `maestro add`): it calls
+`ensureBoard()` only when `workflow.manageBoard` is true (resolves M2 Q6).
+
+## A6. RunState + daemon IPC + config additions (resolves M5 Q1/Q2/Q3, M3 Q5)
+
+```ts
+// daemon/state.ts
+export interface RunningEntry { repoUrl: string; issueNumber: number; lifecycle: LifecycleState; startedAt: number; }
+export interface RunState { running: RunningEntry[]; queued: RunningEntry[]; totals: { active: number; watchedRepos: number }; }
+export interface SlotManager { tryAcquire(repoUrl: string, issueNumber: number): boolean; release(repoUrl: string, issueNumber: number): void; snapshot(): RunState; }
+```
+
+- `DefaultsCfg` gains `web: { port: number; host: string }` (default `{ port: 7330, host: '127.0.0.1' }`).
+- `maestro status` reaches the daemon via HTTP `GET http://<web.host>:<web.port>/api/state` (`MAESTRO_DAEMON_URL` overrides). Web is **read-only**, loopback by default.
+- `config/schema.ts` adds `parseSize(s: string): number` (bytes; e.g. "20GB"). `enforceDiskCap` is called by `daemon/loop.ts` once per tick.
+
+## A7. Workspace/clone/push conventions (resolves M3 Q3/Q4/Q6, M5 Q8)
+
+- **Clone uses the forge CLI** (`glab repo clone` / `gh repo clone`) so tokens are
+  handled by the CLI and never embedded in URLs or logs. `WorkspaceManager` takes
+  the `CommandRunner` + the repo's `forge`.
+- **Push:** plain `git push -u origin <branch>` (fast-forward). Agents must not
+  amend pushed history; no `--force`.
+- **Cleanup:** `cleanup: 'on_terminal'` → the `cleanup` action calls
+  `workspace.remove`; `cleanup: 'lru'` → `daemon/loop.ts` calls `enforceDiskCap`
+  per tick. Both modes may coexist.
+
+## A8. Misc resolutions
+
+- **`agent/protocol.ts` is owned solely by M3.** M7 **imports** `DEFAULT_PROTOCOL`
+  for the template; it does NOT redefine it. (resolves the M3/M7 collision)
+- `parseWorkflow(raw, forgeHint?: Forge)`: front-matter `forge` wins; else
+  `forgeHint`; `loadWorkflow(repoDir, forgeHint)` derives the hint from the repo's
+  configured host (resolves M1 Q3).
+- `claim` MR title = `snapshot.issue.title` (resolves M1 Q4).
+- zod schema export names are `MaestroConfigSchema` / `WorkflowConfigSchema`
+  (resolves M7 Q4). `watchConfig(path, cb)` fires `cb` **only on change**, not
+  initial load (resolves M7 Q5).
+- `ProofArtifact.path` is **relative to `workspaceDir`** (resolves M4 Q3).
+  Playwright base URL passed as env `PLAYWRIGHT_BASE_URL` (resolves M4 Q4).
+- `mergeStrategy: 'rebase'` (GitLab) → call `PUT .../rebase` then merge; document
+  reliance on project fast-forward setting if unavailable (resolves M2 Q4).
+- **Version-pin `glab` and `gh`** and record one real JSON fixture per read method
+  to lock field shapes (resolves M2 Q7, M6 Q6). Tracked as a setup task in M2.
+- `maestro run <issue>` takes `--repo <url>`, defaulting to the sole watched repo
+  (resolves M5 Q7). Daemon log = `logs/maestro.log`, JSON-lines; `maestro logs`
+  prints last-N (resolves M5 Q6; `--follow` deferred).
+- Booting/seeding a local instance for proof remains **deferred**; M4 assumes an
+  already-running instance at `environment.baseUrl` (confirms M4 Q5, spec §17).
+
+## A9. PENDING user decisions (do not finalize until resolved)
+
+- **Proof artifact surfacing** (M4 Q1): add `uploadArtifact` so videos/screenshots
+  embed inline, vs. v1 text-reference-only (artifacts stay on the branch).
+- **changes-requested signal** (M2 Q3): forge-native "request changes" review vs.
+  a reserved label vs. treating unapproval-after-approval as changes.
 ```
