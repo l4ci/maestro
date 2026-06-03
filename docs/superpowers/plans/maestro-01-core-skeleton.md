@@ -35,10 +35,15 @@ packages/core/src/
   workflow/load.ts                    ✦ parseWorkflow, loadWorkflow
   forge/adapter.ts                    ✦ ForgeAdapter interface, ForgeError, CreateMrArgs, CommentTarget
   forge/memory.ts                     ✦ MemoryForge (in-memory ForgeAdapter)
+  agent/contract.ts                   ✦ AgentResult/AgentStatus (type-only; M3 adds parseAgentResult)
+  agent/runner.ts                     ✦ ClaudeRunner interface (type-only seam; M3 adds impl)
+  proof/index.ts                      ✦ ProofArtifact/ProofContext/ProofStrategy (type-only seam; M4 adds runProof)
+  workspace/manager.ts                ✦ WorkspaceManager interface (type-only seam; M3 adds impl)
+  util/exec.ts                        ✦ CommandRunner interface (type-only seam; M2/M3 add execaRunner)
   reconciler/derive.ts                ✦ deriveLifecycle (pure)
   reconciler/decide.ts                ✦ decideAction (pure)
-  reconciler/index.ts                 ✦ reconcileRepo(deps) — derive+decide+execute
-  daemon/state.ts                     ✦ RunState (in-memory slots, rebuilt from forge)
+  reconciler/index.ts                 ✦ reconcileRepo(deps): Promise<void> — derive+decide+executeAction
+  daemon/state.ts                     ✦ SlotManager + RunState (in-memory slots, rebuilt from forge)
   daemon/scheduler.ts                 ✦ per-repo active/idle cadence + jitter (injected clock)
   daemon/loop.ts                      ✦ tick()
   logger.ts                           ✦ structured logger
@@ -308,9 +313,10 @@ export interface MergeRequest {
   isDraft: boolean;
   state: 'open' | 'merged' | 'closed';
   approved: boolean; // GitLab approval OR GitHub review state APPROVED
-  changesRequested: boolean; // a reviewer requested changes / unapproved
-  reviewers: string[];
+  changesRequested: boolean; // derived per WorkflowConfig.review.changesSignal
+  reviewers: string[]; // REQUESTED reviewers
   linkedIssueNumbers: number[]; // from "Closes #N"
+  description: string; // the agent's living plan/checklist (read back for context)
   webUrl: string;
 }
 
@@ -323,8 +329,8 @@ export interface IssueSnapshot {
 // One action per issue per tick. `noop` means nothing to do this tick.
 export type Action =
   | { kind: 'claim'; issueNumber: number } // new → create branch+draft MR, label in_progress
-  | { kind: 'work'; issueNumber: number } // run/resume agent (consumes a slot)
-  | { kind: 'handoff'; issueNumber: number } // proof → comment → assign reviewer → ready → in_review
+  | { kind: 'work'; issueNumber: number } // run/resume agent (consumes a slot); runs handoff inline on `done`
+  | { kind: 'handoff'; issueNumber: number } // INTERNAL label only — invoked inline by the `work` executor, never returned by decideAction
   | { kind: 'review_check'; issueNumber: number } // poll approval; approved→merge, changes→in_progress
   | { kind: 'merge'; issueNumber: number }
   | { kind: 'cleanup'; issueNumber: number } // terminal → drop workspace
@@ -551,9 +557,9 @@ git commit -m "feat(core): add parseDuration helper"
 Append to `packages/core/src/config/schema.test.ts`:
 
 ```ts
-import { maestroConfigSchema } from './schema.js';
+import { MaestroConfigSchema } from './schema.js';
 
-describe('maestroConfigSchema', () => {
+describe('MaestroConfigSchema', () => {
   const raw = {
     defaults: {
       poll_interval_active: '30s',
@@ -574,7 +580,7 @@ describe('maestroConfigSchema', () => {
   };
 
   it('parses a full config into the camelCase shape', () => {
-    const cfg = maestroConfigSchema.parse(raw);
+    const cfg = MaestroConfigSchema.parse(raw);
     expect(cfg.defaults.pollIntervalActive).toBe('30s');
     expect(cfg.defaults.botUser).toBe('maestro-bot');
     expect(cfg.defaults.concurrency.globalMax).toBe(2);
@@ -587,11 +593,11 @@ describe('maestroConfigSchema', () => {
   it('rejects an unknown cleanup value', () => {
     const bad = structuredClone(raw);
     (bad.defaults.workspaces as { cleanup: string }).cleanup = 'sometimes';
-    expect(() => maestroConfigSchema.parse(bad)).toThrow();
+    expect(() => MaestroConfigSchema.parse(bad)).toThrow();
   });
 
   it('rejects a config missing defaults', () => {
-    expect(() => maestroConfigSchema.parse({ forges: {}, repos: [] })).toThrow();
+    expect(() => MaestroConfigSchema.parse({ forges: {}, repos: [] })).toThrow();
   });
 });
 ```
@@ -599,7 +605,7 @@ describe('maestroConfigSchema', () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run packages/core/src/config/schema.test.ts`
-Expected: FAIL — `maestroConfigSchema` is not exported (import error / undefined).
+Expected: FAIL — `MaestroConfigSchema` is not exported (import error / undefined).
 
 - [ ] **Step 3: Write minimal implementation (append to schema.ts)**
 
@@ -667,7 +673,7 @@ const repoEntrySchema = z.object({
     .optional(),
 });
 
-export const maestroConfigSchema = z.object({
+export const MaestroConfigSchema = z.object({
   defaults: defaultsSchema,
   forges: z.object({ gitlab: forgeAuthSchema.optional(), github: forgeAuthSchema.optional() }),
   repos: z.array(repoEntrySchema),
@@ -725,7 +731,7 @@ git commit -m "feat(core): add MaestroConfig zod schema"
 - Create: `packages/core/src/config/load.ts`
 - Test: `packages/core/src/config/load.test.ts`
 
-> `loadConfig(path)` reads a YAML file, parses with `yaml`, validates with `maestroConfigSchema`. `watchConfig(path, cb)` uses `fs.watch`, re-runs `loadConfig` on change, calls `cb(config)` only on a valid parse (validate before reload), returns a `() => void` unsubscribe.
+> `loadConfig(path)` reads a YAML file, parses with `yaml`, validates with `MaestroConfigSchema`. `watchConfig(path, cb)` uses `fs.watch`, re-runs `loadConfig` on change, calls `cb(config)` only on a valid parse (validate before reload), returns a `() => void` unsubscribe.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -813,12 +819,12 @@ Expected: FAIL — `Failed to resolve import "./load.js"`.
 ```ts
 import { readFileSync, watch } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
-import { maestroConfigSchema, type MaestroConfig } from './schema.js';
+import { MaestroConfigSchema, type MaestroConfig } from './schema.js';
 
 export function loadConfig(path: string): MaestroConfig {
   const raw = readFileSync(path, 'utf8');
   const data = parseYaml(raw);
-  return maestroConfigSchema.parse(data) as MaestroConfig;
+  return MaestroConfigSchema.parse(data) as MaestroConfig;
 }
 
 // Watch a config file; call cb only when a change yields a valid config
@@ -854,7 +860,7 @@ git commit -m "feat(core): add config loader with validated hot-reload"
 **Files:**
 - Create: `packages/core/src/workflow/schema.ts`
 
-> Type-only file plus a zod schema; validated by Task 8's loader tests. The front matter YAML uses snake_case (`manage_board`, `require_label`, `allowed_actors`, `default_branch`, `merge_strategy`, `delete_source_branch`, `base_url`, `start_command`, `seed_command`, `health_check`, `max_turns`, `permission_mode`, `max_active`); zod maps to the camelCase `WorkflowConfig`. `forge` may be omitted in the file and is supplied by the loader (Task 8) from the repo host, so the schema treats it as optional and the loader fills it.
+> Type-only file plus a zod schema; validated by Task 8's loader tests. The front matter YAML uses snake_case (`manage_board`, `require_label`, `allowed_actors`, `changes_signal`, `changes_label`, `default_branch`, `merge_strategy`, `delete_source_branch`, `base_url`, `start_command`, `seed_command`, `health_check`, `max_turns`, `permission_mode`, `max_active`); zod maps to the camelCase `WorkflowConfig`. `forge` may be omitted in the file and is supplied by the loader (Task 8) from the repo host (`forgeHint`), so the schema treats it as optional and the loader fills it. The `review` block is optional and defaults to `{ changesSignal: 'label' }` (the contract default). The exported schema is named `WorkflowConfigSchema`.
 
 - [ ] **Step 1: Write the schema**
 
@@ -881,6 +887,10 @@ export interface WorkflowConfig {
   manageBoard: boolean;
   trigger: TriggerCfg;
   proof: { type: ProofType; command?: string };
+  review: {
+    changesSignal: 'native' | 'label'; // default: 'label'
+    changesLabel?: string; // used when changesSignal === 'label'
+  };
   git: {
     defaultBranch: string;
     target: string;
@@ -906,7 +916,7 @@ const concurrencySchema = z
   .transform((c) => ({ globalMax: c.global_max, maxActive: c.max_active }));
 
 // Front-matter schema (snake_case). `forge` optional; loader fills it from host.
-export const workflowFrontMatterSchema = z.object({
+export const WorkflowConfigSchema = z.object({
   forge: z.enum(['gitlab', 'github']).optional(),
   project: z.string(),
   bot_user: z.string(),
@@ -920,6 +930,13 @@ export const workflowFrontMatterSchema = z.object({
     type: z.enum(['playwright', 'test-output', 'diff-summary', 'none']),
     command: z.string().optional(),
   }),
+  // Optional in the file; defaults to changesSignal:'label' (the contract default).
+  review: z
+    .object({
+      changes_signal: z.enum(['native', 'label']).default('label'),
+      changes_label: z.string().optional(),
+    })
+    .default({ changes_signal: 'label' }),
   git: z.object({
     default_branch: z.string(),
     target: z.string(),
@@ -942,7 +959,7 @@ export const workflowFrontMatterSchema = z.object({
   concurrency: concurrencySchema,
 });
 
-export type WorkflowFrontMatter = z.infer<typeof workflowFrontMatterSchema>;
+export type WorkflowFrontMatter = z.infer<typeof WorkflowConfigSchema>;
 
 // Map validated front matter + prompt body + resolved forge into WorkflowConfig.
 export function toWorkflowConfig(
@@ -961,6 +978,10 @@ export function toWorkflowConfig(
       allowedActors: fm.trigger.allowed_actors,
     },
     proof: { type: fm.proof.type, command: fm.proof.command },
+    review: {
+      changesSignal: fm.review.changes_signal,
+      changesLabel: fm.review.changes_label,
+    },
     git: {
       defaultBranch: fm.git.default_branch,
       target: fm.git.target,
@@ -1006,7 +1027,7 @@ git commit -m "feat(core): add WorkflowConfig zod schema"
 - Create: `packages/core/src/workflow/load.ts`
 - Test: `packages/core/src/workflow/load.test.ts`
 
-> `parseWorkflow(raw)` uses `gray-matter` to split front matter from the markdown body, validates the front matter, resolves `forge` (front matter value or — per contract — defaults to `'gitlab'` when omitted; see Open questions on host inference), and returns a `WorkflowConfig`. `loadWorkflow(repoDir)` reads `<repoDir>/WORKFLOW.md`; returns `null` if absent.
+> `parseWorkflow(raw, forgeHint?)` uses `gray-matter` to split front matter from the markdown body, validates the front matter, resolves `forge` (front-matter value wins; else `forgeHint`; else `'gitlab'`), and returns a `WorkflowConfig`. `loadWorkflow(repoDir, forgeHint?)` reads `<repoDir>/WORKFLOW.md`; returns `null` if absent. The caller (M5 `maestro add` / M7 onboarding) derives `forgeHint` from the repo's configured host.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1066,9 +1087,24 @@ describe('parseWorkflow', () => {
     expect(wf.promptBody).toContain('Operating protocol');
   });
 
+  it('defaults review.changesSignal to label when omitted', () => {
+    const wf = parseWorkflow(RAW);
+    expect(wf.review.changesSignal).toBe('label');
+  });
+
+  it('honors an explicit review.changes_signal', () => {
+    const wf = parseWorkflow(RAW.replace('concurrency: { max_active: 2 }', 'review: { changes_signal: native }\nconcurrency: { max_active: 2 }'));
+    expect(wf.review.changesSignal).toBe('native');
+  });
+
   it('defaults forge to gitlab when front matter omits it', () => {
     const wf = parseWorkflow(RAW.replace('forge: github\n', ''));
     expect(wf.forge).toBe('gitlab');
+  });
+
+  it('uses forgeHint when front matter omits forge', () => {
+    const wf = parseWorkflow(RAW.replace('forge: github\n', ''), 'github');
+    expect(wf.forge).toBe('github');
   });
 
   it('throws on invalid front matter', () => {
@@ -1106,29 +1142,31 @@ import { join } from 'node:path';
 import matter from 'gray-matter';
 import type { Forge } from '../domain/types.js';
 import {
-  workflowFrontMatterSchema,
+  WorkflowConfigSchema,
   toWorkflowConfig,
   type WorkflowConfig,
 } from './schema.js';
 
-export function parseWorkflow(raw: string): WorkflowConfig {
+// front-matter `forge` wins; else forgeHint; else default 'gitlab'.
+export function parseWorkflow(raw: string, forgeHint?: Forge): WorkflowConfig {
   const parsed = matter(raw);
-  const fm = workflowFrontMatterSchema.parse(parsed.data);
-  const forge: Forge = fm.forge ?? 'gitlab';
+  const fm = WorkflowConfigSchema.parse(parsed.data);
+  const forge: Forge = fm.forge ?? forgeHint ?? 'gitlab';
   return toWorkflowConfig(fm, parsed.content.trim(), forge);
 }
 
-export function loadWorkflow(repoDir: string): WorkflowConfig | null {
+// forgeHint is derived from the repo's configured host by the caller (M5/M7).
+export function loadWorkflow(repoDir: string, forgeHint?: Forge): WorkflowConfig | null {
   const path = join(repoDir, 'WORKFLOW.md');
   if (!existsSync(path)) return null;
-  return parseWorkflow(readFileSync(path, 'utf8'));
+  return parseWorkflow(readFileSync(path, 'utf8'), forgeHint);
 }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run packages/core/src/workflow/load.test.ts`
-Expected: PASS — `5 passed`.
+Expected: PASS — `7 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -1230,7 +1268,7 @@ git commit -m "feat(core): add ForgeAdapter interface and ForgeError"
 - Create: `packages/core/src/forge/memory.ts`
 - Test: `packages/core/src/forge/memory.test.ts`
 
-> A fully in-memory `ForgeAdapter`. Seeds are issues; branches/MRs/comments/labels live in maps. `setLifecycleLabel` strips all maestro labels then adds the one for the target state (none for `new`/`done`) — enforcing mutual exclusion in-process. `createDraftMr` parses `Closes #N` out of the body to populate `linkedIssueNumbers`. Test helpers (`approveMr`, `requestChanges`, `closeIssue`) let tests drive review outcomes. The constructor takes `{ forge, project, botUser }`.
+> A fully in-memory `ForgeAdapter`. Seeds are issues; branches/MRs/comments/labels live in maps. `setLifecycleLabel` strips all maestro labels then adds the one for the target state (none for `new`/`done`) — enforcing mutual exclusion in-process. `createDraftMr` parses `Closes #N` out of the body to populate `linkedIssueNumbers` and seeds `description` from the body; `updateMrDescription` overwrites it. `getMrForIssue` matches on parsed `Closes #N` linkage (real adapters locate by head branch `maestro/issue-<number>`). Test helpers (`approveMr`, `requestChanges`, `closeIssue`) let tests drive review outcomes. The constructor takes `{ forge, project, botUser }`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1496,6 +1534,8 @@ export class MemoryForge implements ForgeAdapter {
     return [...this.mrs.values()].filter((m) => m.state === 'open');
   }
   async getMrForIssue(issueNumber: number): Promise<MergeRequest | null> {
+    // Real adapters (M2/M6) locate the MR by its head branch `maestro/issue-<number>`.
+    // The in-memory fake matches on parsed `Closes #N` linkage instead.
     for (const mr of this.mrs.values()) {
       if (mr.linkedIssueNumbers.includes(issueNumber)) return mr;
     }
@@ -1519,6 +1559,7 @@ export class MemoryForge implements ForgeAdapter {
       changesRequested: false,
       reviewers: [],
       linkedIssueNumbers: parseLinkedIssues(args.body),
+      description: args.body,
       webUrl: `https://memory/${this.project}/mr/${number}`,
     };
     this.mrs.set(number, mr);
@@ -1528,8 +1569,9 @@ export class MemoryForge implements ForgeAdapter {
     const mr = this.mrs.get(mrNumber);
     if (mr) mr.isDraft = false;
   }
-  async updateMrDescription(_mrNumber: number, _body: string): Promise<void> {
-    // no-op in memory: description content not modeled here
+  async updateMrDescription(mrNumber: number, body: string): Promise<void> {
+    const mr = this.mrs.get(mrNumber);
+    if (mr) mr.description = body;
   }
   async assignReviewer(mrNumber: number, username: string): Promise<void> {
     const mr = this.mrs.get(mrNumber);
@@ -1695,7 +1737,7 @@ git commit -m "feat(core): add pure deriveLifecycle"
 - Create: `packages/core/src/reconciler/decide.ts`
 - Test: `packages/core/src/reconciler/decide.test.ts`
 
-> PURE: no I/O, imports only domain types. Exhaustive coverage of the contract mapping. Order matters: in `in_review`, check `changesRequested` before `approved`? No — contract lists approved first, then changesRequested, then review_check. We implement: approved→merge; else changesRequested→work; else review_check. For `in_progress`: needs_input→block; agentDone→handoff; else work.
+> PURE: no I/O, imports only domain types. Exhaustive coverage of the contract mapping. `decideAction` maps the forge-derived lifecycle → action ONLY; agent status (`done`/`needs_input`) is NOT a decide input — it is consumed in the SAME tick by the `work` executor (see Task 13). Order in `in_review`: approved→merge; else changesRequested→work; else review_check. `in_progress` → `work` ALWAYS (the work executor handles `done`/`needs_input` inline).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1735,6 +1777,7 @@ function mr(over: Partial<MergeRequest> = {}): MergeRequest {
     changesRequested: false,
     reviewers: [],
     linkedIssueNumbers: [7],
+    description: 'Closes #7',
     webUrl: 'u',
     ...over,
   };
@@ -1744,7 +1787,7 @@ function snap(lifecycle: LifecycleState, mrv: MergeRequest | null = null): Issue
   return { issue: issue(), mr: mrv, lifecycle };
 }
 
-const baseCtx: DecideContext = { triggerOk: true, agentDone: false, agentNeedsInput: false };
+const baseCtx: DecideContext = { triggerOk: true };
 
 describe('decideAction', () => {
   it('new && triggerOk -> claim', () => {
@@ -1752,28 +1795,13 @@ describe('decideAction', () => {
   });
 
   it('new && !triggerOk -> noop', () => {
-    expect(decideAction(snap('new'), { ...baseCtx, triggerOk: false })).toEqual({
+    expect(decideAction(snap('new'), { triggerOk: false })).toEqual({
       kind: 'noop',
       issueNumber: 7,
     });
   });
 
-  it('in_progress && agentNeedsInput -> block', () => {
-    expect(decideAction(snap('in_progress'), { ...baseCtx, agentNeedsInput: true })).toEqual({
-      kind: 'block',
-      issueNumber: 7,
-      reason: 'agent requested input',
-    });
-  });
-
-  it('in_progress && agentDone -> handoff', () => {
-    expect(decideAction(snap('in_progress'), { ...baseCtx, agentDone: true })).toEqual({
-      kind: 'handoff',
-      issueNumber: 7,
-    });
-  });
-
-  it('in_progress (default) -> work', () => {
+  it('in_progress -> work (always; work executor handles done/needs_input inline)', () => {
     expect(decideAction(snap('in_progress'), baseCtx)).toEqual({ kind: 'work', issueNumber: 7 });
   });
 
@@ -1829,9 +1857,10 @@ import type { Action, IssueSnapshot } from '../domain/types.js';
 
 export interface DecideContext {
   triggerOk: boolean; // trigger guard (assignee/require_label/allowed_actors) satisfied
-  agentDone: boolean; // last agent run returned status 'done'
-  agentNeedsInput: boolean;
 }
+// NOTE: agent status (done/needs_input) is NOT a decide input. It is consumed in
+// the SAME tick by the `work` executor (see reconciler/index.ts). decideAction maps
+// only the forge-derived lifecycle → action.
 
 // PURE. Maps a snapshot + context to exactly one Action. No I/O.
 export function decideAction(snapshot: IssueSnapshot, ctx: DecideContext): Action {
@@ -1840,9 +1869,7 @@ export function decideAction(snapshot: IssueSnapshot, ctx: DecideContext): Actio
     case 'new':
       return ctx.triggerOk ? { kind: 'claim', issueNumber: n } : { kind: 'noop', issueNumber: n };
     case 'in_progress':
-      if (ctx.agentNeedsInput)
-        return { kind: 'block', issueNumber: n, reason: 'agent requested input' };
-      if (ctx.agentDone) return { kind: 'handoff', issueNumber: n };
+      // ALWAYS work; the work executor runs handoff (done) or block (needs_input) inline.
       return { kind: 'work', issueNumber: n };
     case 'in_review':
       if (snapshot.mr?.approved) return { kind: 'merge', issueNumber: n };
@@ -1859,7 +1886,7 @@ export function decideAction(snapshot: IssueSnapshot, ctx: DecideContext): Actio
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run packages/core/src/reconciler/decide.test.ts`
-Expected: PASS — `11 passed`.
+Expected: PASS — `9 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -1876,21 +1903,21 @@ git commit -m "feat(core): add pure decideAction state machine"
 - Create: `packages/core/src/reconciler/index.ts`
 - Test: `packages/core/src/reconciler/index.test.ts`
 
-> `reconcileRepo(deps)` fetches assigned open issues, builds a snapshot per issue (`getMrForIssue` + `deriveLifecycle`), computes one `Action` via `decideAction`, then executes it by calling the adapter and the injected collaborators. Collaborators (`ClaudeRunner`, `runProof`, `WorkspaceManager`) are injected; M1 supplies FAKES in tests. The executor implements the per-action behavior from the milestone design notes.
+> `reconcileRepo(deps)` fetches assigned open issues, builds a snapshot per issue (`getMrForIssue` + `deriveLifecycle`), computes one `Action` via `decideAction`, then executes it via an internal `executeAction(action, snapshot, deps)`. It returns `Promise<void>` — no `Action[]` and no cross-tick agent memory. Collaborators (`ClaudeRunner`, `runProof`, `WorkspaceManager`, `CommandRunner`, `SlotManager`) are injected via a single `ReconcileDeps` bag; M1 supplies FAKES in tests.
 >
-> Collaborator interfaces used here come from the contracts: `ClaudeRunner` (`agent/runner.ts`), `runProof`/`ProofContext`/`ProofArtifact` (`proof/index.ts`), `WorkspaceManager` (`workspace/manager.ts`). M1 does NOT create those source files (M3/M4 do). To keep the reconciler decoupled and avoid importing not-yet-created modules, `reconcileRepo` declares its own `ReconcileDeps` with structurally-typed collaborator function/objects matching those contract signatures. See Open questions re: where `ReconcileDeps` and the `runProof` injection shape live.
+> Per the contract, `ReconcileDeps` is the ONE deps bag in `reconciler/index.ts` — there are NO per-executor deps bags. Collaborator types are **imported from their owning modules** (`ForgeAdapter` from `forge/adapter.ts`, `WorkflowConfig` from `workflow/schema.ts`, `AgentResult` from `agent/contract.ts`), never re-declared structurally. The M3/M4-owned collaborators (`ClaudeRunner`, `runProof`, `WorkspaceManager`, `CommandRunner` from `util/exec.ts`, `SlotManager`) are typed via `import type` against their contract modules; M1 still supplies fakes in tests. The `exec` seam carries git commit/push for the handoff routine (exercised by M4). The contract field name for the adapter is `adapter` (not `forge`).
 >
-> Per-action behavior (from milestone notes):
-> - **claim:** `createBranch('maestro/issue-<n>', workflow.git.defaultBranch)` → `createDraftMr({...,'Closes #<n>', draft:true})` → `setLifecycleLabel(n,'in_progress')` → `comment(issue,'started working')`.
-> - **work:** `workspace.ensure(...)` → `runner.run(dir, prompt, opts)`. If result.status==='needs_input' → `setLifecycleLabel(n,'blocked')` + comment. If 'done' → leave label in_progress (the next tick's snapshot + `agentDone` drives handoff via the caller; in this milestone we pass agent flags into the decide ctx, so a 'done' result this tick is surfaced by re-deciding — but to keep one-action-per-tick we simply record the result and stop). Otherwise leave in_progress.
-> - **handoff:** `runProof(ctx)` → `comment(issue, proofText)` + `comment(mr, proofText)` → `assignReviewer(mr.number, issue.authorUsername)` → `setMrReady(mr.number)` → `setLifecycleLabel(n,'in_review')`.
+> Agent status is consumed in the **SAME tick** (no `agentResults` map across ticks): the `work` executor runs the agent, inspects the returned `AgentResult`, and acts immediately — `done` → run the handoff routine inline; `needs_input` → block inline; `in_progress` → leave label `in_progress`.
+>
+> Per-action behavior:
+> - **claim:** `createBranch('maestro/issue-<n>', workflow.git.defaultBranch)` → `createDraftMr({ title: snapshot.issue.title, body:'Closes #<n>', draft:true })` → `setLifecycleLabel(n,'in_progress')` → `comment(issue,'started working')`.
+> - **work:** `workspace.ensure(...)` → `runner.run(dir, prompt, opts)`. `needs_input` → `setLifecycleLabel(n,'blocked')` + comment. `done` → run the handoff routine inline (proof → comments → assign reviewer → ready → in_review). `in_progress` → leave label `in_progress`.
+> - **handoff routine (inline, on agent `done`):** `runProof(ctx)` → `comment(issue, proofText)` + `comment(mr, proofText)` → `assignReviewer(mr.number, issue.authorUsername)` → `setMrReady(mr.number)` → `setLifecycleLabel(n,'in_review')`.
 > - **review_check:** no-op write (polling only).
 > - **merge:** `mergeMr(mr.number, workflow.git.mergeStrategy, workflow.git.deleteSourceBranch)`.
-> - **changes-requested path:** decide returns `work` for an `in_review` MR with `changesRequested`; the reconciler first flips the label back to `in_progress` (`setLifecycleLabel`), then runs the work executor.
+> - **changes-requested path:** decide returns `work` for an `in_review` MR with `changesRequested`; the executor first flips the label back to `in_progress` (`setLifecycleLabel`), then runs the work routine.
 > - **cleanup:** `workspace.remove(repoUrl, n)`.
 > - **block:** `setLifecycleLabel(n,'blocked')` + `comment(issue, reason)`.
->
-> To make `work`'s agent flags testable as one action per tick, `reconcileRepo` derives `DecideContext.agentDone` / `agentNeedsInput` from a per-issue `lastAgentResult` map passed in `deps.agentResults` (issueNumber → AgentResult|undefined). On a `work` action it runs the agent and stores the fresh result in that same map so the NEXT tick decides handoff/block. This keeps `decide` pure and the executor side-effecting.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1901,7 +1928,10 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { MemoryForge } from '../forge/memory.js';
 import { reconcileRepo, type ReconcileDeps } from './index.js';
 import { lifecycleLabel } from '../domain/lifecycle.js';
+import type { SlotManager } from '../daemon/state.js';
+import type { CommandRunner } from '../util/exec.js';
 import type { Issue } from '../domain/types.js';
+import type { MaestroConfig } from '../config/schema.js';
 import type { WorkflowConfig } from '../workflow/schema.js';
 import type { AgentResult } from '../agent/contract.js';
 
@@ -1928,10 +1958,24 @@ const workflow: WorkflowConfig = {
   manageBoard: true,
   trigger: { assignee: 'bot', requireLabel: null, allowedActors: [] },
   proof: { type: 'none' },
+  review: { changesSignal: 'label' },
   git: { defaultBranch: 'main', target: 'main', mergeStrategy: 'squash', deleteSourceBranch: true },
   claude: { command: 'claude', maxTurns: 40, permissionMode: 'acceptEdits' },
   concurrency: { maxActive: 2 },
   promptBody: 'do the work',
+};
+
+const config: MaestroConfig = {
+  defaults: {
+    pollIntervalActive: '30s',
+    pollIntervalIdle: '5m',
+    pollJitter: '5s',
+    botUser: 'maestro-bot',
+    concurrency: { globalMax: 2 },
+    workspaces: { root: './workspaces', diskCap: '20GB', cleanup: 'lru' },
+  },
+  forges: {},
+  repos: [],
 };
 
 interface Fakes {
@@ -1939,15 +1983,30 @@ interface Fakes {
   runnerCalls: string[];
   proofCalls: number;
   removed: number[];
-  agentResults: Map<number, AgentResult>;
 }
+
+// Minimal SlotManager fake (real RunState lands in Task 14). M1's reconciler
+// does not call slot methods, so a no-op gate suffices here.
+const fakeSlots: SlotManager = {
+  tryClaimSlot: () => true,
+  releaseSlot: () => {},
+  isActive: () => false,
+  activeCount: () => 0,
+};
+
+// Minimal CommandRunner fake (git ops are exercised by M4's handoff impl, not M1).
+const fakeExec: CommandRunner = {
+  async run() {
+    return { stdout: '', stderr: '', exitCode: 0 };
+  },
+};
 
 function makeDeps(forge: MemoryForge, fakes: Fakes): ReconcileDeps {
   return {
-    forge,
+    adapter: forge,
     workflow,
+    config,
     repoUrl: 'gitlab.com/group/api',
-    agentResults: fakes.agentResults,
     runner: {
       async run(cwd, prompt, _opts) {
         fakes.runnerCalls.push(`${cwd}:${prompt.slice(0, 10)}`);
@@ -1956,7 +2015,7 @@ function makeDeps(forge: MemoryForge, fakes: Fakes): ReconcileDeps {
     },
     runProof: async () => {
       fakes.proofCalls++;
-      return [{ path: '/tmp/p.txt', kind: 'text', caption: 'proof' }];
+      return [{ path: 'proof/p.txt', kind: 'text', caption: 'proof' }];
     },
     workspace: {
       async ensure(_repoUrl, issueNumber, branch) {
@@ -1970,7 +2029,9 @@ function makeDeps(forge: MemoryForge, fakes: Fakes): ReconcileDeps {
         return `/ws/${issueNumber}`;
       },
     },
-    triggerOk: () => true,
+    exec: fakeExec,
+    slots: fakeSlots,
+    clock: () => 0,
   };
 }
 
@@ -1983,45 +2044,41 @@ beforeEach(() => {
     runnerCalls: [],
     proofCalls: 0,
     removed: [],
-    agentResults: new Map(),
   };
 });
 
 describe('reconcileRepo — claim (new issue)', () => {
-  it('creates branch + draft MR, labels in_progress, comments started', async () => {
+  it('creates branch + draft MR (title = issue.title), labels in_progress, comments started', async () => {
     seedIssue(forge);
-    const actions = await reconcileRepo(makeDeps(forge, fakes));
-    expect(actions).toEqual([{ kind: 'claim', issueNumber: 1 }]);
+    await reconcileRepo(makeDeps(forge, fakes));
     expect(forge.hasBranch('maestro/issue-1')).toBe(true);
     const mr = await forge.getMrForIssue(1);
     expect(mr?.isDraft).toBe(true);
     expect(mr?.linkedIssueNumbers).toEqual([1]);
+    expect(mr?.description).toContain('Closes #1');
     expect((await forge.getIssue(1))!.labels).toContain(lifecycleLabel('gitlab', 'in_progress'));
     expect(forge.commentsFor({ type: 'issue', number: 1 })).toContain('started working');
   });
 });
 
-describe('reconcileRepo — work', () => {
-  it('runs the agent and records an in_progress result', async () => {
+describe('reconcileRepo — work (agent status consumed same-tick)', () => {
+  it('runs the agent and leaves in_progress on an in_progress result', async () => {
     seedIssue(forge, { labels: [lifecycleLabel('gitlab', 'in_progress')] });
     fakes.runnerResults = [{ status: 'in_progress', summary: 'wip' }];
-    const actions = await reconcileRepo(makeDeps(forge, fakes));
-    expect(actions).toEqual([{ kind: 'work', issueNumber: 1 }]);
+    await reconcileRepo(makeDeps(forge, fakes));
     expect(fakes.runnerCalls.length).toBe(1);
-    expect(fakes.agentResults.get(1)?.status).toBe('in_progress');
+    expect((await forge.getIssue(1))!.labels).toContain(lifecycleLabel('gitlab', 'in_progress'));
   });
 
-  it('blocks when the agent returns needs_input', async () => {
+  it('blocks inline when the agent returns needs_input', async () => {
     seedIssue(forge, { labels: [lifecycleLabel('gitlab', 'in_progress')] });
     fakes.runnerResults = [{ status: 'needs_input', summary: 'need a decision' }];
     await reconcileRepo(makeDeps(forge, fakes));
     expect((await forge.getIssue(1))!.labels).toContain(lifecycleLabel('gitlab', 'blocked'));
     expect(forge.commentsFor({ type: 'issue', number: 1 })).toContain('need a decision');
   });
-});
 
-describe('reconcileRepo — handoff', () => {
-  it('proof → comments → assign reviewer → ready → in_review', async () => {
+  it('runs the handoff routine inline when the agent returns done', async () => {
     seedIssue(forge, { labels: [lifecycleLabel('gitlab', 'in_progress')] });
     await forge.createDraftMr({
       sourceBranch: 'maestro/issue-1',
@@ -2030,9 +2087,8 @@ describe('reconcileRepo — handoff', () => {
       body: 'Closes #1',
       draft: true,
     });
-    fakes.agentResults.set(1, { status: 'done', summary: 'finished' });
-    const actions = await reconcileRepo(makeDeps(forge, fakes));
-    expect(actions).toEqual([{ kind: 'handoff', issueNumber: 1 }]);
+    fakes.runnerResults = [{ status: 'done', summary: 'finished' }];
+    await reconcileRepo(makeDeps(forge, fakes));
     expect(fakes.proofCalls).toBe(1);
     const mr = await forge.getMrForIssue(1);
     expect(mr?.isDraft).toBe(false);
@@ -2052,8 +2108,9 @@ describe('reconcileRepo — review_check / merge', () => {
       body: 'Closes #1',
       draft: true,
     });
-    const actions = await reconcileRepo(makeDeps(forge, fakes));
-    expect(actions).toEqual([{ kind: 'review_check', issueNumber: 1 }]);
+    await reconcileRepo(makeDeps(forge, fakes));
+    expect((await forge.getMrForIssue(1))?.state).toBe('open');
+    expect(fakes.runnerCalls.length).toBe(0);
   });
 
   it('merges when approved', async () => {
@@ -2066,8 +2123,7 @@ describe('reconcileRepo — review_check / merge', () => {
       draft: true,
     });
     forge.approveMr(mr.number);
-    const actions = await reconcileRepo(makeDeps(forge, fakes));
-    expect(actions).toEqual([{ kind: 'merge', issueNumber: 1 }]);
+    await reconcileRepo(makeDeps(forge, fakes));
     expect((await forge.getMrForIssue(1))?.state).toBe('merged');
   });
 
@@ -2082,8 +2138,7 @@ describe('reconcileRepo — review_check / merge', () => {
     });
     forge.requestChanges(mr.number);
     fakes.runnerResults = [{ status: 'in_progress', summary: 'addressing' }];
-    const actions = await reconcileRepo(makeDeps(forge, fakes));
-    expect(actions).toEqual([{ kind: 'work', issueNumber: 1 }]);
+    await reconcileRepo(makeDeps(forge, fakes));
     expect((await forge.getIssue(1))!.labels).toContain(lifecycleLabel('gitlab', 'in_progress'));
     expect(fakes.runnerCalls.length).toBe(1);
   });
@@ -2092,55 +2147,37 @@ describe('reconcileRepo — review_check / merge', () => {
 describe('reconcileRepo — cleanup (done)', () => {
   it('removes the workspace for a closed issue', async () => {
     seedIssue(forge, { state: 'closed' });
-    const actions = await reconcileRepo(makeDeps(forge, fakes));
-    expect(actions).toEqual([{ kind: 'cleanup', issueNumber: 1 }]);
+    await reconcileRepo(makeDeps(forge, fakes));
     expect(fakes.removed).toContain(1);
   });
 });
 
-describe('reconcileRepo — full state machine walk', () => {
-  it('new → in_progress → handoff → in_review → merge → done → cleanup', async () => {
+describe('reconcileRepo — single-tick lifecycle (no cross-tick agent memory)', () => {
+  it('claim → (next tick) work+done handoff → review_check → merge → cleanup', async () => {
     seedIssue(forge);
 
-    // tick 1: claim
-    expect((await reconcileRepo(makeDeps(forge, fakes)))[0]).toEqual({
-      kind: 'claim',
-      issueNumber: 1,
-    });
+    // tick 1: new → claim
+    await reconcileRepo(makeDeps(forge, fakes));
+    expect((await forge.getIssue(1))!.labels).toContain(lifecycleLabel('gitlab', 'in_progress'));
 
-    // tick 2: work (agent done this run, recorded for next tick)
+    // tick 2: in_progress → work; agent reports done → handoff runs inline this tick
     fakes.runnerResults = [{ status: 'done', summary: 'all done' }];
-    expect((await reconcileRepo(makeDeps(forge, fakes)))[0]).toEqual({
-      kind: 'work',
-      issueNumber: 1,
-    });
+    await reconcileRepo(makeDeps(forge, fakes));
+    expect((await forge.getIssue(1))!.labels).toContain(lifecycleLabel('gitlab', 'in_review'));
 
-    // tick 3: handoff (driven by recorded done result)
-    expect((await reconcileRepo(makeDeps(forge, fakes)))[0]).toEqual({
-      kind: 'handoff',
-      issueNumber: 1,
-    });
+    // tick 3: in_review pending → review_check (no-op)
+    await reconcileRepo(makeDeps(forge, fakes));
+    expect((await forge.getMrForIssue(1))?.state).toBe('open');
 
-    // tick 4: review_check (pending)
-    expect((await reconcileRepo(makeDeps(forge, fakes)))[0]).toEqual({
-      kind: 'review_check',
-      issueNumber: 1,
-    });
-
-    // approve, tick 5: merge
+    // approve, tick 4: merge
     const mr = await forge.getMrForIssue(1);
     forge.approveMr(mr!.number);
-    expect((await reconcileRepo(makeDeps(forge, fakes)))[0]).toEqual({
-      kind: 'merge',
-      issueNumber: 1,
-    });
+    await reconcileRepo(makeDeps(forge, fakes));
+    expect((await forge.getMrForIssue(1))?.state).toBe('merged');
 
-    // issue auto-closes (simulate), tick 6: cleanup
+    // issue auto-closes (simulate), tick 5: cleanup
     forge.closeIssue(1);
-    expect((await reconcileRepo(makeDeps(forge, fakes)))[0]).toEqual({
-      kind: 'cleanup',
-      issueNumber: 1,
-    });
+    await reconcileRepo(makeDeps(forge, fakes));
     expect(fakes.removed).toContain(1);
   });
 });
@@ -2149,11 +2186,11 @@ describe('reconcileRepo — full state machine walk', () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run packages/core/src/reconciler/index.test.ts`
-Expected: FAIL — `Failed to resolve import "./index.js"` (and `../agent/contract.js`). Note: `agent/contract.ts` is NOT in M1's owned scope. Create the minimal type-only file in Step 3 below (it is an M3 file but its `AgentResult` type is needed now; only the type, not the parser, is added here — see Open questions).
+Expected: FAIL — `Failed to resolve import "./index.js"` (and `../agent/contract.js`). Note: `agent/contract.ts` is owned by M3 but its `AgentResult` type is needed now; M1 creates a minimal type-only version of that file (the `parseAgentResult` parser remains M3's responsibility).
 
 - [ ] **Step 3: Write minimal implementation**
 
-First, create the minimal agent-contract types needed for collaborator typing (type-only; the `parseAgentResult` parser is M3's responsibility — see Open questions).
+The reconciler imports collaborator types from their owning modules rather than re-declaring them (contract: "collaborators imported, never re-declared structurally"). M3/M4 own the *implementations* of those modules; M1 lands minimal **type-only** seam files so the reconciler typechecks now and M3/M4 fill the bodies later. Create these four type-only files (parsers/clients are M3/M4's responsibility):
 
 `packages/core/src/agent/contract.ts`:
 
@@ -2164,6 +2201,80 @@ export interface AgentResult {
   status: AgentStatus;
   summary: string;
 }
+// parseAgentResult(streamJsonStdout) is added by M3.
+```
+
+`packages/core/src/agent/runner.ts` (type-only seam; M3 adds the impl):
+
+```ts
+import type { AgentResult } from './contract.js';
+import type { PermissionMode } from '../workflow/schema.js';
+
+export interface RunnerOpts {
+  command: string;
+  maxTurns: number;
+  permissionMode: PermissionMode;
+}
+export interface ClaudeRunner {
+  run(cwd: string, prompt: string, opts: RunnerOpts): Promise<AgentResult>;
+}
+```
+
+`packages/core/src/proof/index.ts` (type-only seam; M4 adds `runProof` + strategies):
+
+```ts
+import type { WorkflowConfig } from '../workflow/schema.js';
+import type { CommandRunner } from '../util/exec.js';
+
+export interface ProofArtifact {
+  path: string; // RELATIVE to workspaceDir
+  kind: 'video' | 'image' | 'text';
+  caption: string;
+}
+export interface ProofContext {
+  workspaceDir: string;
+  workflow: WorkflowConfig;
+  exec: CommandRunner; // shared subprocess seam (util/exec.ts)
+}
+export interface ProofStrategy {
+  run(ctx: ProofContext): Promise<ProofArtifact[]>;
+}
+// runProof(ctx) is added by M4.
+```
+
+`packages/core/src/workspace/manager.ts` (type-only seam; M3 adds the impl):
+
+```ts
+export interface WorkspaceManager {
+  ensure(repoUrl: string, issueNumber: number, branch: string): Promise<string>;
+  remove(repoUrl: string, issueNumber: number): Promise<void>;
+  enforceDiskCap(capBytes: number): Promise<void>;
+  pathFor(repoUrl: string, issueNumber: number): string;
+}
+```
+
+`packages/core/src/util/exec.ts` (shared subprocess seam; the `execaRunner` impl is added by M2/M3):
+
+```ts
+export interface CommandRunner {
+  run(
+    cmd: string,
+    args: string[],
+    opts?: { cwd?: string; input?: string; env?: Record<string, string> },
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+}
+```
+
+Also create `packages/core/src/daemon/state.ts` with **just the `SlotManager` interface** now (the `RunState` class that implements it is added in Task 14, which appends to this file):
+
+```ts
+// Concurrency gate consumed by the reconciler (contract bag field `slots`).
+export interface SlotManager {
+  tryClaimSlot(issueNumber: number): boolean;
+  releaseSlot(issueNumber: number): void;
+  isActive(issueNumber: number): boolean;
+  activeCount(): number;
+}
 ```
 
 Then the reconciler:
@@ -2171,154 +2282,153 @@ Then the reconciler:
 `packages/core/src/reconciler/index.ts`:
 
 ```ts
-import type { Action } from '../domain/types.js';
+import type { Action, Issue, IssueSnapshot, MergeRequest } from '../domain/types.js';
 import type { ForgeAdapter } from '../forge/adapter.js';
+import type { MaestroConfig } from '../config/schema.js';
 import type { WorkflowConfig } from '../workflow/schema.js';
 import type { AgentResult } from '../agent/contract.js';
+import type { ClaudeRunner } from '../agent/runner.js';
+import type { ProofArtifact, ProofContext } from '../proof/index.js';
+import type { WorkspaceManager } from '../workspace/manager.js';
+import type { SlotManager } from '../daemon/state.js';
+import type { CommandRunner } from '../util/exec.js';
 import { deriveLifecycle } from './derive.js';
 import { decideAction } from './decide.js';
 
-// Collaborator seams (real impls land in M3/M4). Structurally typed to the
-// contracts: ClaudeRunner (agent/runner.ts), runProof (proof/index.ts),
-// WorkspaceManager (workspace/manager.ts).
-export interface ProofArtifact {
-  path: string;
-  kind: 'video' | 'image' | 'text';
-  caption: string;
-}
-export interface RunnerLike {
-  run(
-    cwd: string,
-    prompt: string,
-    opts: { command: string; maxTurns: number; permissionMode: WorkflowConfig['claude']['permissionMode'] },
-  ): Promise<AgentResult>;
-}
-export interface WorkspaceLike {
-  ensure(repoUrl: string, issueNumber: number, branch: string): Promise<string>;
-  remove(repoUrl: string, issueNumber: number): Promise<void>;
-  enforceDiskCap(capBytes: number): Promise<void>;
-  pathFor(repoUrl: string, issueNumber: number): string;
-}
-
+// The ONE reconciler deps bag (contract: no per-executor bags). Collaborator
+// types are IMPORTED from their owning modules (M3/M4); M1 supplies fakes in tests.
+// `agent/contract.ts` is created here as a type-only stub (its parser is M3's).
+// The M3/M4 source modules (agent/runner.ts, proof/index.ts, workspace/manager.ts)
+// are NOT created by M1 — these are `import type` references the compiler resolves
+// once those milestones land; M1's tests use structurally-compatible fakes.
 export interface ReconcileDeps {
-  forge: ForgeAdapter;
+  adapter: ForgeAdapter;
   workflow: WorkflowConfig;
+  config: MaestroConfig;
   repoUrl: string;
-  // Per-issue last agent result; updated by the work executor, read to decide handoff/block.
-  agentResults: Map<number, AgentResult>;
-  runner: RunnerLike;
-  runProof: (ctx: { workspaceDir: string; workflow: WorkflowConfig }) => Promise<ProofArtifact[]>;
-  workspace: WorkspaceLike;
-  // Trigger guard evaluation (assignee/require_label/allowed_actors). M1 wires a simple impl.
-  triggerOk: (issueNumber: number) => boolean;
+  workspace: WorkspaceManager; // from workspace/manager.ts (M3)
+  runner: ClaudeRunner; // from agent/runner.ts (M3)
+  runProof: (ctx: ProofContext) => Promise<ProofArtifact[]>; // from proof/index.ts (M4)
+  exec: CommandRunner; // shared subprocess seam (util/exec.ts) — git commit/push in handoff (M4)
+  slots: SlotManager; // concurrency gate, from daemon/state.ts
+  clock: () => number;
 }
 
 const branchFor = (n: number) => `maestro/issue-${n}`;
+
+// Trigger guard: assignee is the bot, require_label present (if set), and the
+// issue author is an allowed actor (empty list = any).
+function triggerOk(issue: Issue, workflow: WorkflowConfig): boolean {
+  if (!issue.assignees.includes(workflow.botUser)) return false;
+  if (workflow.trigger.requireLabel && !issue.labels.includes(workflow.trigger.requireLabel))
+    return false;
+  if (
+    workflow.trigger.allowedActors.length > 0 &&
+    !workflow.trigger.allowedActors.includes(issue.authorUsername)
+  )
+    return false;
+  return true;
+}
 
 function proofText(artifacts: ProofArtifact[]): string {
   if (artifacts.length === 0) return 'Proof: (no artifacts)';
   return ['Proof:', ...artifacts.map((a) => `- ${a.caption} (${a.kind}): ${a.path}`)].join('\n');
 }
 
-export async function reconcileRepo(deps: ReconcileDeps): Promise<Action[]> {
-  const { forge, workflow, repoUrl } = deps;
-  const issues = await forge.listAssignedOpenIssues();
-  const performed: Action[] = [];
+export async function reconcileRepo(deps: ReconcileDeps): Promise<void> {
+  const { adapter, workflow } = deps;
+  const issues = await adapter.listAssignedOpenIssues();
 
   for (const issue of issues) {
-    const mr = await forge.getMrForIssue(issue.number);
-    const lifecycle = deriveLifecycle(forge.forge, issue, mr);
-    const last = deps.agentResults.get(issue.number);
-    const action = decideAction(
-      { issue, mr, lifecycle },
-      {
-        triggerOk: deps.triggerOk(issue.number),
-        agentDone: last?.status === 'done',
-        agentNeedsInput: last?.status === 'needs_input',
-      },
-    );
-    await execute(deps, action, issue.number, mr, issue.authorUsername);
-    performed.push(action);
+    const mr = await adapter.getMrForIssue(issue.number);
+    const lifecycle = deriveLifecycle(adapter.forge, issue, mr);
+    const snapshot: IssueSnapshot = { issue, mr, lifecycle };
+    const action = decideAction(snapshot, { triggerOk: triggerOk(issue, workflow) });
+    await executeAction(action, snapshot, deps);
   }
-  return performed;
 }
 
-async function runWork(deps: ReconcileDeps, issueNumber: number): Promise<void> {
-  const { forge, workflow, repoUrl } = deps;
-  const branch = branchFor(issueNumber);
-  const dir = await deps.workspace.ensure(repoUrl, issueNumber, branch);
-  const result = await deps.runner.run(dir, workflow.promptBody, {
+// Runs the agent and consumes its status IN THE SAME TICK: done → handoff inline,
+// needs_input → block inline, in_progress → leave label in_progress.
+async function runWork(snapshot: IssueSnapshot, deps: ReconcileDeps): Promise<void> {
+  const { adapter, workflow, repoUrl } = deps;
+  const n = snapshot.issue.number;
+  const branch = branchFor(n);
+  const dir = await deps.workspace.ensure(repoUrl, n, branch);
+  const result: AgentResult = await deps.runner.run(dir, workflow.promptBody, {
     command: workflow.claude.command,
     maxTurns: workflow.claude.maxTurns,
     permissionMode: workflow.claude.permissionMode,
   });
-  deps.agentResults.set(issueNumber, result);
   if (result.status === 'needs_input') {
-    await forge.setLifecycleLabel(issueNumber, 'blocked');
-    await forge.comment({ type: 'issue', number: issueNumber }, result.summary);
+    await adapter.setLifecycleLabel(n, 'blocked');
+    await adapter.comment({ type: 'issue', number: n }, result.summary);
+  } else if (result.status === 'done') {
+    await handoff(snapshot, deps);
   }
+  // 'in_progress' → leave label in_progress (nothing to do).
 }
 
-async function execute(
-  deps: ReconcileDeps,
+// The inline handoff routine (contract "Handoff order").
+async function handoff(snapshot: IssueSnapshot, deps: ReconcileDeps): Promise<void> {
+  const { adapter, workflow, repoUrl } = deps;
+  const n = snapshot.issue.number;
+  const dir = deps.workspace.pathFor(repoUrl, n);
+  const artifacts = await deps.runProof({ workspaceDir: dir, workflow, exec: deps.exec });
+  const text = proofText(artifacts);
+  await adapter.comment({ type: 'issue', number: n }, text);
+  if (snapshot.mr) {
+    await adapter.comment({ type: 'mr', number: snapshot.mr.number }, text);
+    await adapter.assignReviewer(snapshot.mr.number, snapshot.issue.authorUsername);
+    await adapter.setMrReady(snapshot.mr.number);
+  }
+  await adapter.setLifecycleLabel(n, 'in_review');
+}
+
+async function executeAction(
   action: Action,
-  issueNumber: number,
-  mr: import('../domain/types.js').MergeRequest | null,
-  authorUsername: string,
+  snapshot: IssueSnapshot,
+  deps: ReconcileDeps,
 ): Promise<void> {
-  const { forge, workflow, repoUrl } = deps;
+  const { adapter, workflow, repoUrl } = deps;
+  const n = action.issueNumber;
+  const mr: MergeRequest | null = snapshot.mr;
   switch (action.kind) {
     case 'claim': {
-      const branch = branchFor(issueNumber);
-      await forge.createBranch(branch, workflow.git.defaultBranch);
-      await forge.createDraftMr({
+      const branch = branchFor(n);
+      await adapter.createBranch(branch, workflow.git.defaultBranch);
+      await adapter.createDraftMr({
         sourceBranch: branch,
         targetBranch: workflow.git.target,
-        title: `Issue #${issueNumber}`,
-        body: `Closes #${issueNumber}`,
+        title: snapshot.issue.title,
+        body: `Closes #${n}`,
         draft: true,
       });
-      await forge.setLifecycleLabel(issueNumber, 'in_progress');
-      await forge.comment({ type: 'issue', number: issueNumber }, 'started working');
+      await adapter.setLifecycleLabel(n, 'in_progress');
+      await adapter.comment({ type: 'issue', number: n }, 'started working');
       return;
     }
     case 'work': {
       // changes-requested path: flip label back to in_progress before working.
-      if (mr?.changesRequested) await forge.setLifecycleLabel(issueNumber, 'in_progress');
-      await runWork(deps, issueNumber);
-      return;
-    }
-    case 'handoff': {
-      const dir = deps.workspace.pathFor(repoUrl, issueNumber);
-      const artifacts = await deps.runProof({ workspaceDir: dir, workflow });
-      const text = proofText(artifacts);
-      await forge.comment({ type: 'issue', number: issueNumber }, text);
-      if (mr) {
-        await forge.comment({ type: 'mr', number: mr.number }, text);
-        await forge.assignReviewer(mr.number, authorUsername);
-        await forge.setMrReady(mr.number);
-      }
-      await forge.setLifecycleLabel(issueNumber, 'in_review');
+      if (mr?.changesRequested) await adapter.setLifecycleLabel(n, 'in_progress');
+      await runWork(snapshot, deps);
       return;
     }
     case 'review_check':
       return; // polling only
     case 'merge': {
       if (mr)
-        await forge.mergeMr(
-          mr.number,
-          workflow.git.mergeStrategy,
-          workflow.git.deleteSourceBranch,
-        );
+        await adapter.mergeMr(mr.number, workflow.git.mergeStrategy, workflow.git.deleteSourceBranch);
       return;
     }
     case 'cleanup':
-      await deps.workspace.remove(repoUrl, issueNumber);
+      await deps.workspace.remove(repoUrl, n);
       return;
     case 'block':
-      await forge.setLifecycleLabel(issueNumber, 'blocked');
-      await forge.comment({ type: 'issue', number: issueNumber }, action.reason);
+      await adapter.setLifecycleLabel(n, 'blocked');
+      await adapter.comment({ type: 'issue', number: n }, action.reason);
       return;
+    case 'handoff': // never returned by decideAction; handled inline by runWork.
     case 'noop':
       return;
   }
@@ -2328,12 +2438,12 @@ async function execute(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `npx vitest run packages/core/src/reconciler/index.test.ts`
-Expected: PASS — all 9 tests green (claim, work x2, handoff, review_check/merge x3, cleanup, full walk).
+Expected: PASS — all 9 tests green (claim; work x3 incl. inline done→handoff and needs_input→block; review_check/merge/changes-requested x3; cleanup; single-tick lifecycle).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/core/src/agent/contract.ts packages/core/src/reconciler/index.ts packages/core/src/reconciler/index.test.ts
+git add packages/core/src/agent/contract.ts packages/core/src/agent/runner.ts packages/core/src/proof/index.ts packages/core/src/workspace/manager.ts packages/core/src/util/exec.ts packages/core/src/daemon/state.ts packages/core/src/reconciler/index.ts packages/core/src/reconciler/index.test.ts
 git commit -m "feat(core): add reconcileRepo executor over injected collaborators"
 ```
 
@@ -2342,10 +2452,10 @@ git commit -m "feat(core): add reconcileRepo executor over injected collaborator
 ## Task 14: daemon RunState (in-memory slots, rebuilt from forge)
 
 **Files:**
-- Create: `packages/core/src/daemon/state.ts`
+- Modify: `packages/core/src/daemon/state.ts` (append `RunState`; the `SlotManager` interface was created in Task 13)
 - Test: `packages/core/src/daemon/state.test.ts`
 
-> No persistence. `RunState` tracks running slots (issues currently `in_progress`) and counts. `rebuildFromForge(forge)` derives the active set from the forge (issues whose derived lifecycle is `in_progress`) — proving restart-safety. `tryClaimSlot` / `releaseSlot` enforce `globalMax`.
+> No persistence. `RunState implements SlotManager` and tracks running slots (issues currently `in_progress`) and counts. `rebuildFromForge(forge)` derives the active set from the forge (issues whose derived lifecycle is `in_progress`) — proving restart-safety. `tryClaimSlot` / `releaseSlot` enforce `globalMax`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2422,17 +2532,18 @@ describe('RunState.rebuildFromForge', () => {
 Run: `npx vitest run packages/core/src/daemon/state.test.ts`
 Expected: FAIL — `Failed to resolve import "./state.js"`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Write minimal implementation (append `RunState` to `state.ts`)**
 
-`packages/core/src/daemon/state.ts`:
+Append to `packages/core/src/daemon/state.ts` (the `SlotManager` interface already lives there from Task 13). M1 keys slots by `issueNumber`; M5 reconciles the full `(repoUrl, issueNumber)` `SlotManager` + `RunState` data-shape split from the contract.
 
 ```ts
 import type { ForgeAdapter } from '../forge/adapter.js';
 import { deriveLifecycle } from '../reconciler/derive.js';
+// SlotManager is declared above in this same file (added in Task 13).
 
 // In-memory only. The single piece of daemon state; rebuilt from the forge on
 // restart (no persistence). Tracks which issues currently hold an active slot.
-export class RunState {
+export class RunState implements SlotManager {
   private active = new Set<number>();
 
   constructor(private readonly globalMax: number) {}
@@ -2615,7 +2726,7 @@ git commit -m "feat(core): add adaptive polling scheduler with injected clock"
 - Modify: `packages/core/src/index.ts` (replace stub with real public exports)
 - Delete: `packages/core/src/index.test.ts` (temporary smoke test from Task 1)
 
-> `tick()` runs one poll cycle for due repos: for each repo, if `scheduler.isDue`, run `reconcileRepo`, then reschedule based on whether any action consumed/holds a slot. The logger is a structured logger carrying `issue_number`, `forge`, `mr_number` fields. Loop test drives one tick against MemoryForge end-to-end and checks an action was performed and the repo was rescheduled.
+> `tick()` runs one poll cycle for due repos: for each repo, if `scheduler.isDue`, run `reconcileRepo` (returns `void`), then re-derive active work from the forge (`state.rebuildFromForge`) and reschedule on the active/idle cadence accordingly. The logger is a structured logger carrying `issue_number`, `forge`, `mr_number` fields. Loop test drives one tick against MemoryForge end-to-end and checks the forge mutated (issue claimed → in_progress) and the repo was rescheduled.
 
 - [ ] **Step 1: Write the failing logger test**
 
@@ -2703,11 +2814,12 @@ import { tick, type TickDeps } from './loop.js';
 import { Scheduler } from './scheduler.js';
 import { RunState } from './state.js';
 import { MemoryForge } from '../forge/memory.js';
+import { lifecycleLabel } from '../domain/lifecycle.js';
 import type { DefaultsCfg } from '../config/schema.js';
+import type { MaestroConfig } from '../config/schema.js';
 import type { WorkflowConfig } from '../workflow/schema.js';
 import type { ReconcileDeps } from '../reconciler/index.js';
 import type { Issue } from '../domain/types.js';
-import type { AgentResult } from '../agent/contract.js';
 
 const defaults: DefaultsCfg = {
   pollIntervalActive: '30s',
@@ -2718,6 +2830,8 @@ const defaults: DefaultsCfg = {
   workspaces: { root: './workspaces', diskCap: '20GB', cleanup: 'lru' },
 };
 
+const config: MaestroConfig = { defaults, forges: {}, repos: [] };
+
 const workflow: WorkflowConfig = {
   forge: 'gitlab',
   project: 'group/api',
@@ -2725,18 +2839,19 @@ const workflow: WorkflowConfig = {
   manageBoard: true,
   trigger: { assignee: 'bot', requireLabel: null, allowedActors: [] },
   proof: { type: 'none' },
+  review: { changesSignal: 'label' },
   git: { defaultBranch: 'main', target: 'main', mergeStrategy: 'squash', deleteSourceBranch: true },
   claude: { command: 'claude', maxTurns: 40, permissionMode: 'acceptEdits' },
   concurrency: { maxActive: 2 },
   promptBody: 'do the work',
 };
 
-function reconcileDeps(forge: MemoryForge, agentResults: Map<number, AgentResult>): ReconcileDeps {
+function reconcileDeps(forge: MemoryForge, slots: RunState): ReconcileDeps {
   return {
-    forge,
+    adapter: forge,
     workflow,
+    config,
     repoUrl: 'gitlab.com/group/api',
-    agentResults,
     runner: { async run() { return { status: 'in_progress', summary: '...' }; } },
     runProof: async () => [],
     workspace: {
@@ -2745,12 +2860,14 @@ function reconcileDeps(forge: MemoryForge, agentResults: Map<number, AgentResult
       async enforceDiskCap() {},
       pathFor(_r, n) { return `/ws/${n}`; },
     },
-    triggerOk: () => true,
+    exec: { async run() { return { stdout: '', stderr: '', exitCode: 0 }; } },
+    slots,
+    clock: () => 0,
   };
 }
 
 describe('tick', () => {
-  it('reconciles a due repo and reschedules it', async () => {
+  it('reconciles a due repo and reschedules it on the active cadence', async () => {
     const forge = new MemoryForge({ forge: 'gitlab', project: 'group/api', botUser: 'maestro-bot' });
     const issue: Issue = {
       id: 'i1', number: 1, title: 't', body: '', state: 'open',
@@ -2761,35 +2878,41 @@ describe('tick', () => {
 
     const scheduler = new Scheduler(defaults, () => 0);
     const state = new RunState(2);
-    const agentResults = new Map<number, AgentResult>();
     const deps: TickDeps = {
       now: 1000,
       scheduler,
       state,
-      repos: [{ repoUrl: 'gitlab.com/group/api', reconcile: reconcileDeps(forge, agentResults) }],
+      repos: [{ repoUrl: 'gitlab.com/group/api', reconcile: reconcileDeps(forge, state) }],
     };
 
-    const actions = await tick(deps);
-    expect(actions).toEqual([{ kind: 'claim', issueNumber: 1 }]);
-    // repo had active work after claim -> active cadence
+    await tick(deps);
+    // claim ran → issue is now in_progress (active work) → active cadence (30s).
+    expect((await forge.getIssue(1))!.labels).toContain(lifecycleLabel('gitlab', 'in_progress'));
     expect(scheduler.isDue('gitlab.com/group/api', 1000)).toBe(false);
     expect(scheduler.isDue('gitlab.com/group/api', 1000 + 30_000)).toBe(true);
   });
 
-  it('skips a repo that is not due', async () => {
+  it('skips a repo that is not due (no reconcile side effects)', async () => {
     const forge = new MemoryForge({ forge: 'gitlab', project: 'group/api', botUser: 'maestro-bot' });
+    forge.seedIssue({
+      id: 'i1', number: 1, title: 't', body: '', state: 'open',
+      assignees: ['maestro-bot'], authorUsername: 'alice', labels: [],
+      createdAt: '2026-06-03T00:00:00Z', webUrl: 'u',
+    });
     const scheduler = new Scheduler(defaults, () => 0);
     scheduler.schedule('gitlab.com/group/api', 1000, false); // due at 301000
+    const state = new RunState(2);
     const deps: TickDeps = {
       now: 2000,
       scheduler,
-      state: new RunState(2),
+      state,
       repos: [
-        { repoUrl: 'gitlab.com/group/api', reconcile: reconcileDeps(forge, new Map()) },
+        { repoUrl: 'gitlab.com/group/api', reconcile: reconcileDeps(forge, state) },
       ],
     };
-    const actions = await tick(deps);
-    expect(actions).toEqual([]);
+    await tick(deps);
+    // not due → reconcile did not run → no branch was claimed.
+    expect(forge.hasBranch('maestro/issue-1')).toBe(false);
   });
 });
 ```
@@ -2804,7 +2927,6 @@ Expected: FAIL — `Failed to resolve import "./loop.js"`.
 `packages/core/src/daemon/loop.ts`:
 
 ```ts
-import type { Action } from '../domain/types.js';
 import { reconcileRepo, type ReconcileDeps } from '../reconciler/index.js';
 import { Scheduler } from './scheduler.js';
 import { RunState } from './state.js';
@@ -2822,19 +2944,17 @@ export interface TickDeps {
 }
 
 // One poll cycle. Reconciles every due repo, then reschedules it based on
-// whether it currently has active (in_progress) work.
-export async function tick(deps: TickDeps): Promise<Action[]> {
-  const performed: Action[] = [];
+// whether it currently has active (in_progress) work — derived from the forge
+// (durable), not from in-tick action results. `reconcileRepo` returns void.
+export async function tick(deps: TickDeps): Promise<void> {
   for (const entry of deps.repos) {
     if (!deps.scheduler.isDue(entry.repoUrl, deps.now)) continue;
-    const actions = await reconcileRepo(entry.reconcile);
-    performed.push(...actions);
-    const hasActiveWork = actions.some(
-      (a) => a.kind === 'claim' || a.kind === 'work' || a.kind === 'handoff',
-    );
+    await reconcileRepo(entry.reconcile);
+    // Active cadence iff the forge shows in_progress work after reconcile.
+    await deps.state.rebuildFromForge(entry.reconcile.adapter);
+    const hasActiveWork = deps.state.activeCount() > 0;
     deps.scheduler.schedule(entry.repoUrl, deps.now, hasActiveWork);
   }
-  return performed;
 }
 ```
 
@@ -2869,7 +2989,7 @@ export type { LabeledState } from './domain/lifecycle.js';
 
 export {
   parseDuration,
-  maestroConfigSchema,
+  MaestroConfigSchema,
 } from './config/schema.js';
 export type {
   MaestroConfig,
@@ -2882,7 +3002,7 @@ export type {
 export { loadConfig, watchConfig } from './config/load.js';
 
 export {
-  workflowFrontMatterSchema,
+  WorkflowConfigSchema,
   toWorkflowConfig,
 } from './workflow/schema.js';
 export type {
@@ -2901,16 +3021,16 @@ export { deriveLifecycle } from './reconciler/derive.js';
 export { decideAction } from './reconciler/decide.js';
 export type { DecideContext } from './reconciler/decide.js';
 export { reconcileRepo } from './reconciler/index.js';
-export type {
-  ReconcileDeps,
-  RunnerLike,
-  WorkspaceLike,
-  ProofArtifact,
-} from './reconciler/index.js';
+export type { ReconcileDeps } from './reconciler/index.js';
 
 export type { AgentResult, AgentStatus } from './agent/contract.js';
+export type { ClaudeRunner, RunnerOpts } from './agent/runner.js';
+export type { ProofArtifact, ProofContext, ProofStrategy } from './proof/index.js';
+export type { WorkspaceManager } from './workspace/manager.js';
+export type { CommandRunner } from './util/exec.js';
 
 export { RunState } from './daemon/state.js';
+export type { SlotManager } from './daemon/state.js';
 export { Scheduler } from './daemon/scheduler.js';
 export { tick } from './daemon/loop.js';
 export type { TickDeps, RepoTickEntry } from './daemon/loop.js';
@@ -2946,7 +3066,7 @@ git commit -m "feat(core): add daemon tick loop, structured logger, public expor
 - Create: `packages/cli/tsconfig.json`
 - Create: `packages/cli/src/daemon.ts`
 
-> A runnable demo wiring `MemoryForge` + inline stub collaborators (clearly marked as M3/M4 seams) into one `tick()` and printing the actions. No commander yet (M5). It seeds one issue, runs a tick, logs the resulting actions, and exits. Run via `node` after a build, or `tsx`/`vitest`-free direct check; this milestone verifies it by a smoke test through the build.
+> A runnable demo wiring `MemoryForge` + inline stub collaborators (clearly marked as M3/M4 seams) into a few `tick()` cycles and logging the issue's derived state after each. No commander yet (M5). It seeds one issue, runs ticks, logs progress, and exits. Run via `node` after a build, or `tsx`/`vitest`-free direct check; this milestone verifies it by a smoke test through the build.
 
 - [ ] **Step 1: Create the CLI package files**
 
@@ -2995,10 +3115,10 @@ import {
   tick,
   createLogger,
   type DefaultsCfg,
+  type MaestroConfig,
   type WorkflowConfig,
   type ReconcileDeps,
   type TickDeps,
-  type AgentResult,
 } from '@maestro/core';
 
 // --- demo config (in real use: loadConfig / loadWorkflow) ---
@@ -3011,6 +3131,8 @@ const defaults: DefaultsCfg = {
   workspaces: { root: './workspaces', diskCap: '20GB', cleanup: 'lru' },
 };
 
+const config: MaestroConfig = { defaults, forges: {}, repos: [] };
+
 const workflow: WorkflowConfig = {
   forge: 'gitlab',
   project: 'group/api',
@@ -3018,6 +3140,7 @@ const workflow: WorkflowConfig = {
   manageBoard: true,
   trigger: { assignee: 'bot', requireLabel: null, allowedActors: [] },
   proof: { type: 'none' },
+  review: { changesSignal: 'label' },
   git: { defaultBranch: 'main', target: 'main', mergeStrategy: 'squash', deleteSourceBranch: true },
   claude: { command: 'claude', maxTurns: 40, permissionMode: 'acceptEdits' },
   concurrency: { maxActive: 2 },
@@ -3026,14 +3149,12 @@ const workflow: WorkflowConfig = {
 
 // --- M3/M4 SEAMS: inline stubs. Replaced by real ClaudeRunner (M3),
 //     runProof (M4), and WorkspaceManager (M3). ---
-const agentResults = new Map<number, AgentResult>();
-
-function buildReconcileDeps(forge: MemoryForge): ReconcileDeps {
+function buildReconcileDeps(forge: MemoryForge, slots: RunState): ReconcileDeps {
   return {
-    forge,
+    adapter: forge,
     workflow,
+    config,
     repoUrl: 'gitlab.com/group/api',
-    agentResults,
     runner: {
       // SEAM (M3): real runner invokes `claude -p --output-format stream-json`.
       async run() {
@@ -3041,7 +3162,7 @@ function buildReconcileDeps(forge: MemoryForge): ReconcileDeps {
       },
     },
     // SEAM (M4): real runProof dispatches on workflow.proof.type.
-    runProof: async () => [{ path: '/tmp/demo-proof.txt', kind: 'text', caption: 'demo proof' }],
+    runProof: async () => [{ path: 'proof/demo-proof.txt', kind: 'text', caption: 'demo proof' }],
     // SEAM (M3): real WorkspaceManager clones under workspaces/.
     workspace: {
       async ensure(_repoUrl, issueNumber, branch) {
@@ -3053,7 +3174,10 @@ function buildReconcileDeps(forge: MemoryForge): ReconcileDeps {
         return `./workspaces/${issueNumber}`;
       },
     },
-    triggerOk: () => true,
+    // SEAM (M2/M3): real execaRunner from util/exec.ts runs git/CLI subprocesses.
+    exec: { async run() { return { stdout: '', stderr: '', exitCode: 0 }; } },
+    slots,
+    clock: () => Date.now(),
   };
 }
 
@@ -3083,15 +3207,17 @@ async function main(): Promise<void> {
     now: Date.now(),
     scheduler,
     state,
-    repos: [{ repoUrl: 'gitlab.com/group/api', reconcile: buildReconcileDeps(forge) }],
+    repos: [{ repoUrl: 'gitlab.com/group/api', reconcile: buildReconcileDeps(forge, state) }],
   };
 
-  // Run a few ticks to walk the lifecycle (claim → work → handoff).
+  // Run a few ticks to walk the lifecycle. The runner stub reports `done`, so the
+  // `work` executor runs the handoff inline in the same tick. tick() returns void;
+  // we log the issue's derived state after each tick to show progress.
   for (let i = 0; i < 3; i++) {
-    deps.now = Date.now() + i; // advance clock so the repo stays due
     // force-due each iteration for the demo by using a fresh scheduler check window
-    const actions = await tick({ ...deps, scheduler: new Scheduler(defaults) });
-    for (const a of actions) log.info('action', { issue_number: a.issueNumber, kind: a.kind });
+    await tick({ ...deps, now: Date.now() + i, scheduler: new Scheduler(defaults) });
+    const issue = await forge.getIssue(1);
+    log.info('tick complete', { issue_number: 1, labels: issue?.labels ?? [] });
   }
 
   log.info('demo complete');
@@ -3112,7 +3238,7 @@ Expected: install links `@maestro/cli` (depends on `@maestro/core` via `workspac
 - [ ] **Step 4: Run the demo to verify it executes end-to-end**
 
 Run: `node packages/cli/dist/daemon.js`
-Expected: prints JSON log lines including an `action` line for issue 1 with `kind` `claim` (first tick), then `work`, then `handoff` across the three iterations, ending with `demo complete`. Exits 0.
+Expected: prints JSON `tick complete` lines for issue 1 — tick 1 leaves it `maestro::in_progress` (claim), tick 2 advances it to `maestro::in_review` (work runs the agent, which reports `done`, so handoff runs inline), tick 3 holds at `in_review` (review_check). Ends with `demo complete`. Exits 0.
 
 - [ ] **Step 5: Commit**
 
@@ -3158,11 +3284,11 @@ git commit -m "chore: apply prettier formatting"
 
 ## Self-Review (performed against the contracts + milestone scope)
 
-- **Domain types/lifecycle/ForgeAdapter/derive/decide/config/workflow schemas:** all copied verbatim from the contracts (camelCase TS, snake_case YAML mapping) — no invented fields. ✓
-- **State machine coverage:** `derive.test.ts` covers all five states; `decide.test.ts` covers all 11 mapping rows from the contract table; `reconciler/index.test.ts` walks new→in_progress→handoff→in_review→merge→done plus blocked and changes-requested. ✓
-- **Pure reconciler:** `derive.ts` and `decide.ts` import only domain types (+ `labeledStateOf`), do no I/O. ✓
-- **No persistence:** only `daemon/state.ts` holds in-memory slots; `rebuildFromForge` proves restart-safety. ✓
-- **Collaborator seams:** `RunnerLike`/`WorkspaceLike`/`runProof` injected; real impls deferred to M3/M4; CLI uses clearly-marked inline stubs. ✓
+- **Domain types/lifecycle/ForgeAdapter/derive/decide/config/workflow schemas:** all derived from the contracts (camelCase TS, snake_case YAML mapping) — including `MergeRequest.description`, `WorkflowConfig.review`, schema names `MaestroConfigSchema`/`WorkflowConfigSchema`. ✓
+- **State machine coverage:** `derive.test.ts` covers all five states; `decide.test.ts` covers the lifecycle→action table (`in_progress → work` always); `reconciler/index.test.ts` exercises a single-tick lifecycle new→in_progress→(work+done→inline handoff)→in_review→merge→done plus blocked and changes-requested. ✓
+- **Pure reconciler:** `derive.ts` and `decide.ts` import only domain types (+ `labeledStateOf`), do no I/O; `DecideContext` is `triggerOk`-only (no agent status). ✓
+- **No persistence / no cross-tick memory:** only `daemon/state.ts` holds in-memory slots; agent status is consumed in the same tick by the `work` executor; `rebuildFromForge` proves restart-safety. ✓
+- **Collaborator seams:** one `ReconcileDeps` bag with `adapter`/`workspace`/`runner`/`runProof`/`exec`/`slots`/`config`/`clock`; collaborator types imported from owning modules (`agent/runner.ts`, `proof/index.ts`, `workspace/manager.ts`, `util/exec.ts`, `daemon/state.ts`) as type-only seams; CLI uses clearly-marked inline stubs. ✓
 - **Commits:** Conventional Commits, explicit `git add <paths>`, no `Co-Authored-By`. ✓
 - **Out of scope respected:** no `glab`/`gh`/`claude`/proof/workspace real modules, no CLI commands beyond the daemon demo, no web. ✓
 
@@ -3172,14 +3298,6 @@ git commit -m "chore: apply prettier formatting"
 
 These are gaps the contracts (plan 00) did not fully specify; M1 made the minimal local choice noted, and they should be confirmed before later milestones lock in:
 
-1. **`reconcileRepo` dependency shape (`ReconcileDeps`) is not in the contracts.** The contracts say `reconciler/index.ts` exports `reconcileRepo(...)` but do not define its parameter type, nor where the injected collaborators (`ClaudeRunner`, `runProof`, `WorkspaceManager`) are threaded in, nor where the per-issue `agentResults` map lives. M1 defined `ReconcileDeps` (plus structural `RunnerLike`/`WorkspaceLike`/`ProofArtifact`) inside `reconciler/index.ts`. Confirm: should these collaborator types be imported from `agent/runner.ts`, `proof/index.ts`, `workspace/manager.ts` (M3/M4 owned) instead of re-declared structurally? If so, M3/M4 must keep their signatures compatible.
+1. **`enforceDiskCap` / LRU eviction is unexercised in M1.** `WorkspaceManager.enforceDiskCap` is declared (type-only seam) and the CLI stub no-ops it. The real LRU policy (`workspaces.cleanup: lru | on_terminal`, `disk_cap`) is M3's `WorkspaceManager`. No action needed in M1; flagged so M3 owns it.
 
-2. **Where do agent done/needs_input flags come from across ticks?** The contract's `DecideContext` has `agentDone`/`agentNeedsInput` but does not say how the daemon remembers the last agent result between ticks (state lives in the forge, but the agent's `done`/`needs_input` status is ephemeral). M1 threaded a per-issue `agentResults: Map` through `ReconcileDeps`, updated by the `work` executor. Confirm this is acceptable given the "no persistence except daemon/state.ts" rule — i.e. is `agentResults` legitimately part of in-memory daemon state, or should `done` be inferred from the forge (e.g. all MR-description checkboxes ticked) instead? The spec §9 implies the latter is the durable signal.
-
-3. **`forge` inference in `parseWorkflow` when omitted.** The contract says `WorkflowConfig.forge` is "inferred from host if omitted in file", but `parseWorkflow(raw)` receives only the raw markdown — it has no repo URL/host. M1 defaulted omitted `forge` to `'gitlab'`. Confirm whether `parseWorkflow` should take an optional host/forge hint, or whether `loadWorkflow(repoDir)` is responsible for inference (and from what — there is no repo URL available at `repoDir`).
-
-4. **`createDraftMr` MR title for `claim`.** The contracts say "MR/PR title: `<issue.title>`", but the milestone's `claim` executor only has the issue number in scope at action time (the snapshot is available, but the executor signature in M1 passes `issueNumber`). M1 used `Issue #<n>` as a placeholder title. Confirm the executor should pull `issue.title` from the snapshot (trivial to wire) — flagged only because the milestone notes listed `claim` behavior without specifying the title source.
-
-5. **`updateMrDescription` is part of `ForgeAdapter` but unused in M1.** The MR description is the agent's living plan (spec §9), written by the agent in M3. `MemoryForge.updateMrDescription` is a no-op that does not model description content. Confirm M3's runner is responsible for calling it, and whether `MemoryForge` should later store the description for fidelity.
-
-6. **`enforceDiskCap` / LRU eviction is unexercised in M1.** `WorkspaceLike.enforceDiskCap` is declared and the CLI stub no-ops it. The real LRU policy (`workspaces.cleanup: lru | on_terminal`, `disk_cap`) is M3's `WorkspaceManager`. No action needed in M1; flagged so M3 owns it.
+2. **`SlotManager`/`RunState` data-shape split.** M1's `SlotManager` keys slots by `issueNumber` and `RunState` is the implementing class. The contract's `daemon/state.ts` also defines a `RunState` *data* interface (`{ running, queued, totals }`) and a `SlotManager` keyed by `(repoUrl, issueNumber)` with `snapshot(): RunState`. M5 owns the HTTP `/api/state` surface and must reconcile these shapes; M1 deliberately kept the gate minimal since the reconciler does not yet call slot methods.

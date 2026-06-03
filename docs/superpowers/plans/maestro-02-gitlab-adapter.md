@@ -4,7 +4,7 @@
 
 **Goal:** Implement `GitLabForge` (every `ForgeAdapter` method) backed by `glab` + GitLab REST, plus `createForge` factory, and rewire the daemon loop to obtain the adapter via the factory instead of the M1 hard-wired `MemoryForge` demo path.
 
-**Architecture:** `GitLabForge` is a thin, testable adapter that depends only on two injected seams — a command runner (`run(cmd, args, opts)` over `execa`) and an HTTP `fetch` — so all tests stub I/O and never touch real GitLab. Reads use `glab` JSON output; writes that have no clean `glab` flag (label create, board/list create, scoped-label exclusivity) use GitLab REST with a token read from `process.env[tokenEnv]`. The adapter maps raw GitLab JSON into the normalized `Issue` / `MergeRequest` domain types so the reconciler stays forge-agnostic. `createForge` selects the implementation per repo forge. `daemon/loop.ts` is modified minimally to call `createForge` per repo.
+**Architecture:** `GitLabForge` is a thin, testable adapter that depends only on two injected seams — the shared `CommandRunner` (`run(cmd, args, opts) => {stdout, stderr, exitCode}`) from `packages/core/src/util/exec.ts` and an HTTP `fetch` — so all tests stub I/O and never touch real GitLab. Reads use `glab` JSON output; writes that have no clean `glab` flag (label create, board/list create, scoped-label exclusivity) use GitLab REST with a token resolved inside the adapter via `config.forges[forge].tokenEnv`. The adapter maps raw GitLab JSON into the normalized `Issue` / `MergeRequest` domain types so the reconciler stays forge-agnostic. `createForge` selects the implementation per repo forge. `daemon/loop.ts` is modified minimally to call `createForge` per repo.
 
 **Tech Stack:** Node 20+, TypeScript 5.x (ESM), Vitest, `execa`, native `fetch`, contracts from `maestro-00-contracts.md`.
 
@@ -16,44 +16,111 @@
 
 | Path | Responsibility | Action |
 |---|---|---|
-| `packages/core/src/forge/gitlab.ts` | `GitLabForge implements ForgeAdapter`; `glab`+REST I/O via injected `CommandRunner` and `fetch`; GitLab JSON → domain mapping; scoped-label exclusivity; approval/changes detection; `ensureLabels` / `ensureBoard`. | Create |
-| `packages/core/src/forge/gitlab.test.ts` | Unit tests: JSON→domain mapping, scoped-label exclusivity, approval/changes-requested detection, `ensureLabels` POST calls, `ensureBoard` board+list creation calls, `manageBoard` opt-out. | Create |
-| `packages/core/src/forge/factory.ts` | `createForge(forge, repo, deps)` → `GitLabForge` for `'gitlab'`; throws `ForgeError` for unimplemented forges (GitHub added in M6). | Create |
+| `packages/core/src/forge/gitlab.ts` | `GitLabForge implements ForgeAdapter` (every method incl. `createIssue`, `getMrDescription`, `blobUrl`); `glab`+REST I/O via the shared `CommandRunner` (`util/exec.ts`) and `fetch`; GitLab JSON → domain mapping (incl. `MergeRequest.description`); scoped-label exclusivity; approval + `changesSignal`-driven changes detection; `ensureLabels` (+ changes-requested label) / `ensureBoard`. | Create |
+| `packages/core/src/forge/fixtures/*` | Pinned `glab` version + one recorded JSON payload per read method (Task 0). | Create |
+| `packages/core/src/forge/gitlab.test.ts` | Unit tests: JSON→domain mapping, scoped-label exclusivity, approval + both `changesSignal` paths, `getMrForIssue` by head branch, `createIssue`/`getMrDescription`/`blobUrl`, `ensureLabels` (+ changes label) POST calls, `ensureBoard` board+list creation, rebase-then-merge. | Create |
+| `packages/core/src/forge/factory.ts` | `createForge(forge, { url, project, botUser }, ForgeDeps)` → `GitLabForge` for `'gitlab'`; throws `ForgeError` for unimplemented forges (GitHub added in M6). | Create |
 | `packages/core/src/forge/factory.test.ts` | Unit tests: returns `GitLabForge` for `'gitlab'`; throws for `'github'`. | Create |
 | `packages/core/src/daemon/loop.ts` | Obtain the per-repo adapter via `createForge` instead of the M1 hard-wired `MemoryForge`. | Modify (minimal) |
 
-### Injected seam type (defined once in `gitlab.ts`, re-exported via factory)
+### Injected seam type (imported from `util/exec.ts` — NOT declared here)
+
+The subprocess seam is the **shared** `CommandRunner` from
+`packages/core/src/util/exec.ts` (contract: "No plan declares its own
+`ExecFn`/`CommandRunner`"). This plan imports it; it does not redefine it.
 
 ```ts
-// The single subprocess seam. `execa` satisfies this shape in production;
-// tests pass a stub. Mirrors execa's resolved result (only fields we read).
+// packages/core/src/util/exec.ts (M1 — imported, not declared here)
 export interface CommandRunner {
-  (file: string, args: string[], opts?: { input?: string; cwd?: string }): Promise<{ stdout: string }>;
+  run(cmd: string, args: string[], opts?: { cwd?: string; input?: string; env?: Record<string, string> }):
+    Promise<{ stdout: string; stderr: string; exitCode: number }>;
 }
+export const execaRunner: CommandRunner;   // production impl over execa
+```
+
+`GitLabForge` is constructed by `createForge` with the contract-mandated shapes —
+`repo: { url; project; botUser }` and `deps: ForgeDeps = { config; runner?; fetchImpl? }`.
+It carries those forward internally:
+
+```ts
+// packages/core/src/forge/gitlab.ts
+import type { CommandRunner } from '../util/exec.js';
+import type { MaestroConfig } from '../config/schema.js';
+import type { WorkflowConfig } from '../workflow/schema.js';
 
 // The HTTP seam. Native `fetch` satisfies this in production; tests pass a stub.
 export type FetchLike = typeof fetch;
 
 export interface GitLabForgeDeps {
-  run: CommandRunner;     // execa
-  fetch: FetchLike;       // global fetch
-  host: string;           // e.g. "gitlab.com" (from config ForgeAuth.host)
-  tokenEnv: string;       // NAME of env var holding the token (config ForgeAuth.tokenEnv)
-  env?: NodeJS.ProcessEnv; // defaults to process.env; injectable for tests
+  runner: CommandRunner;     // shared seam from util/exec.ts (default execaRunner)
+  fetchImpl: FetchLike;      // global fetch
+  config: MaestroConfig;     // token + host resolved via config.forges.gitlab
+  review: WorkflowConfig['review'];  // { changesSignal: 'native'|'label'; changesLabel? }
 }
 ```
 
-> **Token rule (spec §5, contracts):** `tokenEnv` is the *name* of the env var. The token value is read as `(deps.env ?? process.env)[deps.tokenEnv]`. The plan never logs or hard-codes a token.
+> **Why `review` is in deps:** the `ForgeAdapter` interface fixes
+> `getMrForIssue(issueNumber)` / `ensureLabels()` with no per-call workflow arg, yet
+> the contract says `MergeRequest.changesRequested` is "derived per
+> `WorkflowConfig.review.changesSignal`" and `ensureLabels` creates the
+> changes-requested label only when `changesSignal === 'label'`. The per-repo review
+> config is therefore injected once at construction (the daemon already has the
+> repo's `WorkflowConfig`).
+
+> **Token rule (spec §5, contracts):** the adapter resolves the token from
+> `config.forges.gitlab` — it reads the env var **named** by `tokenEnv`:
+> `process.env[config.forges.gitlab.tokenEnv]`. The host comes from
+> `config.forges.gitlab.host`. The plan never logs or hard-codes a token.
 
 > **GitLab REST conventions used below:**
-> - Base URL: `https://${host}/api/v4`.
+> - Base URL: `https://${this.host}/api/v4` where `this.host = config.forges.gitlab.host`.
 > - Auth header: `PRIVATE-TOKEN: <token>`.
 > - Project id in paths is the URL-encoded `project` path (e.g. `group%2Frepo`).
 > - Scoped labels (`maestro::in_progress`) are mutually exclusive in GitLab *only when the `::` separator is single-colon-scoped*; the contract uses `maestro::<state>`. We additionally enforce exclusivity ourselves by removing the other maestro labels on every `setLifecycleLabel` so behaviour is identical regardless of GitLab's own scoped-label handling.
 
 ---
 
-## Task 1: `CommandRunner` / deps types + `GitLabForge` skeleton with read-only props
+## Task 0: Version-pin `glab` + record one real JSON fixture per read method
+
+Contract ("Module ownership notes"): **version-pin `glab`** and record one real
+JSON fixture per read method to lock field shapes. `glab`'s `-F json` output has
+historically drifted from raw REST (label objects vs. strings; `iid` vs `id`), and
+the contracts pin no version, so the mappers in Tasks 2/4/6 must be validated
+against a captured shape — not assumed.
+
+**Files:**
+- Create: `packages/core/src/forge/fixtures/glab-version.txt` (pinned `glab --version`)
+- Create: `packages/core/src/forge/fixtures/issue-list.json`, `issue-view.json`, `mr-list.json`, `mr-approval-state.json`, `mr-discussions.json`
+
+- [ ] **Step 1:** Pin the toolchain. Record the exact version this adapter is
+  validated against (e.g. `glab 1.45.0`) in `fixtures/glab-version.txt`, and add it
+  to the repo's tool-version doc / `mise`/`asdf` pin so CI and dev use the same `glab`.
+
+- [ ] **Step 2:** Capture one real JSON payload per read method against a throwaway
+  GitLab project, saving raw stdout verbatim:
+  - `glab issue list --assignee <bot> --state opened -R <proj> -F json` → `issue-list.json`
+  - `glab issue view <iid> -R <proj> -F json` → `issue-view.json`
+  - `glab mr list --author <bot> --state opened -R <proj> -F json` → `mr-list.json`
+  - `GET /projects/:id/merge_requests/:iid/approval_state` → `mr-approval-state.json`
+  - `GET /projects/:id/merge_requests/:iid/discussions` → `mr-discussions.json`
+
+- [ ] **Step 3:** Confirm each fixture's field names match the `Raw*` interfaces in
+  Tasks 2/4/6 (`iid`, `web_url`, `source_branch`, `labels` as a string array,
+  `assignees[].username`). If `glab` emits label objects instead of strings for the
+  pinned version, adjust `RawGitLabIssue.labels` / the mapper accordingly **here**,
+  before the mapping tasks rely on it. The Task 2/4/6 unit tests SHOULD derive their
+  inline payloads from these fixtures so tests and reality stay locked.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add packages/core/src/forge/fixtures/
+git commit -m "chore(forge): pin glab version and record GitLab read fixtures"
+```
+
+---
+
+## Task 1: `GitLabForge` skeleton with read-only props (shared `CommandRunner`)
 
 **Files:**
 - Create: `packages/core/src/forge/gitlab.ts`
@@ -65,27 +132,52 @@ export interface GitLabForgeDeps {
 // packages/core/src/forge/gitlab.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import { GitLabForge, type GitLabForgeDeps } from './gitlab.js';
+import type { MaestroConfig } from '../config/schema.js';
+
+// Minimal config carrying the gitlab forge auth the adapter reads.
+function makeConfig(over: Partial<MaestroConfig> = {}): MaestroConfig {
+  return {
+    defaults: {
+      pollIntervalActive: '30s', pollIntervalIdle: '5m', pollJitter: '5s',
+      botUser: 'maestro-bot',
+      concurrency: { globalMax: 2 },
+      workspaces: { root: './workspaces', diskCap: '20GB', cleanup: 'lru' },
+      web: { port: 7330, host: '127.0.0.1' },
+    },
+    forges: { gitlab: { host: 'gitlab.com', tokenEnv: 'MAESTRO_GITLAB_TOKEN' } },
+    repos: [],
+    ...over,
+  } as MaestroConfig;
+}
+
+const repo = { url: 'https://gitlab.com/group/repo', project: 'group/repo', botUser: 'maestro-bot' };
 
 function makeDeps(over: Partial<GitLabForgeDeps> = {}): GitLabForgeDeps {
   return {
-    run: vi.fn(async () => ({ stdout: '' })),
-    fetch: vi.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch,
-    host: 'gitlab.com',
-    tokenEnv: 'MAESTRO_GITLAB_TOKEN',
-    env: { MAESTRO_GITLAB_TOKEN: 'tok-123' },
+    runner: { run: vi.fn(async () => ({ stdout: '', stderr: '', exitCode: 0 })) },
+    fetchImpl: vi.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch,
+    config: makeConfig(),
+    review: { changesSignal: 'label', changesLabel: 'maestro::changes-requested' },
     ...over,
   };
 }
 
+// The token is read from the env var NAMED by config.forges.gitlab.tokenEnv.
+// Tasks that exercise REST set process.env[...] (or stub it) before constructing.
+beforeEach(() => { process.env.MAESTRO_GITLAB_TOKEN = 'tok-123'; });
+
 describe('GitLabForge construction', () => {
   it('exposes forge, project and botUser', () => {
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps());
+    const f = new GitLabForge(repo, makeDeps());
     expect(f.forge).toBe('gitlab');
     expect(f.project).toBe('group/repo');
     expect(f.botUser).toBe('maestro-bot');
   });
 });
 ```
+
+> `beforeEach` requires importing it from `vitest`. Tests that must assert a missing
+> token (Task 5) `delete process.env.MAESTRO_GITLAB_TOKEN` inside the case.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -106,37 +198,50 @@ import type {
 import type { ForgeAdapter, CreateMrArgs, CommentTarget } from './adapter.js';
 import { ForgeError } from './adapter.js';
 import { LABELED_STATES, lifecycleLabel, allMaestroLabels } from '../domain/lifecycle.js';
-
-export interface CommandRunner {
-  (file: string, args: string[], opts?: { input?: string; cwd?: string }): Promise<{ stdout: string }>;
-}
+import type { CommandRunner } from '../util/exec.js';
+import type { MaestroConfig } from '../config/schema.js';
+import type { WorkflowConfig } from '../workflow/schema.js';
 
 export type FetchLike = typeof fetch;
 
 export interface GitLabForgeDeps {
-  run: CommandRunner;
-  fetch: FetchLike;
-  host: string;
-  tokenEnv: string;
-  env?: NodeJS.ProcessEnv;
+  runner: CommandRunner;     // shared seam from util/exec.ts (default execaRunner)
+  fetchImpl: FetchLike;      // global fetch
+  config: MaestroConfig;     // token + host resolved via config.forges.gitlab
+  review: WorkflowConfig['review'];  // { changesSignal: 'native'|'label'; changesLabel? }
+}
+
+// The repo identity the factory passes through (contract createForge `repo` shape).
+export interface GitLabForgeRepo {
+  url: string;       // clone url (kept for parity; reads use `project`)
+  project: string;   // gitlab path, e.g. "group/repo"
+  botUser: string;
 }
 
 export class GitLabForge implements ForgeAdapter {
   readonly forge: Forge = 'gitlab';
+  readonly project: string;
+  readonly botUser: string;
+  private readonly url: string;
 
   constructor(
-    readonly project: string,
-    readonly botUser: string,
+    repo: GitLabForgeRepo,
     private readonly deps: GitLabForgeDeps,
-  ) {}
+  ) {
+    this.project = repo.project;
+    this.botUser = repo.botUser;
+    this.url = repo.url;
+  }
 
   // --- reads ---
   listAssignedOpenIssues(): Promise<Issue[]> { throw new Error('not implemented'); }
   getIssue(_issueNumber: number): Promise<Issue | null> { throw new Error('not implemented'); }
   listOpenMrsByBot(): Promise<MergeRequest[]> { throw new Error('not implemented'); }
   getMrForIssue(_issueNumber: number): Promise<MergeRequest | null> { throw new Error('not implemented'); }
+  getMrDescription(_mrNumber: number): Promise<string> { throw new Error('not implemented'); }
 
   // --- writes ---
+  createIssue(_args: { title: string; body: string; assignee?: string }): Promise<Issue> { throw new Error('not implemented'); }
   createBranch(_name: string, _fromRef: string): Promise<void> { throw new Error('not implemented'); }
   createDraftMr(_args: CreateMrArgs): Promise<MergeRequest> { throw new Error('not implemented'); }
   setMrReady(_mrNumber: number): Promise<void> { throw new Error('not implemented'); }
@@ -145,6 +250,9 @@ export class GitLabForge implements ForgeAdapter {
   mergeMr(_mrNumber: number, _strategy: MergeStrategy, _deleteSource: boolean): Promise<void> { throw new Error('not implemented'); }
   comment(_target: CommentTarget, _body: string): Promise<void> { throw new Error('not implemented'); }
   setLifecycleLabel(_issueNumber: number, _state: LifecycleState): Promise<void> { throw new Error('not implemented'); }
+
+  // --- pure helper (no I/O) ---
+  blobUrl(_branch: string, _path: string): string { throw new Error('not implemented'); }
 
   // --- setup ---
   ensureLabels(): Promise<void> { throw new Error('not implemented'); }
@@ -196,15 +304,14 @@ describe('GitLabForge.listAssignedOpenIssues', () => {
         web_url: 'https://gitlab.com/group/repo/-/issues/7',
       },
     ];
-    const run = vi.fn(async () => ({ stdout: JSON.stringify(raw) }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ run }));
+    const run = vi.fn(async () => ({ stdout: JSON.stringify(raw), stderr: '', exitCode: 0 }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run } }));
 
     const issues = await f.listAssignedOpenIssues();
 
     expect(run).toHaveBeenCalledWith(
       'glab',
       ['issue', 'list', '--assignee', 'maestro-bot', '--state', 'opened', '-R', 'group/repo', '-F', 'json'],
-      undefined,
     );
     expect(issues).toEqual([
       {
@@ -267,7 +374,7 @@ function mapIssue(raw: RawGitLabIssue): Issue {
 ```ts
 // replace the listAssignedOpenIssues stub
 async listAssignedOpenIssues(): Promise<Issue[]> {
-  const { stdout } = await this.deps.run('glab', [
+  const { stdout } = await this.deps.runner.run('glab', [
     'issue', 'list',
     '--assignee', this.botUser,
     '--state', 'opened',
@@ -312,17 +419,17 @@ describe('GitLabForge.getIssue', () => {
       assignees: [], author: { username: 'bob' }, labels: [],
       created_at: '2026-06-02T00:00:00Z', web_url: 'https://gitlab.com/group/repo/-/issues/9',
     };
-    const run = vi.fn(async () => ({ stdout: JSON.stringify(raw) }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ run }));
+    const run = vi.fn(async () => ({ stdout: JSON.stringify(raw), stderr: '', exitCode: 0 }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run } }));
     const issue = await f.getIssue(9);
-    expect(run).toHaveBeenCalledWith('glab', ['issue', 'view', '9', '-R', 'group/repo', '-F', 'json'], undefined);
+    expect(run).toHaveBeenCalledWith('glab', ['issue', 'view', '9', '-R', 'group/repo', '-F', 'json']);
     expect(issue?.number).toBe(9);
     expect(issue?.body).toBe('');
   });
 
   it('returns null when glab fails (issue not found)', async () => {
     const run = vi.fn(async () => { throw new Error('404 not found'); });
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ run }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run } }));
     expect(await f.getIssue(123)).toBeNull();
   });
 });
@@ -339,7 +446,7 @@ Expected: FAIL with `Error: not implemented`.
 // replace the getIssue stub
 async getIssue(issueNumber: number): Promise<Issue | null> {
   try {
-    const { stdout } = await this.deps.run('glab', [
+    const { stdout } = await this.deps.runner.run('glab', [
       'issue', 'view', String(issueNumber), '-R', this.project, '-F', 'json',
     ]);
     return mapIssue(JSON.parse(stdout) as RawGitLabIssue);
@@ -384,19 +491,19 @@ describe('GitLabForge.listOpenMrsByBot', () => {
         description: 'Plan\n\nCloses #7', web_url: 'https://gitlab.com/group/repo/-/merge_requests/12',
       },
     ];
-    const run = vi.fn(async () => ({ stdout: JSON.stringify(raw) }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ run }));
+    const run = vi.fn(async () => ({ stdout: JSON.stringify(raw), stderr: '', exitCode: 0 }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run } }));
     const mrs = await f.listOpenMrsByBot();
     expect(run).toHaveBeenCalledWith(
       'glab',
       ['mr', 'list', '--author', 'maestro-bot', '--state', 'opened', '-R', 'group/repo', '-F', 'json'],
-      undefined,
     );
     expect(mrs).toEqual([
       {
         id: '5005', number: 12, sourceBranch: 'maestro/issue-7', targetBranch: 'main',
         isDraft: true, state: 'open', approved: false, changesRequested: false,
         reviewers: ['alice'], linkedIssueNumbers: [7],
+        description: 'Plan\n\nCloses #7',
         webUrl: 'https://gitlab.com/group/repo/-/merge_requests/12',
       },
     ]);
@@ -448,6 +555,7 @@ function mapMr(raw: RawGitLabMr, approved: boolean, changesRequested: boolean): 
     changesRequested,
     reviewers: (raw.reviewers ?? []).map((r) => r.username),
     linkedIssueNumbers: parseLinkedIssues(raw.description),
+    description: raw.description ?? '',
     webUrl: raw.web_url,
   };
 }
@@ -456,7 +564,7 @@ function mapMr(raw: RawGitLabMr, approved: boolean, changesRequested: boolean): 
 ```ts
 // replace the listOpenMrsByBot stub
 async listOpenMrsByBot(): Promise<MergeRequest[]> {
-  const { stdout } = await this.deps.run('glab', [
+  const { stdout } = await this.deps.runner.run('glab', [
     'mr', 'list',
     '--author', this.botUser,
     '--state', 'opened',
@@ -499,8 +607,8 @@ We test the helper indirectly through a tiny exported behaviour: a public `proje
 describe('GitLabForge.api', () => {
   it('builds the v4 URL, encodes the project path, sends PRIVATE-TOKEN, returns JSON', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({
-      fetch: fetchMock as unknown as typeof fetch,
+    const f = new GitLabForge(repo, makeDeps({
+      fetchImpl: fetchMock as unknown as typeof fetch,
     }));
     const out = await f.api('GET', '/projects/:id/labels');
     expect(f.projectId).toBe('group%2Frepo');
@@ -511,10 +619,16 @@ describe('GitLabForge.api', () => {
     expect(out).toEqual({ ok: true });
   });
 
+  it('throws ForgeError when the token env var is unset', async () => {
+    delete process.env.MAESTRO_GITLAB_TOKEN;
+    const f = new GitLabForge(repo, makeDeps());
+    await expect(f.api('GET', '/projects/:id/labels')).rejects.toThrow(/MAESTRO_GITLAB_TOKEN/);
+  });
+
   it('throws ForgeError on non-2xx', async () => {
     const fetchMock = vi.fn(async () => new Response('nope', { status: 403 }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({
-      fetch: fetchMock as unknown as typeof fetch,
+    const f = new GitLabForge(repo, makeDeps({
+      fetchImpl: fetchMock as unknown as typeof fetch,
     }));
     await expect(f.api('GET', '/projects/:id/labels')).rejects.toThrow(/403/);
   });
@@ -534,10 +648,21 @@ get projectId(): string {
   return encodeURIComponent(this.project);
 }
 
+// The gitlab forge auth from config (host + tokenEnv). Throws if unconfigured.
+private get auth(): { host: string; tokenEnv: string } {
+  const a = this.deps.config.forges.gitlab;
+  if (!a) throw new ForgeError('No gitlab forge configured (config.forges.gitlab)');
+  return a;
+}
+
+private get host(): string {
+  return this.auth.host;
+}
+
 private token(): string {
-  const env = this.deps.env ?? process.env;
-  const tok = env[this.deps.tokenEnv];
-  if (!tok) throw new ForgeError(`GitLab token env var ${this.deps.tokenEnv} is not set`);
+  const { tokenEnv } = this.auth;
+  const tok = process.env[tokenEnv];
+  if (!tok) throw new ForgeError(`GitLab token env var ${tokenEnv} is not set`);
   return tok;
 }
 
@@ -548,10 +673,10 @@ async api<T = unknown>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const url = `https://${this.deps.host}/api/v4${path.replace(':id', this.projectId)}`;
+  const url = `https://${this.host}/api/v4${path.replace(':id', this.projectId)}`;
   const headers: Record<string, string> = { 'PRIVATE-TOKEN': this.token() };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  const res = await this.deps.fetch(url, {
+  const res = await this.deps.fetchImpl(url, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -579,12 +704,23 @@ git commit -m "feat(forge): add authenticated GitLab REST api() helper"
 
 ---
 
-## Task 6: `getMrForIssue` with approval + changes-requested detection
+## Task 6: `getMrForIssue` (located by head branch) with approval + changes-requested detection
 
-Find the bot's MR whose description links the issue (reuse `listOpenMrsByBot`), then enrich it with approval state via REST:
+**Locate by head branch (contract):** the MR for issue `N` is the bot's open MR whose
+`sourceBranch === maestro/issue-<N>` — NOT by parsing `Closes #N` from the description.
+Branch names are the fixed convention (`maestro/issue-<number>`), so this is exact and
+avoids description-format drift. Reuse `listOpenMrsByBot`, then enrich with REST:
 
-- **Approved:** `GET /projects/:id/merge_requests/:iid/approval_state` → approved when `rules[].approved === true` for any rule, OR the simpler `GET .../approvals` → `approved === true` / `approved_by` non-empty. We use `approval_state` and treat `rules.some(r => r.approved)` as approved (Free-tier returns a single rule).
-- **Changes requested:** GitLab Free has no native "request changes"; the spec maps it to an **unapprove / "changes requested" review thread**. We detect an open, unresolved discussion note whose body marks a change request. Convention: a reviewer comment containing the marker `maestro:changes-requested` (the human or the web UI posts it), OR any unresolved discussion authored by a reviewer. We treat **any unresolved discussion not authored by the bot** as changes requested. `GET /projects/:id/merge_requests/:iid/discussions`.
+- **Approved:** `GET /projects/:id/merge_requests/:iid/approval_state` → approved when any
+  `rules[].approved === true` (Free-tier returns a single rule).
+- **Changes requested (per `review.changesSignal`):** the adapter implements **both** paths
+  (contract "Review signal"):
+  - **`'label'` (default):** the `review.changesLabel` is present on the issue
+    (`getIssue(N).labels`). Default label = `maestro::changes-requested` (scoped).
+  - **`'native'`:** unapproval-after-approval + an unresolved reviewer thread. GitLab Free
+    has no first-class "request changes", so the signal is: the MR is **not** currently
+    approved (`approval_state` has no approved rule) AND there is an unresolved discussion
+    note authored by someone other than the bot. `GET /projects/:id/merge_requests/:iid/discussions`.
 
 **Files:**
 - Modify: `packages/core/src/forge/gitlab.ts`
@@ -595,43 +731,82 @@ Find the bot's MR whose description links the issue (reuse `listOpenMrsByBot`), 
 ```ts
 // append to gitlab.test.ts
 describe('GitLabForge.getMrForIssue', () => {
-  function mrListStdout() {
+  function mrListStdout(over: Record<string, unknown> = {}) {
     return JSON.stringify([
       {
         id: 5005, iid: 12, source_branch: 'maestro/issue-7', target_branch: 'main',
         draft: false, state: 'opened', reviewers: [{ username: 'alice' }],
-        description: 'Closes #7', web_url: 'https://gitlab.com/group/repo/-/merge_requests/12',
+        description: 'Plan', web_url: 'https://gitlab.com/group/repo/-/merge_requests/12',
+        ...over,
       },
     ]);
   }
 
-  it('returns null when no open MR links the issue', async () => {
-    const run = vi.fn(async () => ({ stdout: '[]' }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ run }));
+  it('returns null when no open MR has the maestro/issue-<n> head branch', async () => {
+    // MR exists but for a different branch — must NOT match issue 7.
+    const run = vi.fn(async () => ({ stdout: mrListStdout({ source_branch: 'maestro/issue-9' }), stderr: '', exitCode: 0 }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run } }));
     expect(await f.getMrForIssue(7)).toBeNull();
   });
 
-  it('marks approved=true when approval_state has an approved rule', async () => {
-    const run = vi.fn(async () => ({ stdout: mrListStdout() }));
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.includes('/approval_state')) {
-        return new Response(JSON.stringify({ rules: [{ approved: true }] }), { status: 200 });
+  it('locates the MR by head branch maestro/issue-<n>', async () => {
+    const run = vi.fn(async () => ({ stdout: mrListStdout(), stderr: '', exitCode: 0 }));
+    const fetchMock = vi.fn(async (url: string) =>
+      url.includes('/approval_state')
+        ? new Response(JSON.stringify({ rules: [{ approved: true }] }), { status: 200 })
+        : new Response('[]', { status: 200 }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run }, fetchImpl: fetchMock as unknown as typeof fetch }));
+    const mr = await f.getMrForIssue(7);
+    expect(mr?.number).toBe(12);
+    expect(mr?.sourceBranch).toBe('maestro/issue-7');
+    expect(mr?.approved).toBe(true);
+  });
+
+  // --- changesSignal: 'label' (default) ---
+  it("label mode: changesRequested=true when the changesLabel is on the issue", async () => {
+    const run = vi.fn(async (_cmd: string, args: string[]) => {
+      if (args[0] === 'issue' && args[1] === 'view') {
+        return { stdout: JSON.stringify({
+          id: 1, iid: 7, title: 'T', description: '', state: 'opened',
+          assignees: [], author: { username: 'a' },
+          labels: ['maestro::changes-requested'],
+          created_at: '2026-06-01T00:00:00Z', web_url: 'x',
+        }), stderr: '', exitCode: 0 };
       }
-      if (url.includes('/discussions')) {
-        return new Response(JSON.stringify([]), { status: 200 });
-      }
-      return new Response('[]', { status: 200 });
+      return { stdout: mrListStdout(), stderr: '', exitCode: 0 };
     });
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({
-      run, fetch: fetchMock as unknown as typeof fetch,
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ rules: [] }), { status: 200 }));
+    const f = new GitLabForge(repo, makeDeps({
+      runner: { run }, fetchImpl: fetchMock as unknown as typeof fetch,
+      review: { changesSignal: 'label', changesLabel: 'maestro::changes-requested' },
     }));
     const mr = await f.getMrForIssue(7);
-    expect(mr?.approved).toBe(true);
+    expect(mr?.changesRequested).toBe(true);
+  });
+
+  it("label mode: changesRequested=false when the changesLabel is absent", async () => {
+    const run = vi.fn(async (_cmd: string, args: string[]) => {
+      if (args[0] === 'issue' && args[1] === 'view') {
+        return { stdout: JSON.stringify({
+          id: 1, iid: 7, title: 'T', description: '', state: 'opened',
+          assignees: [], author: { username: 'a' }, labels: ['bug'],
+          created_at: '2026-06-01T00:00:00Z', web_url: 'x',
+        }), stderr: '', exitCode: 0 };
+      }
+      return { stdout: mrListStdout(), stderr: '', exitCode: 0 };
+    });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ rules: [] }), { status: 200 }));
+    const f = new GitLabForge(repo, makeDeps({
+      runner: { run }, fetchImpl: fetchMock as unknown as typeof fetch,
+      review: { changesSignal: 'label', changesLabel: 'maestro::changes-requested' },
+    }));
+    const mr = await f.getMrForIssue(7);
     expect(mr?.changesRequested).toBe(false);
   });
 
-  it('marks changesRequested=true when an unresolved non-bot discussion exists', async () => {
-    const run = vi.fn(async () => ({ stdout: mrListStdout() }));
+  // --- changesSignal: 'native' ---
+  it('native mode: changesRequested=true when unapproved + an unresolved non-bot discussion exists', async () => {
+    const run = vi.fn(async () => ({ stdout: mrListStdout(), stderr: '', exitCode: 0 }));
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes('/approval_state')) {
         return new Response(JSON.stringify({ rules: [{ approved: false }] }), { status: 200 });
@@ -643,16 +818,17 @@ describe('GitLabForge.getMrForIssue', () => {
       }
       return new Response('[]', { status: 200 });
     });
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({
-      run, fetch: fetchMock as unknown as typeof fetch,
+    const f = new GitLabForge(repo, makeDeps({
+      runner: { run }, fetchImpl: fetchMock as unknown as typeof fetch,
+      review: { changesSignal: 'native' },
     }));
     const mr = await f.getMrForIssue(7);
     expect(mr?.approved).toBe(false);
     expect(mr?.changesRequested).toBe(true);
   });
 
-  it('ignores resolved discussions and the bot’s own notes', async () => {
-    const run = vi.fn(async () => ({ stdout: mrListStdout() }));
+  it('native mode: ignores resolved discussions and the bot’s own notes', async () => {
+    const run = vi.fn(async () => ({ stdout: mrListStdout(), stderr: '', exitCode: 0 }));
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes('/approval_state')) {
         return new Response(JSON.stringify({ rules: [] }), { status: 200 });
@@ -665,8 +841,30 @@ describe('GitLabForge.getMrForIssue', () => {
       }
       return new Response('[]', { status: 200 });
     });
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({
-      run, fetch: fetchMock as unknown as typeof fetch,
+    const f = new GitLabForge(repo, makeDeps({
+      runner: { run }, fetchImpl: fetchMock as unknown as typeof fetch,
+      review: { changesSignal: 'native' },
+    }));
+    const mr = await f.getMrForIssue(7);
+    expect(mr?.changesRequested).toBe(false);
+  });
+
+  it('native mode: changesRequested=false when the MR is currently approved', async () => {
+    const run = vi.fn(async () => ({ stdout: mrListStdout(), stderr: '', exitCode: 0 }));
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes('/approval_state')) {
+        return new Response(JSON.stringify({ rules: [{ approved: true }] }), { status: 200 });
+      }
+      if (url.includes('/discussions')) {
+        return new Response(JSON.stringify([
+          { notes: [{ resolvable: true, resolved: false, author: { username: 'alice' }, body: 'fix' }] },
+        ]), { status: 200 });
+      }
+      return new Response('[]', { status: 200 });
+    });
+    const f = new GitLabForge(repo, makeDeps({
+      runner: { run }, fetchImpl: fetchMock as unknown as typeof fetch,
+      review: { changesSignal: 'native' },
     }));
     const mr = await f.getMrForIssue(7);
     expect(mr?.changesRequested).toBe(false);
@@ -682,6 +880,11 @@ Expected: FAIL with `Error: not implemented`.
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
+// add a branch-name helper near the top of gitlab.ts
+function issueBranch(issueNumber: number): string {
+  return `maestro/issue-${issueNumber}`;
+}
+
 // add raw types for approval + discussions near the other raw types
 interface RawApprovalState { rules?: { approved?: boolean }[] }
 interface RawDiscussion {
@@ -692,12 +895,13 @@ interface RawDiscussion {
 ```ts
 // replace the getMrForIssue stub
 async getMrForIssue(issueNumber: number): Promise<MergeRequest | null> {
+  const branch = issueBranch(issueNumber);
   const mrs = await this.listOpenMrsByBot();
-  const base = mrs.find((mr) => mr.linkedIssueNumbers.includes(issueNumber));
+  const base = mrs.find((mr) => mr.sourceBranch === branch);
   if (!base) return null;
 
   const approved = await this.isApproved(base.number);
-  const changesRequested = await this.hasChangesRequested(base.number);
+  const changesRequested = await this.hasChangesRequested(issueNumber, base.number, approved);
   return { ...base, approved, changesRequested };
 }
 
@@ -709,7 +913,19 @@ private async isApproved(mrNumber: number): Promise<boolean> {
   return (state.rules ?? []).some((r) => r.approved === true);
 }
 
-private async hasChangesRequested(mrNumber: number): Promise<boolean> {
+// Derives changesRequested per workflow.review.changesSignal (contract "Review signal").
+private async hasChangesRequested(
+  issueNumber: number,
+  mrNumber: number,
+  approved: boolean,
+): Promise<boolean> {
+  if (this.deps.review.changesSignal === 'label') {
+    const label = this.changesLabel();
+    const issue = await this.getIssue(issueNumber);
+    return issue?.labels.includes(label) ?? false;
+  }
+  // 'native': unapproval (no approved rule) + an unresolved non-bot reviewer thread.
+  if (approved) return false;
   const discussions = await this.api<RawDiscussion[]>(
     'GET',
     `/projects/:id/merge_requests/${mrNumber}/discussions`,
@@ -723,12 +939,17 @@ private async hasChangesRequested(mrNumber: number): Promise<boolean> {
     ),
   );
 }
+
+// The configured changes-requested label, defaulting to the scoped maestro label.
+private changesLabel(): string {
+  return this.deps.review.changesLabel ?? 'maestro::changes-requested';
+}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pnpm --filter @maestro/core test -- src/forge/gitlab.test.ts -t getMrForIssue`
-Expected: PASS (4 passing).
+Expected: PASS (7 passing).
 
 - [ ] **Step 5: Commit**
 
@@ -739,9 +960,13 @@ git commit -m "feat(forge): detect MR approval and changes-requested in getMrFor
 
 ---
 
-## Task 7: Branch + MR write methods (`createBranch`, `createDraftMr`, `setMrReady`, `updateMrDescription`, `assignReviewer`, `mergeMr`, `comment`)
+## Task 7: Branch + MR/issue write methods + `getMrDescription` + `blobUrl`
 
-These are I/O passthroughs over `glab` / REST. `createBranch` uses REST (`POST /projects/:id/repository/branches`) since it must run without a local clone. `createDraftMr` uses `glab mr create`. Ready/description/assign/merge use REST (deterministic, JSON in/out). `comment` uses `glab issue note` / `glab mr note`.
+Covers the remaining `ForgeAdapter` members: `createBranch`, `createDraftMr`,
+`createIssue`, `getMrDescription`, `setMrReady`, `updateMrDescription`,
+`assignReviewer`, `mergeMr`, `comment`, and the pure `blobUrl` helper.
+
+These are I/O passthroughs over `glab` / REST. `createBranch` uses REST (`POST /projects/:id/repository/branches`) since it must run without a local clone. `createDraftMr` / `createIssue` use `glab mr|issue create`. `getMrDescription` uses `glab mr view ... -F json` and returns `.description`. Ready/description/assign/merge use REST (deterministic, JSON in/out). `comment` uses `glab issue note` / `glab mr note`. `blobUrl` is pure (no I/O): `https://<host>/<project>/-/blob/<branch>/<path>`.
 
 **Files:**
 - Modify: `packages/core/src/forge/gitlab.ts`
@@ -754,7 +979,7 @@ These are I/O passthroughs over `glab` / REST. `createBranch` uses REST (`POST /
 describe('GitLabForge writes', () => {
   it('createBranch POSTs to repository/branches with encoded params', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ name: 'maestro/issue-7' }), { status: 201 }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
     await f.createBranch('maestro/issue-7', 'main');
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://gitlab.com/api/v4/projects/group%2Frepo/repository/branches');
@@ -768,8 +993,8 @@ describe('GitLabForge writes', () => {
       draft: true, state: 'opened', reviewers: [], description: 'Closes #7',
       web_url: 'https://gitlab.com/group/repo/-/merge_requests/3',
     };
-    const run = vi.fn(async () => ({ stdout: JSON.stringify(created) }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ run }));
+    const run = vi.fn(async () => ({ stdout: JSON.stringify(created), stderr: '', exitCode: 0 }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run } }));
     const mr = await f.createDraftMr({
       sourceBranch: 'maestro/issue-7', targetBranch: 'main',
       title: 'Fix login', body: 'Closes #7', draft: true,
@@ -781,14 +1006,44 @@ describe('GitLabForge writes', () => {
       '--title', 'Fix login',
       '--description', 'Closes #7',
       '--draft', '--yes', '-F', 'json',
-    ], undefined);
+    ]);
     expect(mr.number).toBe(3);
     expect(mr.isDraft).toBe(true);
+    expect(mr.description).toBe('Closes #7');
+  });
+
+  it('createIssue calls glab issue create and returns the mapped Issue', async () => {
+    const created = {
+      id: 4, iid: 8, title: 'New', description: 'body', state: 'opened',
+      assignees: [{ username: 'maestro-bot' }], author: { username: 'maestro-bot' },
+      labels: [], created_at: '2026-06-03T00:00:00Z', web_url: 'https://gitlab.com/group/repo/-/issues/8',
+    };
+    const run = vi.fn(async () => ({ stdout: JSON.stringify(created), stderr: '', exitCode: 0 }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run } }));
+    const issue = await f.createIssue({ title: 'New', body: 'body', assignee: 'maestro-bot' });
+    expect(run).toHaveBeenCalledWith('glab', [
+      'issue', 'create', '-R', 'group/repo',
+      '--title', 'New', '--description', 'body',
+      '--assignee', 'maestro-bot', '--yes', '-F', 'json',
+    ]);
+    expect(issue.number).toBe(8);
+  });
+
+  it('getMrDescription reads back the MR description via glab', async () => {
+    const run = vi.fn(async () => ({ stdout: JSON.stringify({
+      id: 9, iid: 3, source_branch: 'maestro/issue-7', target_branch: 'main',
+      draft: false, state: 'opened', reviewers: [], description: 'living plan',
+      web_url: 'https://gitlab.com/group/repo/-/merge_requests/3',
+    }), stderr: '', exitCode: 0 }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run } }));
+    const desc = await f.getMrDescription(3);
+    expect(run).toHaveBeenCalledWith('glab', ['mr', 'view', '3', '-R', 'group/repo', '-F', 'json']);
+    expect(desc).toBe('living plan');
   });
 
   it('setMrReady PUTs draft=false', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ iid: 3 }), { status: 200 }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
     await f.setMrReady(3);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://gitlab.com/api/v4/projects/group%2Frepo/merge_requests/3');
@@ -798,7 +1053,7 @@ describe('GitLabForge writes', () => {
 
   it('updateMrDescription PUTs the new description', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ iid: 3 }), { status: 200 }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
     await f.updateMrDescription(3, 'new body');
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ description: 'new body' });
@@ -811,7 +1066,7 @@ describe('GitLabForge writes', () => {
       }
       return new Response(JSON.stringify({ iid: 3 }), { status: 200 });
     });
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
     await f.assignReviewer(3, 'alice');
     const putCall = fetchMock.mock.calls.find((c) => (c[1] as RequestInit).method === 'PUT')!;
     expect(JSON.parse((putCall[1] as RequestInit).body as string)).toEqual({ reviewer_ids: [42] });
@@ -819,25 +1074,43 @@ describe('GitLabForge writes', () => {
 
   it('mergeMr PUTs merge with squash + remove_source_branch', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ state: 'merged' }), { status: 200 }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
     await f.mergeMr(3, 'squash', true);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://gitlab.com/api/v4/projects/group%2Frepo/merge_requests/3/merge');
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ squash: true, should_remove_source_branch: true });
   });
 
+  it('mergeMr rebase: PUTs /rebase first, then /merge', async () => {
+    const fetchMock = vi.fn(async (url: string) =>
+      new Response(JSON.stringify({ ok: true }), { status: url.includes('/rebase') ? 202 : 200 }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
+    await f.mergeMr(3, 'rebase', true);
+    const urls = fetchMock.mock.calls.map((c) => c[0] as string);
+    expect(urls[0]).toBe('https://gitlab.com/api/v4/projects/group%2Frepo/merge_requests/3/rebase');
+    expect(urls[1]).toBe('https://gitlab.com/api/v4/projects/group%2Frepo/merge_requests/3/merge');
+    const mergeBody = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
+    expect(mergeBody).toEqual({ should_remove_source_branch: true });
+  });
+
   it('comment on an issue calls glab issue note', async () => {
-    const run = vi.fn(async () => ({ stdout: '' }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ run }));
+    const run = vi.fn(async () => ({ stdout: '', stderr: '', exitCode: 0 }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run } }));
     await f.comment({ type: 'issue', number: 7 }, 'hello');
-    expect(run).toHaveBeenCalledWith('glab', ['issue', 'note', '7', '-R', 'group/repo', '-m', 'hello'], undefined);
+    expect(run).toHaveBeenCalledWith('glab', ['issue', 'note', '7', '-R', 'group/repo', '-m', 'hello']);
   });
 
   it('comment on an MR calls glab mr note', async () => {
-    const run = vi.fn(async () => ({ stdout: '' }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ run }));
+    const run = vi.fn(async () => ({ stdout: '', stderr: '', exitCode: 0 }));
+    const f = new GitLabForge(repo, makeDeps({ runner: { run } }));
     await f.comment({ type: 'mr', number: 3 }, 'proof attached');
-    expect(run).toHaveBeenCalledWith('glab', ['mr', 'note', '3', '-R', 'group/repo', '-m', 'proof attached'], undefined);
+    expect(run).toHaveBeenCalledWith('glab', ['mr', 'note', '3', '-R', 'group/repo', '-m', 'proof attached']);
+  });
+
+  it('blobUrl builds the GitLab -/blob/ url (pure, no I/O)', () => {
+    const f = new GitLabForge(repo, makeDeps());
+    expect(f.blobUrl('maestro/issue-7', 'proof/issue-7-login.png'))
+      .toBe('https://gitlab.com/group/repo/-/blob/maestro/issue-7/proof/issue-7-login.png');
   });
 });
 ```
@@ -866,8 +1139,23 @@ async createDraftMr(args: CreateMrArgs): Promise<MergeRequest> {
   ];
   if (args.draft) flags.push('--draft');
   flags.push('--yes', '-F', 'json');
-  const { stdout } = await this.deps.run('glab', flags);
+  const { stdout } = await this.deps.runner.run('glab', flags);
   return mapMr(JSON.parse(stdout) as RawGitLabMr, false, false);
+}
+
+async createIssue(args: { title: string; body: string; assignee?: string }): Promise<Issue> {
+  const flags = ['issue', 'create', '-R', this.project, '--title', args.title, '--description', args.body];
+  if (args.assignee) flags.push('--assignee', args.assignee);
+  flags.push('--yes', '-F', 'json');
+  const { stdout } = await this.deps.runner.run('glab', flags);
+  return mapIssue(JSON.parse(stdout) as RawGitLabIssue);
+}
+
+async getMrDescription(mrNumber: number): Promise<string> {
+  const { stdout } = await this.deps.runner.run('glab', [
+    'mr', 'view', String(mrNumber), '-R', this.project, '-F', 'json',
+  ]);
+  return (JSON.parse(stdout) as RawGitLabMr).description ?? '';
 }
 
 async setMrReady(mrNumber: number): Promise<void> {
@@ -886,20 +1174,33 @@ async assignReviewer(mrNumber: number, username: string): Promise<void> {
 }
 
 async mergeMr(mrNumber: number, strategy: MergeStrategy, deleteSource: boolean): Promise<void> {
+  // 'rebase' (contract): rebase the MR onto target first, then merge. This relies on the
+  // project having "Fast-forward merge" enabled; if it is not, the subsequent merge falls
+  // back to a merge commit. The rebase is a no-op when already up to date.
+  if (strategy === 'rebase') {
+    await this.api('PUT', `/projects/:id/merge_requests/${mrNumber}/rebase`);
+  }
   const body: Record<string, unknown> = { should_remove_source_branch: deleteSource };
   if (strategy === 'squash') body.squash = true;
-  // 'merge' = default commit; 'rebase' uses GitLab fast-forward / rebase-merge.
-  if (strategy === 'rebase') body.merge_when_pipeline_succeeds = false;
   await this.api('PUT', `/projects/:id/merge_requests/${mrNumber}/merge`, body);
 }
 
 async comment(target: CommentTarget, body: string): Promise<void> {
   const kind = target.type === 'issue' ? 'issue' : 'mr';
-  await this.deps.run('glab', [kind, 'note', String(target.number), '-R', this.project, '-m', body]);
+  await this.deps.runner.run('glab', [kind, 'note', String(target.number), '-R', this.project, '-m', body]);
+}
+
+// Pure (no I/O). GitLab blob URL for a committed file on a branch.
+blobUrl(branch: string, path: string): string {
+  return `https://${this.host}/${this.project}/-/blob/${branch}/${path}`;
 }
 ```
 
-> Note: for `'rebase'` the GitLab merge endpoint has no direct "rebase-then-merge" boolean on Free; the squash/merge cases are exercised. `mergeStrategy: 'rebase'` repos are an Open question (below). The body for `'merge'` is just `should_remove_source_branch` (matches the test, which only covers squash).
+> **`'rebase'` semantics (contract "Module ownership notes"):** GitLab's `PUT .../merge`
+> has no single "rebase-then-merge" flag, so the adapter calls `PUT .../rebase` first and
+> then merges. Result depends on the project's "Fast-forward merge" setting: with it on the
+> merge is a true fast-forward; with it off GitLab still produces a merge commit after the
+> rebase. This is documented reliance, not a deferral.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -930,7 +1231,7 @@ Set exactly one `maestro::<state>` label (for `in_progress`/`in_review`/`blocked
 describe('GitLabForge.setLifecycleLabel', () => {
   it('adds the target scoped label and removes the other maestro labels', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ iid: 7 }), { status: 200 }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
     await f.setLifecycleLabel(7, 'in_review');
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://gitlab.com/api/v4/projects/group%2Frepo/issues/7');
@@ -942,7 +1243,7 @@ describe('GitLabForge.setLifecycleLabel', () => {
 
   it('for new/done removes all maestro labels and adds none', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ iid: 7 }), { status: 200 }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
     await f.setLifecycleLabel(7, 'done');
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
     expect(body.add_labels).toBeUndefined();
@@ -989,9 +1290,13 @@ git commit -m "feat(forge): enforce scoped-label exclusivity in setLifecycleLabe
 
 ---
 
-## Task 9: `ensureLabels` — idempotent label creation
+## Task 9: `ensureLabels` — idempotent label creation (+ changes-requested label)
 
-Create each maestro label via `POST /projects/:id/labels` with `{ name, color }`. Idempotent: a label that already exists returns 409; we swallow only that and rethrow other errors. Colors are fixed per state.
+Create each maestro lifecycle label via `POST /projects/:id/labels` with `{ name, color }`.
+**Contract:** when `review.changesSignal === 'label'`, `ensureLabels` ALSO creates the
+configured `changesLabel` (default `maestro::changes-requested`). When the signal is
+`'native'` the changes-requested label is not created. Idempotent: an existing label
+returns 409; we swallow only that and rethrow other errors. Colors are fixed per state.
 
 **Files:**
 - Modify: `packages/core/src/forge/gitlab.ts`
@@ -1002,21 +1307,35 @@ Create each maestro label via `POST /projects/:id/labels` with `{ name, color }`
 ```ts
 // append to gitlab.test.ts
 describe('GitLabForge.ensureLabels', () => {
-  it('POSTs a label for each maestro lifecycle state', async () => {
+  it("POSTs a label for each lifecycle state AND the changes-requested label (label mode)", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: 1 }), { status: 201 }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      review: { changesSignal: 'label', changesLabel: 'maestro::changes-requested' },
+    }));
     await f.ensureLabels();
     const names = fetchMock.mock.calls.map((c) => JSON.parse((c[1] as RequestInit).body as string).name).sort();
-    expect(names).toEqual(['maestro::blocked', 'maestro::in_progress', 'maestro::in_review']);
+    expect(names).toEqual(['maestro::blocked', 'maestro::changes-requested', 'maestro::in_progress', 'maestro::in_review']);
     for (const [url, init] of fetchMock.mock.calls) {
       expect(url).toBe('https://gitlab.com/api/v4/projects/group%2Frepo/labels');
       expect((init as RequestInit).method).toBe('POST');
     }
   });
 
+  it("omits the changes-requested label in native mode", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: 1 }), { status: 201 }));
+    const f = new GitLabForge(repo, makeDeps({
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      review: { changesSignal: 'native' },
+    }));
+    await f.ensureLabels();
+    const names = fetchMock.mock.calls.map((c) => JSON.parse((c[1] as RequestInit).body as string).name).sort();
+    expect(names).toEqual(['maestro::blocked', 'maestro::in_progress', 'maestro::in_review']);
+  });
+
   it('swallows 409 (label already exists)', async () => {
     const fetchMock = vi.fn(async () => new Response('Label already exists', { status: 409 }));
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
     await expect(f.ensureLabels()).resolves.toBeUndefined();
   });
 });
@@ -1036,15 +1355,23 @@ const LABEL_COLORS: Record<(typeof LABELED_STATES)[number], string> = {
   in_review: '#fc9403',
   blocked: '#dd2b0e',
 };
+const CHANGES_LABEL_COLOR = '#ad4363';
 ```
 
 ```ts
 // replace the ensureLabels stub
 async ensureLabels(): Promise<void> {
-  for (const state of LABELED_STATES) {
-    const name = lifecycleLabel(this.forge, state);
+  const targets: { name: string; color: string }[] = LABELED_STATES.map((state) => ({
+    name: lifecycleLabel(this.forge, state),
+    color: LABEL_COLORS[state],
+  }));
+  // Contract: create the changes-requested label too when the signal is label-based.
+  if (this.deps.review.changesSignal === 'label') {
+    targets.push({ name: this.changesLabel(), color: CHANGES_LABEL_COLOR });
+  }
+  for (const { name, color } of targets) {
     try {
-      await this.api('POST', '/projects/:id/labels', { name, color: LABEL_COLORS[state] });
+      await this.api('POST', '/projects/:id/labels', { name, color });
     } catch (err) {
       if (err instanceof ForgeError && /\b409\b/.test(err.message)) continue;
       throw err;
@@ -1052,6 +1379,8 @@ async ensureLabels(): Promise<void> {
   }
 }
 ```
+
+> `changesLabel()` is the helper added in Task 6 (`review.changesLabel ?? 'maestro::changes-requested'`).
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1117,7 +1446,7 @@ describe('GitLabForge.ensureBoard', () => {
         { id: 99, name: 'bug' },
       ],
     });
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
     await f.ensureBoard();
     expect(posted.map((p) => (p.body as { label_id: number }).label_id)).toEqual([10, 11, 12]);
     for (const p of posted) {
@@ -1134,7 +1463,7 @@ describe('GitLabForge.ensureBoard', () => {
         { id: 12, name: 'maestro::blocked' },
       ],
     });
-    const f = new GitLabForge('group/repo', 'maestro-bot', makeDeps({ fetch: fetchMock as unknown as typeof fetch }));
+    const f = new GitLabForge(repo, makeDeps({ fetchImpl: fetchMock as unknown as typeof fetch }));
     await f.ensureBoard();
     expect(posted.map((p) => (p.body as { label_id: number }).label_id)).toEqual([11, 12]);
     for (const p of posted) {
@@ -1196,9 +1525,25 @@ git commit -m "feat(forge): ensure Free-tier board with one label list per lifec
 
 ---
 
-## Task 11: `createForge` factory
+## Task 11: `createForge` factory (contract signature)
 
-`createForge(forge, repo, deps)` returns a `GitLabForge` for `'gitlab'` and throws `ForgeError` for `'github'` (M6 extends it). The factory wires the production `execa` runner and global `fetch` when the caller does not inject them. `repo` carries the `project` path and `botUser`; `deps` carries `host` + `tokenEnv` (from config `ForgeAuth`) and optional `run`/`fetch`/`env` overrides for tests.
+The factory matches the contract exactly:
+
+```ts
+export interface ForgeDeps { config: MaestroConfig; runner?: CommandRunner; fetchImpl?: typeof fetch; }
+export function createForge(
+  forge: Forge,
+  repo: { url: string; project: string; botUser: string },
+  deps: ForgeDeps,
+): ForgeAdapter;
+```
+
+It returns a `GitLabForge` for `'gitlab'` and throws `ForgeError` for `'github'` (M6
+extends it). It defaults `runner` to the shared `execaRunner` (from `util/exec.ts`) and
+`fetchImpl` to global `fetch`. Token + host are NOT passed in — the adapter resolves them
+from `deps.config.forges.gitlab` (`tokenEnv` names the env var; `host` is the API host).
+The per-repo `review` config the GitLab adapter needs is threaded through
+`ForgeDeps.review` (see contract note below).
 
 **Files:**
 - Create: `packages/core/src/forge/factory.ts`
@@ -1208,19 +1553,32 @@ git commit -m "feat(forge): ensure Free-tier board with one label list per lifec
 
 ```ts
 // packages/core/src/forge/factory.test.ts
-import { describe, it, expect, vi } from 'vitest';
-import { createForge, type CreateForgeRepo, type CreateForgeDeps } from './factory.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createForge, type ForgeDeps, type ForgeRepo } from './factory.js';
 import { GitLabForge } from './gitlab.js';
 import { ForgeError } from './adapter.js';
+import type { MaestroConfig } from '../config/schema.js';
 
-const repo: CreateForgeRepo = { project: 'group/repo', botUser: 'maestro-bot' };
-const deps: CreateForgeDeps = {
-  host: 'gitlab.com',
-  tokenEnv: 'MAESTRO_GITLAB_TOKEN',
-  run: vi.fn(async () => ({ stdout: '' })),
-  fetch: vi.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch,
-  env: { MAESTRO_GITLAB_TOKEN: 'x' },
+const config = {
+  defaults: {
+    pollIntervalActive: '30s', pollIntervalIdle: '5m', pollJitter: '5s', botUser: 'maestro-bot',
+    concurrency: { globalMax: 2 },
+    workspaces: { root: './workspaces', diskCap: '20GB', cleanup: 'lru' },
+    web: { port: 7330, host: '127.0.0.1' },
+  },
+  forges: { gitlab: { host: 'gitlab.com', tokenEnv: 'MAESTRO_GITLAB_TOKEN' } },
+  repos: [],
+} as unknown as MaestroConfig;
+
+const repo: ForgeRepo = { url: 'https://gitlab.com/group/repo', project: 'group/repo', botUser: 'maestro-bot' };
+const deps: ForgeDeps = {
+  config,
+  runner: { run: vi.fn(async () => ({ stdout: '', stderr: '', exitCode: 0 })) },
+  fetchImpl: vi.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch,
+  review: { changesSignal: 'label' },
 };
+
+beforeEach(() => { process.env.MAESTRO_GITLAB_TOKEN = 'x'; });
 
 describe('createForge', () => {
   it('returns a GitLabForge for gitlab', () => {
@@ -1236,6 +1594,11 @@ describe('createForge', () => {
 });
 ```
 
+> **`ForgeDeps.review` (canonical):** the contract's `ForgeDeps` includes the required
+> field `review: WorkflowConfig['review']`. The GitLab adapter uses it to derive
+> `changesRequested` and to create the changes-requested label per the per-repo review
+> signal, since the `ForgeAdapter` method signatures carry no workflow argument.
+
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pnpm --filter @maestro/core test -- src/forge/factory.test.ts`
@@ -1245,36 +1608,34 @@ Expected: FAIL — `Failed to resolve import "./factory.js"`.
 
 ```ts
 // packages/core/src/forge/factory.ts
-import { execa } from 'execa';
 import type { Forge } from '../domain/types.js';
+import type { MaestroConfig } from '../config/schema.js';
+import type { WorkflowConfig } from '../workflow/schema.js';
 import type { ForgeAdapter } from './adapter.js';
 import { ForgeError } from './adapter.js';
-import { GitLabForge, type CommandRunner, type FetchLike } from './gitlab.js';
+import { GitLabForge } from './gitlab.js';
+import { type CommandRunner, execaRunner } from '../util/exec.js';
 
-export interface CreateForgeRepo {
-  project: string;     // gitlab path or github org/repo
+export interface ForgeRepo {
+  url: string;       // clone url
+  project: string;   // gitlab path or github org/repo
   botUser: string;
 }
 
-export interface CreateForgeDeps {
-  host: string;        // from config ForgeAuth.host
-  tokenEnv: string;    // from config ForgeAuth.tokenEnv (NAME of env var)
-  run?: CommandRunner; // defaults to execa
-  fetch?: FetchLike;   // defaults to global fetch
-  env?: NodeJS.ProcessEnv;
+export interface ForgeDeps {
+  config: MaestroConfig;
+  runner?: CommandRunner;            // defaults to execaRunner (util/exec.ts)
+  fetchImpl?: typeof fetch;          // defaults to global fetch
+  review: WorkflowConfig['review'];  // per-repo changes-signal config (see note above)
 }
 
-const execaRunner: CommandRunner = (file, args, opts) =>
-  execa(file, args, opts) as unknown as Promise<{ stdout: string }>;
-
-export function createForge(forge: Forge, repo: CreateForgeRepo, deps: CreateForgeDeps): ForgeAdapter {
+export function createForge(forge: Forge, repo: ForgeRepo, deps: ForgeDeps): ForgeAdapter {
   if (forge === 'gitlab') {
-    return new GitLabForge(repo.project, repo.botUser, {
-      run: deps.run ?? execaRunner,
-      fetch: deps.fetch ?? fetch,
-      host: deps.host,
-      tokenEnv: deps.tokenEnv,
-      env: deps.env,
+    return new GitLabForge(repo, {
+      runner: deps.runner ?? execaRunner,
+      fetchImpl: deps.fetchImpl ?? fetch,
+      config: deps.config,
+      review: deps.review,
     });
   }
   throw new ForgeError(`Forge not implemented: ${forge}`);
@@ -1328,10 +1689,13 @@ Append to `packages/core/src/index.ts` (keep existing M1 exports above):
 
 ```ts
 export { createForge } from './forge/factory.js';
-export type { CreateForgeRepo, CreateForgeDeps } from './forge/factory.js';
+export type { ForgeRepo, ForgeDeps } from './forge/factory.js';
 export { GitLabForge } from './forge/gitlab.js';
-export type { GitLabForgeDeps, CommandRunner, FetchLike } from './forge/gitlab.js';
+export type { GitLabForgeDeps, GitLabForgeRepo, FetchLike } from './forge/gitlab.js';
 ```
+
+> `CommandRunner` is exported by M1 from `util/exec.ts` (not re-exported here to avoid a
+> duplicate symbol). The factory imports `execaRunner`/`CommandRunner` from there.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1349,7 +1713,7 @@ git commit -m "chore(core): export createForge and GitLabForge from package root
 
 ## Task 13: Wire the daemon loop to use `createForge`
 
-Replace the M1 hard-wired `MemoryForge` demo path in `daemon/loop.ts` so the per-repo adapter is built via `createForge`, selecting GitLab by the repo's forge. Keep the change minimal: derive `forge`, `host`, `tokenEnv`, `project`, and `botUser` from the loaded config + the repo entry, and pass them to `createForge`.
+Replace the M1 hard-wired `MemoryForge` demo path in `daemon/loop.ts` so the per-repo adapter is built via `createForge`, selecting GitLab by the repo's forge. Keep the change minimal: derive `forge`, `host`, `project`, and `botUser` from the loaded config + the repo entry, and call `createForge(forge, { url, project, botUser }, { config, review, ... })`. Host/token are resolved inside the adapter from `config.forges[forge]`; the loop only forwards the whole `config`, the repo identity, and the repo's `review` config (from its `WorkflowConfig`).
 
 > **Assumption (see Open questions):** the exact current shape of `daemon/loop.ts` is set by M1 and not available in this repo yet. The steps below assume `loop.ts` exposes a function that, given a `MaestroConfig` and a `RepoEntry`, must obtain a `ForgeAdapter`. Adjust the seam name to match M1; the *behaviour* to test is "the loop asks the factory for an adapter, not `MemoryForge`."
 
@@ -1366,23 +1730,24 @@ import { adapterForRepo } from './loop.js';
 import { GitLabForge } from '../forge/gitlab.js';
 import type { MaestroConfig } from '../config/schema.js';
 
-const config: MaestroConfig = {
+const config = {
   defaults: {
     pollIntervalActive: '30s', pollIntervalIdle: '5m', pollJitter: '5s',
     botUser: 'maestro-bot',
     concurrency: { globalMax: 2 },
     workspaces: { root: './workspaces', diskCap: '20GB', cleanup: 'lru' },
+    web: { port: 7330, host: '127.0.0.1' },
   },
   forges: { gitlab: { host: 'gitlab.com', tokenEnv: 'MAESTRO_GITLAB_TOKEN' } },
   repos: [{ url: 'gitlab.com/group/repo' }],
-};
+} as unknown as MaestroConfig;
 
 describe('adapterForRepo', () => {
   it('builds a GitLabForge for a gitlab repo via the factory', () => {
     const adapter = adapterForRepo(config, config.repos[0], {
-      run: vi.fn(async () => ({ stdout: '' })),
-      fetch: vi.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch,
-      env: { MAESTRO_GITLAB_TOKEN: 'x' },
+      review: { changesSignal: 'label' },
+      runner: { run: vi.fn(async () => ({ stdout: '', stderr: '', exitCode: 0 })) },
+      fetchImpl: vi.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch,
     });
     expect(adapter).toBeInstanceOf(GitLabForge);
     expect(adapter.forge).toBe('gitlab');
@@ -1403,48 +1768,49 @@ Add a small, pure-ish helper to `loop.ts` that parses the repo URL into `{ forge
 
 ```ts
 // packages/core/src/daemon/loop.ts — add near the top
-import { createForge, type CreateForgeDeps } from '../forge/factory.js';
+import { createForge, type ForgeDeps } from '../forge/factory.js';
 import type { ForgeAdapter } from '../forge/adapter.js';
 import { ForgeError } from '../forge/adapter.js';
 import type { Forge } from '../domain/types.js';
 import type { MaestroConfig, RepoEntry } from '../config/schema.js';
+import type { WorkflowConfig } from '../workflow/schema.js';
 
-// "gitlab.com/group/repo" -> { forge:'gitlab', host:'gitlab.com', project:'group/repo' }
-// "github.com/org/web"    -> { forge:'github', host:'github.com', project:'org/web' }
-export function parseRepoUrl(url: string): { forge: Forge; host: string; project: string } {
+// "gitlab.com/group/repo" -> { forge:'gitlab', project:'group/repo' }
+// "github.com/org/web"    -> { forge:'github', project:'org/web' }
+export function parseRepoUrl(url: string): { forge: Forge; project: string } {
   const clean = url.replace(/^https?:\/\//, '').replace(/\/+$/, '');
   const slash = clean.indexOf('/');
   if (slash === -1) throw new ForgeError(`Invalid repo url: ${url}`);
   const host = clean.slice(0, slash);
   const project = clean.slice(slash + 1);
   const forge: Forge = host.includes('github') ? 'github' : 'gitlab';
-  return { forge, host, project };
+  return { forge, project };
 }
 
-// Build the per-repo adapter via the factory. `over` lets tests inject run/fetch/env.
+// Build the per-repo adapter via the factory. `over` injects the repo's review config
+// (from its WorkflowConfig) plus optional runner/fetch stubs for tests.
 export function adapterForRepo(
   config: MaestroConfig,
   repo: RepoEntry,
-  over?: Partial<Pick<CreateForgeDeps, 'run' | 'fetch' | 'env'>>,
+  over: Partial<Pick<ForgeDeps, 'runner' | 'fetchImpl'>> & { review: WorkflowConfig['review'] },
 ): ForgeAdapter {
-  const { forge, host, project } = parseRepoUrl(repo.url);
-  const auth = config.forges[forge];
-  if (!auth) throw new ForgeError(`No forge auth configured for ${forge}`);
+  const { forge, project } = parseRepoUrl(repo.url);
+  if (!config.forges[forge]) throw new ForgeError(`No forge auth configured for ${forge}`);
   const botUser = config.defaults.botUser;
-  return createForge(forge, { project, botUser }, {
-    host: auth.host ?? host,
-    tokenEnv: auth.tokenEnv,
-    run: over?.run,
-    fetch: over?.fetch,
-    env: over?.env,
-  });
+  return createForge(
+    forge,
+    { url: repo.url, project, botUser },
+    { config, review: over.review, runner: over.runner, fetchImpl: over.fetchImpl },
+  );
 }
 ```
 
-Then, in the existing tick body, **replace** the M1 line that constructed `MemoryForge` (e.g. `const adapter = new MemoryForge(...)`) with:
+Then, in the existing tick body, **replace** the M1 line that constructed `MemoryForge`
+(e.g. `const adapter = new MemoryForge(...)`) with a call that passes the repo's loaded
+`WorkflowConfig.review` (M3 loads the per-repo `WorkflowConfig` during the tick):
 
 ```ts
-const adapter = adapterForRepo(config, repo);
+const adapter = adapterForRepo(config, repo, { review: workflow.review });
 ```
 
 Keep all other M1 reconcile/dispatch logic unchanged.
@@ -1472,7 +1838,7 @@ Confirm the whole core package compiles and every test (M1 + M2) passes.
 - [ ] **Step 1: Run the full test suite**
 
 Run: `pnpm --filter @maestro/core test`
-Expected: PASS — all M1 tests plus the new `gitlab.test.ts` (≈22 cases), `factory.test.ts` (2), `exports.test.ts` (1), and the `adapterForRepo` case in `loop.test.ts`.
+Expected: PASS — all M1 tests plus the new `gitlab.test.ts` (≈30 cases), `factory.test.ts` (2), `exports.test.ts` (1), and the `adapterForRepo` case in `loop.test.ts`.
 
 - [ ] **Step 2: Typecheck**
 
@@ -1495,26 +1861,15 @@ git commit -m "chore(forge): satisfy lint/typecheck for GitLab adapter"
 
 ## Self-Review (performed)
 
-- **Spec coverage:** §7 lifecycle labels → Task 8; §7 approval/changes-requested → Task 6; §11 labels → Task 9; §11 board + lists (Free-tier, single board) → Task 10; §8 forge adapter normalization → Tasks 2/4/6; §6 `manage_board` opt-out → handled by the daemon caller (noted in Task 10); contracts `ForgeAdapter` every method → Tasks 2–10; `createForge` → Task 11; daemon rewire → Task 13.
+- **Spec coverage:** §7 lifecycle labels → Task 8; §7 approval/changes-requested → Task 6; §11 labels → Task 9; §11 board + lists (Free-tier, single board) → Task 10; §8 forge adapter normalization → Tasks 2/4/6; §6 `manage_board` opt-out → handled by the daemon caller (noted in Task 10); contracts `ForgeAdapter` every method (incl. `createIssue`, `getMrDescription`, `blobUrl`) → Tasks 2–10; `createForge` → Task 11; daemon rewire → Task 13; `glab` pin + fixtures → Task 0.
+- **Contract conformance:** `createForge(forge, { url, project, botUser }, ForgeDeps)` with `ForgeDeps = { config; runner?; fetchImpl?; review }`; token resolved inside the adapter via `config.forges.gitlab.tokenEnv`; subprocess seam is the shared `CommandRunner` from `util/exec.ts` (no local declaration); `getMrForIssue` locates by head branch `maestro/issue-<n>`; `changesRequested` derives both `'label'` and `'native'` paths from `review.changesSignal`; `mergeMr('rebase')` calls `PUT .../rebase` then merge; `MergeRequest.description` mapped.
 - **Placeholder scan:** none — every code step is complete; commands and expected outputs are exact.
-- **Type consistency:** `Issue`/`MergeRequest`/`Action`/`LifecycleState`/`MergeStrategy` used verbatim from contracts; `lifecycleLabel`/`allMaestroLabels`/`LABELED_STATES` used as defined in `domain/lifecycle.ts`; `ForgeAdapter`/`CreateMrArgs`/`CommentTarget`/`ForgeError` used as defined in `forge/adapter.ts`. `GitLabForgeDeps`/`CommandRunner`/`FetchLike` defined once in `gitlab.ts` and reused by `factory.ts`.
+- **Type consistency:** `Issue`/`MergeRequest`/`Action`/`LifecycleState`/`MergeStrategy` used verbatim from contracts; `lifecycleLabel`/`allMaestroLabels`/`LABELED_STATES` from `domain/lifecycle.ts`; `ForgeAdapter`/`CreateMrArgs`/`CommentTarget`/`ForgeError` from `forge/adapter.ts`; `CommandRunner`/`execaRunner` from `util/exec.ts`; `WorkflowConfig` from `workflow/schema.ts`; `MaestroConfig` from `config/schema.ts`. `GitLabForgeDeps`/`GitLabForgeRepo`/`FetchLike` are declared once in the production `gitlab.ts`; the plan shows the `GitLabForgeDeps` interface in two doc blocks (the canonical seam-section prose and the Task 1 Step-3 implementation copy) — both kept byte-identical, including the required `review: WorkflowConfig['review']` field.
 
 ---
 
 ## Open questions
 
-1. **Exact `daemon/loop.ts` shape (M1).** The M1 plan/source is not present in this repo (only the spec and contracts exist). Task 13 introduces `adapterForRepo`/`parseRepoUrl` and assumes M1's tick currently constructs a `MemoryForge` to be swapped. The precise function name, signature, and where the `MaestroConfig`/`RepoEntry` are threaded must be matched to M1's actual code. The behavioural contract ("loop uses the factory, not `MemoryForge`") is stable; the wiring detail is not.
+1. **Exact `daemon/loop.ts` shape (M1).** The M1 source is not present in this repo (only the spec and contracts exist). Task 13 introduces `adapterForRepo`/`parseRepoUrl` and assumes M1's tick currently constructs a `MemoryForge` to be swapped, and that the per-repo `WorkflowConfig` (for `review`) is already loaded in the tick (M3). The precise function name, signature, and threading of `MaestroConfig`/`RepoEntry`/`WorkflowConfig` must be matched to M1/M3's actual code. The behavioural contract ("loop uses the factory, not `MemoryForge`") is stable; the wiring detail is not.
 
-2. **`getMrForIssue` cost.** `getMrForIssue` calls `listOpenMrsByBot` (one `glab` call) then two REST calls (`approval_state`, `discussions`). The contracts give no batching primitive, and the spec budgets "~3 calls/repo/tick" (§14). For a repo with many in-flight MRs this multiplies. No contract field exists to cache approval state across ticks; confirm whether per-tick re-fetch is acceptable or whether a snapshot batch read should be added.
-
-3. **Changes-requested signal definition.** Contracts/spec say "an unapprove / 'changes requested' review thread" but define no exact marker. This plan uses "any unresolved discussion note authored by someone other than the bot" as the signal, plus treats GitLab unapproval (no approved rule) as not-approved. Confirm this heuristic, or specify an explicit marker (e.g. a reserved comment token) the reviewer must use.
-
-4. **`mergeStrategy: 'rebase'`.** GitLab Free's `PUT .../merge` has no single "rebase then merge" flag equivalent to squash. Task 7 implements `squash` and default `merge`; `rebase` currently sends the same body as `merge`. Confirm the intended GitLab semantics for `rebase` (e.g. call `PUT .../rebase` first, or rely on project "Fast-forward merge" setting).
-
-5. **`assignReviewer` username→id resolution.** GitLab's MR update needs `reviewer_ids`, not usernames. This plan resolves via `GET /users?username=`. The contracts expose only `assignReviewer(mrNumber, username)`. Confirm an extra user-lookup call per handoff is acceptable (adds one API call to the handoff step).
-
-6. **`manageBoard` enforcement location.** The contract's `ensureBoard()` takes no flag and the `WorkflowConfig.manageBoard` boolean lives in the workflow schema (M7). This plan makes `ensureBoard` unconditional and pushes the `manageBoard: false` opt-out to the caller (daemon/`maestro add`). Confirm that is the intended seam, or whether `ensureBoard` should early-return based on a flag passed in (which the current interface signature does not allow).
-
-7. **`glab` JSON field names.** The mappers assume `glab ... -F json` emits GitLab REST field names (`iid`, `web_url`, `source_branch`, `labels` as string array, `assignees[].username`). `glab`'s JSON output occasionally differs from raw REST (e.g. label objects vs. strings across versions). The contracts pin no `glab` version. Recommend pinning a `glab` version and recording one real fixture per read method to lock the shape; flagged rather than assumed.
-
-8. **`execa` result typing.** `factory.ts` casts `execa(...)` to `{ stdout: string }`. With `execa` v9's typed result this cast is benign, but if M1 already wraps `execa` behind a shared runner util, Task 11 should reuse that util instead of importing `execa` directly. No such util is defined in the contracts; flagged.
+2. **`getMrForIssue` cost.** `getMrForIssue` calls `listOpenMrsByBot` (one `glab` call) then, depending on `changesSignal`, one or two REST calls (`approval_state`, plus `discussions` in native mode or `getIssue` in label mode). The spec budgets "~3 calls/repo/tick" (§14). For a repo with many in-flight MRs this multiplies. Confirm per-tick re-fetch is acceptable or whether a snapshot batch read should be added.

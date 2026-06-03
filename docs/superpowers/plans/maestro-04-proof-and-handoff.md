@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the pluggable proof generator (`playwright` | `test-output` | `diff-summary` | `none`) and wire the reconciler's `handoff`, `review_check`, and `merge` executors so that — per spec §7 — proof is generated and posted to the issue **and** the MR *before* the reviewer is assigned, then the MR is un-drafted and labelled `in_review`; approval triggers a forge merge with the repo's git rules, and requested-changes bounce the issue back to `in_progress`.
+**Goal:** Implement the pluggable proof generator (`playwright` | `test-output` | `diff-summary` | `none`) and wire the reconciler's `handoff` routine plus the `review_check` and `merge` cases so that — per the contract "Handoff order" — proof artifacts are written into `<workspaceDir>/proof/`, committed and pushed to the MR branch, then linked (via `adapter.blobUrl`) in a comment on the issue **and** the MR *before* the reviewer is assigned; the MR is then un-drafted and labelled `in_review`. Approval triggers a forge merge with the repo's git rules, and requested-changes bounce the issue back to `in_progress`.
 
-**Architecture:** Proof strategies live in `packages/core/src/proof/`. Each strategy implements `ProofStrategy.run(ctx)` and returns `ProofArtifact[]`. `runProof(ctx)` dispatches on `ctx.workflow.proof.type`. Strategies run `workflow.proof.command` (and, for playwright, target `workflow.environment.baseUrl` against an already-running local instance per spec §6/§14) inside the issue workspace via `execa`. The three executors are added to `reconciler/index.ts`; they consume a `ForgeAdapter` (M1), a `ProofContext` built from the M3 workspace dir + loaded `WorkflowConfig`, and call `runProof` then the adapter methods in the spec-guaranteed order. Because `ForgeAdapter.comment` accepts **text only** (no file upload — see Open questions), proof artifacts are posted as a Markdown text reference listing each artifact's relative path, kind, and caption.
+**Architecture:** Proof strategies live in `packages/core/src/proof/`. Each strategy implements `ProofStrategy.run(ctx)` and returns `ProofArtifact[]` whose `path` is **relative to `workspaceDir`**; strategies write their files into `<workspaceDir>/proof/` (e.g. `proof/maestro-proof-test-output.txt`). `runProof(ctx)` dispatches on `ctx.workflow.proof.type`. Strategies run `workflow.proof.command` (and, for playwright, target `workflow.environment.baseUrl` against an already-running local instance per the contract — proof boot/seed is deferred) inside the issue workspace through the shared exec seam `ctx.exec` (`CommandRunner` from `util/exec.ts`, default `execaRunner`). Handoff is **not a standalone executor**: it is an inline routine invoked by the `work` executor on agent `done`, and the `handoff`/`review_check`/`merge` cases live inside `executeAction(action, snapshot, deps: ReconcileDeps)` in `reconciler/index.ts`. There are **no per-executor deps bags** — everything uses the single `ReconcileDeps` (contract "Reconciler orchestration"). Per the contract "Handoff order", proof artifacts are committed to the MR branch and surfaced as a comment of `adapter.blobUrl(branch, path)` links on both the issue and the MR (links are the contract; inline `![]()` embedding is not guaranteed for private repos).
 
 **Tech Stack:** Node 20+, TypeScript 5.x, ESM. Vitest (colocated `*.test.ts`). `execa` for subprocess. pnpm workspaces (`@maestro/core`). All proof strategies and executor tests use a small POSIX shell script fixture for the proof command and a recording fake `ForgeAdapter` for order assertions.
 
@@ -16,51 +16,51 @@
 
 | Path | Responsibility | Action |
 |---|---|---|
-| `packages/core/src/proof/index.ts` | `ProofStrategy`, `ProofArtifact`, `ProofContext` types; `runProof(ctx)` dispatcher on `ctx.workflow.proof.type`; `renderArtifactComment(artifacts)` helper (text rendering of artifacts for `comment`). | Create |
-| `packages/core/src/proof/index.test.ts` | Dispatch tests: each `proof.type` routes to its strategy; `'none'` returns `[]`; comment renderer output. | Create |
-| `packages/core/src/proof/playwright.ts` | `playwrightProof: ProofStrategy` — runs `workflow.proof.command` in `workspaceDir` against `workflow.environment.baseUrl`, returns a `video` artifact pointing at the playwright output dir. | Create |
-| `packages/core/src/proof/playwright.test.ts` | Runs against a stub script; asserts command executed in cwd, env carries base URL, returns a `video` artifact. | Create |
-| `packages/core/src/proof/testOutput.ts` | `testOutputProof: ProofStrategy` — runs `workflow.proof.command`, writes captured stdout+stderr to a file, returns a `text` artifact. | Create |
-| `packages/core/src/proof/testOutput.test.ts` | Stub script; asserts stdout+stderr captured to file and returned as `text` artifact even on non-zero exit. | Create |
-| `packages/core/src/proof/diffSummary.ts` | `diffSummaryProof: ProofStrategy` — runs `git diff --stat <defaultBranch>...HEAD` in `workspaceDir`, writes summary to a file, returns a `text` artifact. | Create |
-| `packages/core/src/proof/diffSummary.test.ts` | Temp git repo with a committed change; asserts diff summary file contains the changed filename. | Create |
-| `packages/core/src/reconciler/index.ts` | Add `executeHandoff`, `executeReviewCheck`, `executeMerge` executors (exported), wired in spec-§7 order. | Modify |
-| `packages/core/src/reconciler/handoff.test.ts` | Recording fake adapter; asserts proof posted to issue AND mr **before** `assignReviewer`, then `setMrReady`, then `setLifecycleLabel(in_review)`. | Create |
-| `packages/core/src/reconciler/reviewCheck.test.ts` | Approved → merge invoked; changesRequested → `setLifecycleLabel(in_progress)` + ack comment. | Create |
-| `packages/core/src/reconciler/merge.test.ts` | `executeMerge` calls `adapter.mergeMr(mrNumber, workflow.git.mergeStrategy, workflow.git.deleteSourceBranch)`. | Create |
+| `packages/core/src/proof/index.ts` | `ProofStrategy`, `ProofArtifact`, `ProofContext` types; `runProof(ctx)` dispatcher on `ctx.workflow.proof.type`; `renderArtifactComment(adapter, branch, artifacts)` helper (renders `blobUrl` links for `comment`). | Create |
+| `packages/core/src/proof/index.test.ts` | Dispatch tests: each `proof.type` routes to its strategy; `'none'` returns `[]`; comment renderer emits `blobUrl` links. | Create |
+| `packages/core/src/proof/playwright.ts` | `playwrightProof: ProofStrategy` — runs `workflow.proof.command` in `workspaceDir` against `workflow.environment.baseUrl`, writes into `proof/`, returns a `video` artifact. | Create |
+| `packages/core/src/proof/playwright.test.ts` | Runs against a stub script; asserts command executed in cwd, env carries base URL, returns a `video` artifact under `proof/`. | Create |
+| `packages/core/src/proof/testOutput.ts` | `testOutputProof: ProofStrategy` — runs `workflow.proof.command`, writes captured stdout+stderr to `proof/`, returns a `text` artifact. | Create |
+| `packages/core/src/proof/testOutput.test.ts` | Stub script; asserts stdout+stderr captured to a `proof/` file and returned as `text` artifact even on non-zero exit. | Create |
+| `packages/core/src/proof/diffSummary.ts` | `diffSummaryProof: ProofStrategy` — runs `git diff --stat <defaultBranch>...HEAD` in `workspaceDir`, writes summary into `proof/`, returns a `text` artifact. | Create |
+| `packages/core/src/proof/diffSummary.test.ts` | Temp git repo with a committed change; asserts the `proof/` diff summary file contains the changed filename. | Create |
+| `packages/core/src/reconciler/index.ts` | Add the inline `handoff` routine plus `review_check` and `merge` cases inside `executeAction(action, snapshot, deps: ReconcileDeps)`; the `work` executor invokes `handoff` on agent `done`. | Modify |
+| `packages/core/src/reconciler/handoff.test.ts` | Recording fake adapter; asserts proof committed+pushed, then linked via `blobUrl` in comments on issue AND mr **before** `assignReviewer`, then `setMrReady`, then `setLifecycleLabel(in_review)`. | Create |
+| `packages/core/src/reconciler/reviewCheck.test.ts` | `runReviewCheck`: approved → merge invoked; changesRequested → `setLifecycleLabel(in_progress)` + ack comment. | Create |
+| `packages/core/src/reconciler/merge.test.ts` | `runMerge` calls `adapter.mergeMr(mrNumber, workflow.git.mergeStrategy, workflow.git.deleteSourceBranch)`. | Create |
 | `packages/core/test/fixtures/proof-ok.sh` | Stub proof command (prints to stdout+stderr, exit 0). | Create |
 | `packages/core/test/fixtures/proof-fail.sh` | Stub proof command (prints, exit 1). | Create |
 | `packages/core/test/recordingForge.ts` | Reusable recording fake `ForgeAdapter` that appends every write-call to an ordered `calls: string[]` log. | Create |
 
-> **Note on executor signatures (contracts gap):** `reconciler/index.ts` exists from M1 as `reconcileRepo(...)` but the contracts do not specify the executor function signatures or how a tick supplies the loaded `WorkflowConfig`, the workspace dir, or the `ProofContext` to the execute phase. This plan defines minimal executor signatures (below) and FLAGS the broader wiring in **Open questions**. The executors are pure functions of `(adapter, deps)` so they are independently unit-testable without inventing daemon plumbing.
+> **Executor architecture (per contract "Reconciler orchestration"):** `reconciler/index.ts` exists from M1 as `reconcileRepo(deps: ReconcileDeps)`. The `handoff`/`review_check`/`merge` cases live inside the **single** internal `executeAction(action: Action, snapshot: IssueSnapshot, deps: ReconcileDeps): Promise<void>` dispatcher — there are **no per-executor deps bags** (`HandoffDeps`/`ReviewCheckDeps`/`MergeDeps` are forbidden) and collaborator types are imported from their owning modules. `handoff` is **not** a returned `Action`: it is an inline routine the `work` executor invokes on agent `done`. M4 fills these case-handlers and the `handoff` routine; M4 does not export new deps bags.
+>
+> The handoff routine needs subprocess access to commit+push `proof/`. The contract's `ReconcileDeps` exposes `exec: CommandRunner` (from `util/exec.ts`), so the `work` executor passes `deps.exec` into the routine; proof strategies receive the same seam via `ProofContext.exec`. These helpers take their collaborators as **plain parameters** (`adapter`, the `CommandRunner`, the proof `ProofContext`, branch, issue/mr numbers, reviewer) so they stay unit-testable, and the `executeAction` `handoff` case sources the `CommandRunner` from `deps.exec`.
 
-**Executor signatures introduced by this plan (M4-local, flagged in Open questions):**
+**Helper signatures introduced by this plan (M4-local helpers, NOT exported deps bags):**
 
 ```ts
-export interface HandoffDeps {
+// Commits and pushes the proof/ dir to the MR source branch (contract "Handoff order" step 2).
+// The CommandRunner is deps.exec (ReconcileDeps), passed in by the work executor.
+export async function commitProof(
+  exec: CommandRunner,
+  workspaceDir: string,
+  branch: string,
+  issueNumber: number,
+): Promise<void>;
+
+// The inline handoff routine (contract "Handoff order" steps 1–6).
+export async function runHandoff(args: {
   adapter: ForgeAdapter;
-  proofCtx: ProofContext;     // { workspaceDir, workflow }
+  exec: CommandRunner;         // = ReconcileDeps.exec
+  proofCtx: ProofContext;      // { workspaceDir, workflow, exec }
+  branch: string;             // MR source branch (maestro/issue-<n>)
   issueNumber: number;
   mrNumber: number;
   reviewerUsername: string;   // = issue.authorUsername (caller resolves)
-}
-export async function executeHandoff(deps: HandoffDeps): Promise<void>;
-
-export interface ReviewCheckDeps {
-  adapter: ForgeAdapter;
-  issueNumber: number;
-  mr: MergeRequest;
-  workflow: WorkflowConfig;
-}
-export async function executeReviewCheck(deps: ReviewCheckDeps): Promise<void>;
-
-export interface MergeDeps {
-  adapter: ForgeAdapter;
-  mrNumber: number;
-  workflow: WorkflowConfig;
-}
-export async function executeMerge(deps: MergeDeps): Promise<void>;
+}): Promise<void>;
 ```
+
+`review_check` and `merge` are handled inline in `executeAction` from `(action, snapshot, deps)` — `merge` calls `adapter.mergeMr(snapshot.mr.number, workflow.git.mergeStrategy, workflow.git.deleteSourceBranch)`; `review_check` reads `snapshot.mr.approved` / `snapshot.mr.changesRequested`. The tests below exercise the inline routines directly via these helpers and a small `executeAction`-shaped wrapper, with no per-action deps bag.
 
 ---
 
@@ -76,7 +76,13 @@ export async function executeMerge(deps: MergeDeps): Promise<void>;
 // packages/core/src/proof/index.test.ts
 import { describe, it, expect } from 'vitest';
 import { runProof, type ProofContext } from './index.js';
+import type { CommandRunner } from '../util/exec.js';
 import type { WorkflowConfig } from '../workflow/schema.js';
+
+// none/unknown-type paths never touch the seam, so a no-op runner keeps the test pure.
+const noopExec: CommandRunner = {
+  async run() { return { stdout: '', stderr: '', exitCode: 0 }; },
+};
 
 function workflow(proof: WorkflowConfig['proof']): WorkflowConfig {
   return {
@@ -86,6 +92,7 @@ function workflow(proof: WorkflowConfig['proof']): WorkflowConfig {
     manageBoard: true,
     trigger: { assignee: 'bot', requireLabel: null, allowedActors: [] },
     proof,
+    review: { changesSignal: 'label' },
     git: { defaultBranch: 'main', target: 'main', mergeStrategy: 'squash', deleteSourceBranch: true },
     claude: { command: 'claude', maxTurns: 40, permissionMode: 'acceptEdits' },
     concurrency: {},
@@ -95,7 +102,7 @@ function workflow(proof: WorkflowConfig['proof']): WorkflowConfig {
 
 describe('runProof', () => {
   it('returns no artifacts for the "none" strategy', async () => {
-    const ctx: ProofContext = { workspaceDir: '/tmp/ws', workflow: workflow({ type: 'none' }) };
+    const ctx: ProofContext = { workspaceDir: '/tmp/ws', workflow: workflow({ type: 'none' }), exec: noopExec };
     await expect(runProof(ctx)).resolves.toEqual([]);
   });
 });
@@ -111,6 +118,7 @@ Expected: FAIL — `Cannot find module './index.js'` (or `runProof is not a func
 ```ts
 // packages/core/src/proof/index.ts
 import type { WorkflowConfig } from '../workflow/schema.js';
+import type { CommandRunner } from '../util/exec.js';
 
 export interface ProofArtifact {
   path: string;
@@ -121,6 +129,7 @@ export interface ProofArtifact {
 export interface ProofContext {
   workspaceDir: string;
   workflow: WorkflowConfig;
+  exec: CommandRunner;   // shared exec seam (util/exec.ts); strategies run subprocesses through it
 }
 
 export interface ProofStrategy {
@@ -191,12 +200,13 @@ exit 1
 Run: `chmod +x packages/core/test/fixtures/proof-ok.sh packages/core/test/fixtures/proof-fail.sh`
 Expected: no output, exit 0.
 
-- [ ] **Step 4: Create the recording fake adapter**
+- [ ] **Step 4: Create the recording fake adapter + recording runner**
 
 ```ts
 // packages/core/test/recordingForge.ts
 import type { ForgeAdapter, CreateMrArgs, CommentTarget } from '../src/forge/adapter.js';
 import type { Forge, Issue, MergeRequest, LifecycleState, MergeStrategy } from '../src/domain/types.js';
+import type { CommandRunner } from '../src/util/exec.js';
 
 // A ForgeAdapter that records every call in order, so tests can assert call ordering.
 export class RecordingForge implements ForgeAdapter {
@@ -213,7 +223,9 @@ export class RecordingForge implements ForgeAdapter {
   async getIssue(n: number): Promise<Issue | null> { this.calls.push(`getIssue(${n})`); return null; }
   async listOpenMrsByBot(): Promise<MergeRequest[]> { this.calls.push('listOpenMrsByBot'); return []; }
   async getMrForIssue(n: number): Promise<MergeRequest | null> { this.calls.push(`getMrForIssue(${n})`); return this.mr; }
+  async getMrDescription(mrNumber: number): Promise<string> { this.calls.push(`getMrDescription(${mrNumber})`); return ''; }
 
+  async createIssue(args: { title: string; body: string; assignee?: string }): Promise<Issue> { this.calls.push(`createIssue(${args.title})`); throw new Error('not used'); }
   async createBranch(name: string, fromRef: string): Promise<void> { this.calls.push(`createBranch(${name},${fromRef})`); }
   async createDraftMr(args: CreateMrArgs): Promise<MergeRequest> { this.calls.push(`createDraftMr(${args.sourceBranch})`); throw new Error('not used'); }
   async setMrReady(mrNumber: number): Promise<void> { this.calls.push(`setMrReady(${mrNumber})`); }
@@ -222,8 +234,22 @@ export class RecordingForge implements ForgeAdapter {
   async mergeMr(mrNumber: number, strategy: MergeStrategy, deleteSource: boolean): Promise<void> { this.calls.push(`mergeMr(${mrNumber},${strategy},${deleteSource})`); }
   async comment(target: CommentTarget, body: string): Promise<void> { this.calls.push(`comment(${target.type}:${target.number})`); }
   async setLifecycleLabel(issueNumber: number, state: LifecycleState): Promise<void> { this.calls.push(`setLifecycleLabel(${issueNumber},${state})`); }
+
+  // Pure helper (no I/O) — deterministic so handoff tests can assert link contents.
+  blobUrl(branch: string, path: string): string { return `https://gitlab.example/${this.project}/-/blob/${branch}/${path}`; }
+
   async ensureLabels(): Promise<void> { this.calls.push('ensureLabels'); }
   async ensureBoard(): Promise<void> { this.calls.push('ensureBoard'); }
+}
+
+// Recording CommandRunner (util/exec.ts seam) so handoff tests can assert the
+// proof-commit git invocations without touching a real repo.
+export class RecordingRunner implements CommandRunner {
+  readonly calls: string[] = [];
+  async run(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    this.calls.push(`${cmd} ${args.join(' ')}`);
+    return { stdout: '', stderr: '', exitCode: 0 };
+  }
 }
 ```
 
@@ -253,6 +279,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { testOutputProof } from './testOutput.js';
 import type { ProofContext } from './index.js';
+import { execaRunner } from '../util/exec.js';
 import type { WorkflowConfig } from '../workflow/schema.js';
 
 const okScript = fileURLToPath(new URL('../../test/fixtures/proof-ok.sh', import.meta.url));
@@ -263,20 +290,23 @@ function ctxFor(command: string, workspaceDir: string): ProofContext {
     forge: 'gitlab', project: 'group/repo', botUser: 'maestro-bot', manageBoard: true,
     trigger: { assignee: 'bot', requireLabel: null, allowedActors: [] },
     proof: { type: 'test-output', command },
+    review: { changesSignal: 'label' },
     git: { defaultBranch: 'main', target: 'main', mergeStrategy: 'squash', deleteSourceBranch: true },
     claude: { command: 'claude', maxTurns: 40, permissionMode: 'acceptEdits' },
     concurrency: {}, promptBody: '',
   } as WorkflowConfig;
-  return { workspaceDir, workflow };
+  // Real exec seam so the stub script actually runs and writes the artifact file.
+  return { workspaceDir, workflow, exec: execaRunner };
 }
 
 describe('testOutputProof', () => {
   let ws: string;
   beforeEach(async () => { ws = await mkdtemp(join(tmpdir(), 'maestro-proof-')); });
 
-  it('captures stdout and stderr to a text artifact', async () => {
+  it('captures stdout and stderr to a text artifact under proof/', async () => {
     const [artifact] = await testOutputProof.run(ctxFor(okScript, ws));
     expect(artifact.kind).toBe('text');
+    expect(artifact.path.startsWith('proof/')).toBe(true);
     const contents = await readFile(join(ws, artifact.path), 'utf8');
     expect(contents).toContain('stdout: tests passed');
     expect(contents).toContain('stderr: warning emitted');
@@ -300,33 +330,30 @@ Expected: FAIL — `Cannot find module './testOutput.js'`.
 
 ```ts
 // packages/core/src/proof/testOutput.ts
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { execa } from 'execa';
 import type { ProofArtifact, ProofContext, ProofStrategy } from './index.js';
 
-const OUTPUT_FILE = 'maestro-proof-test-output.txt';
+// Artifacts live under <workspaceDir>/proof/ so the handoff routine can commit them.
+const OUTPUT_PATH = 'proof/maestro-proof-test-output.txt';
 
 export const testOutputProof: ProofStrategy = {
   async run(ctx: ProofContext): Promise<ProofArtifact[]> {
     const command = ctx.workflow.proof.command;
     if (!command) throw new Error('test-output proof requires workflow.proof.command');
 
-    // reject: false — capture output even when the command fails the suite.
-    const result = await execa(command, {
-      cwd: ctx.workspaceDir,
-      shell: true,
-      reject: false,
-      all: true,
-    });
+    // Run through the shared exec seam (ctx.exec). The runner never rejects on a
+    // non-zero exit, so we capture output even when the command fails the suite.
+    const result = await ctx.exec.run('sh', ['-c', command], { cwd: ctx.workspaceDir });
 
-    const captured = result.all ?? `${result.stdout}\n${result.stderr}`;
+    const captured = `${result.stdout}\n${result.stderr}`;
     const body = `$ ${command}\nexit code: ${result.exitCode}\n\n${captured}\n`;
-    await writeFile(join(ctx.workspaceDir, OUTPUT_FILE), body, 'utf8');
+    await mkdir(join(ctx.workspaceDir, 'proof'), { recursive: true });
+    await writeFile(join(ctx.workspaceDir, OUTPUT_PATH), body, 'utf8');
 
     return [
       {
-        path: OUTPUT_FILE,
+        path: OUTPUT_PATH,
         kind: 'text',
         caption: `Test output (exit ${result.exitCode})`,
       },
@@ -366,6 +393,7 @@ import { join } from 'node:path';
 import { execa } from 'execa';
 import { diffSummaryProof } from './diffSummary.js';
 import type { ProofContext } from './index.js';
+import { execaRunner } from '../util/exec.js';
 import type { WorkflowConfig } from '../workflow/schema.js';
 
 function ctxFor(workspaceDir: string): ProofContext {
@@ -373,11 +401,13 @@ function ctxFor(workspaceDir: string): ProofContext {
     forge: 'gitlab', project: 'group/repo', botUser: 'maestro-bot', manageBoard: true,
     trigger: { assignee: 'bot', requireLabel: null, allowedActors: [] },
     proof: { type: 'diff-summary' },
+    review: { changesSignal: 'label' },
     git: { defaultBranch: 'main', target: 'main', mergeStrategy: 'squash', deleteSourceBranch: true },
     claude: { command: 'claude', maxTurns: 40, permissionMode: 'acceptEdits' },
     concurrency: {}, promptBody: '',
   } as WorkflowConfig;
-  return { workspaceDir, workflow };
+  // Real exec seam so git diff actually runs against the temp repo.
+  return { workspaceDir, workflow, exec: execaRunner };
 }
 
 describe('diffSummaryProof', () => {
@@ -397,9 +427,10 @@ describe('diffSummaryProof', () => {
     await execa('git', ['commit', '-m', 'add feature'], { cwd: ws });
   });
 
-  it('writes a diff summary text artifact naming the changed file', async () => {
+  it('writes a diff summary text artifact under proof/ naming the changed file', async () => {
     const [artifact] = await diffSummaryProof.run(ctxFor(ws));
     expect(artifact.kind).toBe('text');
+    expect(artifact.path.startsWith('proof/')).toBe(true);
     const contents = await readFile(join(ws, artifact.path), 'utf8');
     expect(contents).toContain('feature.txt');
   });
@@ -415,27 +446,27 @@ Expected: FAIL — `Cannot find module './diffSummary.js'`.
 
 ```ts
 // packages/core/src/proof/diffSummary.ts
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { execa } from 'execa';
 import type { ProofArtifact, ProofContext, ProofStrategy } from './index.js';
 
-const OUTPUT_FILE = 'maestro-proof-diff-summary.txt';
+const OUTPUT_PATH = 'proof/maestro-proof-diff-summary.txt';
 
 export const diffSummaryProof: ProofStrategy = {
   async run(ctx: ProofContext): Promise<ProofArtifact[]> {
     const base = ctx.workflow.git.defaultBranch;
-    const result = await execa('git', ['diff', '--stat', `${base}...HEAD`], {
+    // Run git through the shared exec seam (ctx.exec).
+    const result = await ctx.exec.run('git', ['diff', '--stat', `${base}...HEAD`], {
       cwd: ctx.workspaceDir,
-      reject: false,
     });
 
     const body = `git diff --stat ${base}...HEAD\n\n${result.stdout}\n`;
-    await writeFile(join(ctx.workspaceDir, OUTPUT_FILE), body, 'utf8');
+    await mkdir(join(ctx.workspaceDir, 'proof'), { recursive: true });
+    await writeFile(join(ctx.workspaceDir, OUTPUT_PATH), body, 'utf8');
 
     return [
       {
-        path: OUTPUT_FILE,
+        path: OUTPUT_PATH,
         kind: 'text',
         caption: `Diff summary vs ${base}`,
       },
@@ -464,7 +495,7 @@ git commit -m "feat(proof): add diff-summary proof strategy via git diff --stat"
 - Create: `packages/core/src/proof/playwright.ts`
 - Test: `packages/core/src/proof/playwright.test.ts`
 
-> Per spec §6/§14 the command runs against an already-running local instance reachable at `workflow.environment.baseUrl`. The strategy passes that URL to the command via env (`PLAYWRIGHT_BASE_URL`, a Playwright-recognised convention) and points the returned artifact at Playwright's conventional output dir (`test-results/`), captured as a `video` artifact. The test uses the shell stub (no real browser) and only asserts the contract: command ran in `workspaceDir`, base URL was exported, and a `video` artifact is returned.
+> Per the contract the command runs against an already-running local instance reachable at `workflow.environment.baseUrl` (proof boot/seed is deferred). The strategy passes that URL to the command via env (`PLAYWRIGHT_BASE_URL`, a Playwright-recognised convention) and directs Playwright's output under `<workspaceDir>/proof/` via `PLAYWRIGHT_OUTPUT_DIR`, returning a `video` artifact at the workspace-relative path `proof/test-results` so the handoff routine can commit it. The test uses the shell stub (no real browser) and only asserts the contract: command ran in `workspaceDir`, base URL was exported, and a `video` artifact under `proof/` is returned.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -477,6 +508,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { playwrightProof } from './playwright.js';
 import type { ProofContext } from './index.js';
+import { execaRunner } from '../util/exec.js';
 import type { WorkflowConfig } from '../workflow/schema.js';
 
 // Stub that records its working dir + the base URL env into a file, so we can assert them.
@@ -487,12 +519,14 @@ function ctxFor(workspaceDir: string): ProofContext {
     forge: 'gitlab', project: 'group/repo', botUser: 'maestro-bot', manageBoard: true,
     trigger: { assignee: 'bot', requireLabel: null, allowedActors: [] },
     proof: { type: 'playwright', command: probeScript },
+    review: { changesSignal: 'label' },
     git: { defaultBranch: 'main', target: 'main', mergeStrategy: 'squash', deleteSourceBranch: true },
     environment: { baseUrl: 'http://localhost:3000' },
     claude: { command: 'claude', maxTurns: 40, permissionMode: 'acceptEdits' },
     concurrency: {}, promptBody: '',
   } as WorkflowConfig;
-  return { workspaceDir, workflow };
+  // Real exec seam so the probe script actually runs and writes pw-probe.txt.
+  return { workspaceDir, workflow, exec: execaRunner };
 }
 
 describe('playwrightProof', () => {
@@ -506,7 +540,7 @@ describe('playwrightProof', () => {
     expect(probe).toContain(ws);
     expect(artifacts).toHaveLength(1);
     expect(artifacts[0].kind).toBe('video');
-    expect(artifacts[0].path).toBe('test-results');
+    expect(artifacts[0].path).toBe('proof/test-results');
   });
 });
 ```
@@ -520,11 +554,13 @@ Expected: FAIL — `Cannot find module './playwright.js'`.
 
 ```ts
 // packages/core/src/proof/playwright.ts
-import { execa } from 'execa';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { ProofArtifact, ProofContext, ProofStrategy } from './index.js';
 
-// Playwright's conventional artifact directory (videos/screenshots/traces).
-const RESULTS_DIR = 'test-results';
+// Artifact path is workspace-relative and lives under proof/ so the handoff
+// routine commits it; Playwright is directed to write here via PLAYWRIGHT_OUTPUT_DIR.
+const RESULTS_PATH = 'proof/test-results';
 
 export const playwrightProof: ProofStrategy = {
   async run(ctx: ProofContext): Promise<ProofArtifact[]> {
@@ -532,21 +568,18 @@ export const playwrightProof: ProofStrategy = {
     if (!command) throw new Error('playwright proof requires workflow.proof.command');
 
     const baseUrl = ctx.workflow.environment?.baseUrl;
-    const env: Record<string, string> = {};
+    const env: Record<string, string> = { PLAYWRIGHT_OUTPUT_DIR: RESULTS_PATH };
     if (baseUrl) env.PLAYWRIGHT_BASE_URL = baseUrl;
 
-    // reject: false — a failing assertion still produces a video worth posting.
-    await execa(command, {
-      cwd: ctx.workspaceDir,
-      shell: true,
-      reject: false,
-      env,
-      extendEnv: true,
-    });
+    await mkdir(join(ctx.workspaceDir, RESULTS_PATH), { recursive: true });
+
+    // Run through the shared exec seam (ctx.exec). The runner never rejects on a
+    // non-zero exit — a failing assertion still produces a video worth posting.
+    await ctx.exec.run('sh', ['-c', command], { cwd: ctx.workspaceDir, env });
 
     return [
       {
-        path: RESULTS_DIR,
+        path: RESULTS_PATH,
         kind: 'video',
         caption: baseUrl ? `Playwright run against ${baseUrl}` : 'Playwright run',
       },
@@ -582,6 +615,7 @@ Append to `packages/core/src/proof/index.test.ts` (inside the existing file, aft
 ```ts
 // add to imports at top of packages/core/src/proof/index.test.ts:
 import { renderArtifactComment, type ProofArtifact } from './index.js';
+import { RecordingForge } from '../../test/recordingForge.js';
 
 // add inside describe('runProof', ...) or a new describe block:
 describe('runProof dispatch', () => {
@@ -590,25 +624,32 @@ describe('runProof dispatch', () => {
       workspaceDir: '/tmp/ws',
       // force-cast to exercise the default branch
       workflow: workflow({ type: 'bogus' as never }),
+      exec: noopExec,
     };
     await expect(runProof(ctx)).rejects.toThrow(/unknown proof type/);
   });
 });
 
 describe('renderArtifactComment', () => {
+  const adapter = new RecordingForge();
+  const branch = 'maestro/issue-7';
+
   it('returns a "no proof artifacts" note for an empty list', () => {
-    expect(renderArtifactComment([])).toContain('No proof artifacts');
+    expect(renderArtifactComment(adapter, branch, [])).toContain('No proof artifacts');
   });
 
-  it('renders each artifact as a markdown line with kind, caption and path', () => {
+  it('renders each artifact as a markdown line with a blobUrl link', () => {
     const artifacts: ProofArtifact[] = [
-      { path: 'test-results', kind: 'video', caption: 'Playwright run' },
-      { path: 'maestro-proof-test-output.txt', kind: 'text', caption: 'Test output (exit 0)' },
+      { path: 'proof/test-results', kind: 'video', caption: 'Playwright run' },
+      { path: 'proof/maestro-proof-test-output.txt', kind: 'text', caption: 'Test output (exit 0)' },
     ];
-    const out = renderArtifactComment(artifacts);
+    const out = renderArtifactComment(adapter, branch, artifacts);
     expect(out).toContain('## Proof');
-    expect(out).toContain('**video** — Playwright run (`test-results`)');
-    expect(out).toContain('**text** — Test output (exit 0) (`maestro-proof-test-output.txt`)');
+    // links are the contract — each artifact is a blobUrl on the MR branch.
+    expect(out).toContain(`**video** — [Playwright run](${adapter.blobUrl(branch, 'proof/test-results')})`);
+    expect(out).toContain(
+      `**text** — [Test output (exit 0)](${adapter.blobUrl(branch, 'proof/maestro-proof-test-output.txt')})`,
+    );
   });
 });
 ```
@@ -625,6 +666,8 @@ Replace the body of `packages/core/src/proof/index.ts` (keeping the type exports
 ```ts
 // packages/core/src/proof/index.ts
 import type { WorkflowConfig } from '../workflow/schema.js';
+import type { ForgeAdapter } from '../forge/adapter.js';
+import type { CommandRunner } from '../util/exec.js';
 import { testOutputProof } from './testOutput.js';
 import { diffSummaryProof } from './diffSummary.js';
 import { playwrightProof } from './playwright.js';
@@ -638,6 +681,7 @@ export interface ProofArtifact {
 export interface ProofContext {
   workspaceDir: string;
   workflow: WorkflowConfig;
+  exec: CommandRunner;   // shared exec seam (util/exec.ts); strategies run subprocesses through it
 }
 
 export interface ProofStrategy {
@@ -665,15 +709,19 @@ export async function runProof(ctx: ProofContext): Promise<ProofArtifact[]> {
   }
 }
 
-// Render artifacts as a text comment body. ForgeAdapter.comment takes text only
-// (no binary upload — see plan Open questions), so we reference each artifact by
-// its relative path within the MR's source branch / workspace.
-export function renderArtifactComment(artifacts: ProofArtifact[]): string {
+// Render artifacts as a comment body. Proof artifacts are committed to the MR
+// branch (contract "Handoff order" step 2), so each is linked via adapter.blobUrl
+// — links are the contract; inline ![]() embedding is not guaranteed for private repos.
+export function renderArtifactComment(
+  adapter: ForgeAdapter,
+  branch: string,
+  artifacts: ProofArtifact[],
+): string {
   if (artifacts.length === 0) {
     return '## Proof\n\nNo proof artifacts produced for this change.';
   }
   const lines = artifacts.map(
-    (a) => `- **${a.kind}** — ${a.caption} (\`${a.path}\`)`,
+    (a) => `- **${a.kind}** — [${a.caption}](${adapter.blobUrl(branch, a.path)})`,
   );
   return ['## Proof', '', ...lines, ''].join('\n');
 }
@@ -693,13 +741,21 @@ git commit -m "feat(proof): wire all strategies into runProof and add comment re
 
 ---
 
-## Task 7: `executeHandoff` — proof BEFORE assign reviewer (ordering guarantee)
+## Task 7: `runHandoff` routine — proof commit + push, then link BEFORE assign reviewer
 
 **Files:**
 - Modify: `packages/core/src/reconciler/index.ts`
 - Test: `packages/core/src/reconciler/handoff.test.ts`
 
-> Spec §7 ordering guarantee: `runProof` → comment artifacts on **issue AND MR** → `assignReviewer` → `setMrReady` → `setLifecycleLabel(in_review)`. The test asserts the recorded call order. This is the load-bearing test of M4.
+> Contract "Handoff order" (the `work` executor's inline routine on agent `done`):
+> 1. `runProof(ctx)` → strategies write into `<workspaceDir>/proof/`.
+> 2. **commit + push** `proof/` to the MR branch (`chore: add proof artifacts for #<n>`).
+> 3. **comment** on **both** the issue and the MR, linking each committed file via `adapter.blobUrl(branch, path)`.
+> 4. `assignReviewer(mr, reviewer)`.
+> 5. `setMrReady(mr)`.
+> 6. `setLifecycleLabel(issue, 'in_review')`.
+>
+> The test asserts both the recorded git invocations (proof-commit step) and the exact adapter call order. This is the load-bearing test of M4. `runHandoff` is the inline routine invoked by the `work` executor — it is NOT a returned `Action` and takes no per-executor deps bag; its collaborators (`adapter`, the `exec: CommandRunner` from `ReconcileDeps.exec`, `proofCtx`, ...) are passed as plain parameters and sourced from `ReconcileDeps` at the call site. The proof `ProofContext` carries the same seam via `ProofContext.exec`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -709,38 +765,50 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { executeHandoff } from './index.js';
-import { RecordingForge } from '../../test/recordingForge.js';
+import { runHandoff } from './index.js';
+import { RecordingForge, RecordingRunner } from '../../test/recordingForge.js';
 import type { ProofContext } from '../proof/index.js';
+import type { CommandRunner } from '../util/exec.js';
 import type { WorkflowConfig } from '../workflow/schema.js';
 
-function proofCtx(workspaceDir: string): ProofContext {
+function proofCtx(workspaceDir: string, exec: CommandRunner): ProofContext {
   const workflow = {
     forge: 'gitlab', project: 'group/repo', botUser: 'maestro-bot', manageBoard: true,
     trigger: { assignee: 'bot', requireLabel: null, allowedActors: [] },
     proof: { type: 'none' },   // 'none' keeps the handoff test pure (no subprocess)
+    review: { changesSignal: 'label' },
     git: { defaultBranch: 'main', target: 'main', mergeStrategy: 'squash', deleteSourceBranch: true },
     claude: { command: 'claude', maxTurns: 40, permissionMode: 'acceptEdits' },
     concurrency: {}, promptBody: '',
   } as WorkflowConfig;
-  return { workspaceDir, workflow };
+  return { workspaceDir, workflow, exec };
 }
 
-describe('executeHandoff', () => {
+describe('runHandoff', () => {
   let ws: string;
   beforeEach(async () => { ws = await mkdtemp(join(tmpdir(), 'maestro-handoff-')); });
 
-  it('posts proof to issue and MR before assigning the reviewer, then readies and labels', async () => {
+  it('commits+pushes proof, then links it on issue and MR before assigning, readying, labelling', async () => {
     const adapter = new RecordingForge();
-    await executeHandoff({
+    const exec = new RecordingRunner();
+    await runHandoff({
       adapter,
-      proofCtx: proofCtx(ws),
+      exec,
+      proofCtx: proofCtx(ws, exec),
+      branch: 'maestro/issue-7',
       issueNumber: 7,
       mrNumber: 42,
       reviewerUsername: 'alice',
     });
 
-    // Exact spec-§7 order.
+    // Step 2: proof committed + pushed to the MR branch.
+    expect(exec.calls).toEqual([
+      'git add proof/',
+      'git commit -m chore: add proof artifacts for #7',
+      'git push -u origin maestro/issue-7',
+    ]);
+
+    // Steps 3–6: comment issue+MR, then assign, ready, label — exact order.
     expect(adapter.calls).toEqual([
       'comment(issue:7)',
       'comment(mr:42)',
@@ -752,8 +820,10 @@ describe('executeHandoff', () => {
 
   it('comments proof on both targets strictly before assignReviewer', async () => {
     const adapter = new RecordingForge();
-    await executeHandoff({
-      adapter, proofCtx: proofCtx(ws), issueNumber: 1, mrNumber: 2, reviewerUsername: 'bob',
+    const exec = new RecordingRunner();
+    await runHandoff({
+      adapter, exec, proofCtx: proofCtx(ws, exec), branch: 'maestro/issue-1',
+      issueNumber: 1, mrNumber: 2, reviewerUsername: 'bob',
     });
     const issueComment = adapter.calls.indexOf('comment(issue:1)');
     const mrComment = adapter.calls.indexOf('comment(mr:2)');
@@ -769,39 +839,61 @@ describe('executeHandoff', () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pnpm --filter @maestro/core test reconciler/handoff.test.ts`
-Expected: FAIL — `executeHandoff is not a function` / not exported from `./index.js`.
+Expected: FAIL — `runHandoff is not a function` / not exported from `./index.js`.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Append to `packages/core/src/reconciler/index.ts` (add imports at the top; keep the existing M1 `reconcileRepo` content intact):
+Append to `packages/core/src/reconciler/index.ts` (add imports at the top; keep the existing M1 `reconcileRepo` content intact). No per-executor deps bag is introduced — `runHandoff` takes plain parameters sourced from `ReconcileDeps` at the call site.
 
 ```ts
 // --- add to imports at top of packages/core/src/reconciler/index.ts ---
 import type { ForgeAdapter } from '../forge/adapter.js';
+import type { CommandRunner } from '../util/exec.js';
 import { runProof, renderArtifactComment, type ProofContext } from '../proof/index.js';
 
 // --- append to packages/core/src/reconciler/index.ts ---
 
-export interface HandoffDeps {
+// Handoff order step 2: commit + push the proof/ dir to the MR branch.
+// Plain `git push -u origin <branch>` per contract (no --force; agents don't amend).
+// `exec` is ReconcileDeps.exec, the shared util/exec.ts seam.
+export async function commitProof(
+  exec: CommandRunner,
+  workspaceDir: string,
+  branch: string,
+  issueNumber: number,
+): Promise<void> {
+  const opts = { cwd: workspaceDir };
+  await exec.run('git', ['add', 'proof/'], opts);
+  await exec.run('git', ['commit', '-m', `chore: add proof artifacts for #${issueNumber}`], opts);
+  await exec.run('git', ['push', '-u', 'origin', branch], opts);
+}
+
+// The inline handoff routine, invoked by the `work` executor on agent `done`.
+// Contract "Handoff order": runProof → commit+push proof/ → comment (issue + MR)
+// with blobUrl links → assignReviewer → setMrReady → setLifecycleLabel(in_review).
+export async function runHandoff(args: {
   adapter: ForgeAdapter;
+  exec: CommandRunner;        // = ReconcileDeps.exec
   proofCtx: ProofContext;
+  branch: string;
   issueNumber: number;
   mrNumber: number;
   reviewerUsername: string; // = issue.authorUsername, resolved by the caller
-}
+}): Promise<void> {
+  const { adapter, exec, proofCtx, branch, issueNumber, mrNumber, reviewerUsername } = args;
 
-// Spec §7 ordering guarantee: proof is generated and posted to BOTH the issue and
-// the MR BEFORE the reviewer is assigned. Assignment is the final pings-the-human
-// step, after the MR is readied and the lifecycle label flips to in_review.
-export async function executeHandoff(deps: HandoffDeps): Promise<void> {
-  const { adapter, proofCtx, issueNumber, mrNumber, reviewerUsername } = deps;
-
+  // 1. Generate proof artifacts into <workspaceDir>/proof/.
   const artifacts = await runProof(proofCtx);
-  const body = renderArtifactComment(artifacts);
 
+  // 2. Commit + push proof/ to the MR branch.
+  await commitProof(exec, proofCtx.workspaceDir, branch, issueNumber);
+
+  // 3. Comment on BOTH issue and MR, linking each committed file via blobUrl.
+  const body = renderArtifactComment(adapter, branch, artifacts);
   await adapter.comment({ type: 'issue', number: issueNumber }, body);
   await adapter.comment({ type: 'mr', number: mrNumber }, body);
 
+  // 4–6. Assign the reviewer, ready the MR, flip the lifecycle label.
   await adapter.assignReviewer(mrNumber, reviewerUsername);
   await adapter.setMrReady(mrNumber);
   await adapter.setLifecycleLabel(issueNumber, 'in_review');
@@ -817,25 +909,25 @@ Expected: PASS (2 passed).
 
 ```bash
 git add packages/core/src/reconciler/index.ts packages/core/src/reconciler/handoff.test.ts
-git commit -m "feat(reconciler): add handoff executor posting proof before assigning reviewer"
+git commit -m "feat(reconciler): add handoff routine committing proof and linking via blobUrl"
 ```
 
 ---
 
-## Task 8: `executeMerge` — merge with WORKFLOW.md git rules
+## Task 8: `runMerge` — merge with WORKFLOW.md git rules
 
 **Files:**
 - Modify: `packages/core/src/reconciler/index.ts`
 - Test: `packages/core/src/reconciler/merge.test.ts`
 
-> Issue auto-closes via the MR's `Closes #N` body, so the executor only invokes `mergeMr`.
+> Issue auto-closes via the MR's `Closes #N` body, so the routine only invokes `mergeMr`. `runMerge` is the body of the `merge` case in `executeAction`; it takes plain parameters (no per-executor deps bag), sourced from `(snapshot, deps)` at the call site.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
 // packages/core/src/reconciler/merge.test.ts
 import { describe, it, expect } from 'vitest';
-import { executeMerge } from './index.js';
+import { runMerge } from './index.js';
 import { RecordingForge } from '../../test/recordingForge.js';
 import type { WorkflowConfig } from '../workflow/schema.js';
 
@@ -844,22 +936,23 @@ function workflow(mergeStrategy: 'squash' | 'merge' | 'rebase', deleteSourceBran
     forge: 'gitlab', project: 'group/repo', botUser: 'maestro-bot', manageBoard: true,
     trigger: { assignee: 'bot', requireLabel: null, allowedActors: [] },
     proof: { type: 'none' },
+    review: { changesSignal: 'label' },
     git: { defaultBranch: 'main', target: 'main', mergeStrategy, deleteSourceBranch },
     claude: { command: 'claude', maxTurns: 40, permissionMode: 'acceptEdits' },
     concurrency: {}, promptBody: '',
   } as WorkflowConfig;
 }
 
-describe('executeMerge', () => {
+describe('runMerge', () => {
   it('merges using the workflow git strategy and delete-source-branch flag', async () => {
     const adapter = new RecordingForge();
-    await executeMerge({ adapter, mrNumber: 42, workflow: workflow('squash', true) });
+    await runMerge(adapter, 42, workflow('squash', true));
     expect(adapter.calls).toEqual(['mergeMr(42,squash,true)']);
   });
 
   it('honours an alternative strategy and flag', async () => {
     const adapter = new RecordingForge();
-    await executeMerge({ adapter, mrNumber: 9, workflow: workflow('rebase', false) });
+    await runMerge(adapter, 9, workflow('rebase', false));
     expect(adapter.calls).toEqual(['mergeMr(9,rebase,false)']);
   });
 });
@@ -868,7 +961,7 @@ describe('executeMerge', () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pnpm --filter @maestro/core test reconciler/merge.test.ts`
-Expected: FAIL — `executeMerge is not a function`.
+Expected: FAIL — `runMerge is not a function`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -880,21 +973,14 @@ import type { WorkflowConfig } from '../workflow/schema.js';
 
 // --- append to packages/core/src/reconciler/index.ts ---
 
-export interface MergeDeps {
-  adapter: ForgeAdapter;
-  mrNumber: number;
-  workflow: WorkflowConfig;
-}
-
-// Merge per the repo's own git rules. The issue auto-closes via the MR's
-// "Closes #N" body, so no explicit issue close is needed.
-export async function executeMerge(deps: MergeDeps): Promise<void> {
-  const { adapter, mrNumber, workflow } = deps;
-  await adapter.mergeMr(
-    mrNumber,
-    workflow.git.mergeStrategy,
-    workflow.git.deleteSourceBranch,
-  );
+// Body of the `merge` case in executeAction. Merge per the repo's own git rules.
+// The issue auto-closes via the MR's "Closes #N" body, so no explicit close is needed.
+export async function runMerge(
+  adapter: ForgeAdapter,
+  mrNumber: number,
+  workflow: WorkflowConfig,
+): Promise<void> {
+  await adapter.mergeMr(mrNumber, workflow.git.mergeStrategy, workflow.git.deleteSourceBranch);
 }
 ```
 
@@ -907,25 +993,25 @@ Expected: PASS (2 passed).
 
 ```bash
 git add packages/core/src/reconciler/index.ts packages/core/src/reconciler/merge.test.ts
-git commit -m "feat(reconciler): add merge executor using workflow git strategy"
+git commit -m "feat(reconciler): add merge routine using workflow git strategy"
 ```
 
 ---
 
-## Task 9: `executeReviewCheck` — approved→merge, changes→back to in_progress
+## Task 9: `runReviewCheck` — approved→merge, changes→back to in_progress
 
 **Files:**
 - Modify: `packages/core/src/reconciler/index.ts`
 - Test: `packages/core/src/reconciler/reviewCheck.test.ts`
 
-> Per spec §7: **approved** → perform the merge; **changes requested** → flip the label to `in_progress` AND comment acknowledging the feedback so the agent picks it up next tick. If neither, do nothing (keep polling).
+> Per the contract: **approved** → perform the merge; **changes requested** → flip the label to `in_progress` AND comment acknowledging the feedback so the agent picks it up next tick. If neither, do nothing (keep polling). `mr.changesRequested` is derived in the adapter per `workflow.review.changesSignal`, so this routine just reads the flag. `runReviewCheck` is the body of the `review_check` case in `executeAction`; it takes plain parameters (no per-executor deps bag), sourced from `(snapshot, deps)` at the call site.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
 // packages/core/src/reconciler/reviewCheck.test.ts
 import { describe, it, expect } from 'vitest';
-import { executeReviewCheck } from './index.js';
+import { runReviewCheck } from './index.js';
 import { RecordingForge } from '../../test/recordingForge.js';
 import type { MergeRequest } from '../domain/types.js';
 import type { WorkflowConfig } from '../workflow/schema.js';
@@ -934,7 +1020,7 @@ function mr(over: Partial<MergeRequest>): MergeRequest {
   return {
     id: 'm1', number: 42, sourceBranch: 'maestro/issue-7', targetBranch: 'main',
     isDraft: false, state: 'open', approved: false, changesRequested: false,
-    reviewers: [], linkedIssueNumbers: [7], webUrl: 'http://x', ...over,
+    reviewers: [], linkedIssueNumbers: [7], description: '', webUrl: 'http://x', ...over,
   };
 }
 
@@ -942,21 +1028,22 @@ const workflow = {
   forge: 'gitlab', project: 'group/repo', botUser: 'maestro-bot', manageBoard: true,
   trigger: { assignee: 'bot', requireLabel: null, allowedActors: [] },
   proof: { type: 'none' },
+  review: { changesSignal: 'label' },
   git: { defaultBranch: 'main', target: 'main', mergeStrategy: 'squash', deleteSourceBranch: true },
   claude: { command: 'claude', maxTurns: 40, permissionMode: 'acceptEdits' },
   concurrency: {}, promptBody: '',
 } as WorkflowConfig;
 
-describe('executeReviewCheck', () => {
+describe('runReviewCheck', () => {
   it('merges when the MR is approved', async () => {
     const adapter = new RecordingForge();
-    await executeReviewCheck({ adapter, issueNumber: 7, mr: mr({ approved: true }), workflow });
+    await runReviewCheck(adapter, 7, mr({ approved: true }), workflow);
     expect(adapter.calls).toEqual(['mergeMr(42,squash,true)']);
   });
 
   it('flips to in_progress and comments acknowledgement when changes are requested', async () => {
     const adapter = new RecordingForge();
-    await executeReviewCheck({ adapter, issueNumber: 7, mr: mr({ changesRequested: true }), workflow });
+    await runReviewCheck(adapter, 7, mr({ changesRequested: true }), workflow);
     expect(adapter.calls).toEqual([
       'setLifecycleLabel(7,in_progress)',
       'comment(mr:42)',
@@ -965,7 +1052,7 @@ describe('executeReviewCheck', () => {
 
   it('does nothing when neither approved nor changes requested', async () => {
     const adapter = new RecordingForge();
-    await executeReviewCheck({ adapter, issueNumber: 7, mr: mr({}), workflow });
+    await runReviewCheck(adapter, 7, mr({}), workflow);
     expect(adapter.calls).toEqual([]);
   });
 });
@@ -974,7 +1061,7 @@ describe('executeReviewCheck', () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pnpm --filter @maestro/core test reconciler/reviewCheck.test.ts`
-Expected: FAIL — `executeReviewCheck is not a function`.
+Expected: FAIL — `runReviewCheck is not a function`.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -989,22 +1076,19 @@ import type { MergeRequest } from '../domain/types.js';
 const FEEDBACK_ACK =
   'Thanks for the review — picking up the requested changes and will push updates shortly.';
 
-export interface ReviewCheckDeps {
-  adapter: ForgeAdapter;
-  issueNumber: number;
-  mr: MergeRequest;
-  workflow: WorkflowConfig;
-}
-
-// Poll outcome of an in_review MR.
+// Body of the `review_check` case in executeAction. mr.changesRequested is derived
+// in the adapter per workflow.review.changesSignal; this routine just reads it.
 //  approved          -> merge per workflow git rules
 //  changesRequested  -> flip label to in_progress + ack comment (agent resumes next tick)
 //  neither           -> noop (keep polling)
-export async function executeReviewCheck(deps: ReviewCheckDeps): Promise<void> {
-  const { adapter, issueNumber, mr, workflow } = deps;
-
+export async function runReviewCheck(
+  adapter: ForgeAdapter,
+  issueNumber: number,
+  mr: MergeRequest,
+  workflow: WorkflowConfig,
+): Promise<void> {
   if (mr.approved) {
-    await executeMerge({ adapter, mrNumber: mr.number, workflow });
+    await runMerge(adapter, mr.number, workflow);
     return;
   }
 
@@ -1024,17 +1108,47 @@ Expected: PASS (3 passed).
 
 ```bash
 git add packages/core/src/reconciler/index.ts packages/core/src/reconciler/reviewCheck.test.ts
-git commit -m "feat(reconciler): add review_check executor for approval and changes-requested"
+git commit -m "feat(reconciler): add review_check routine for approval and changes-requested"
 ```
 
 ---
 
-## Task 10: Full-suite green + public exports
+## Task 10: Wire executeAction cases + full-suite green + public exports
 
 **Files:**
+- Modify: `packages/core/src/reconciler/index.ts`
 - Modify: `packages/core/src/index.ts`
 
-> Surface the M4 executors and proof API through the package barrel so M5 (CLI/web) and the daemon loop can import them.
+> Wire the M4 routines into the single internal `executeAction(action, snapshot, deps: ReconcileDeps)` dispatcher (contract "Reconciler orchestration"), then surface the proof API and routines through the package barrel.
+
+- [ ] **Step 0: Wire the `handoff`/`review_check`/`merge` cases into `executeAction`**
+
+In `packages/core/src/reconciler/index.ts`, the internal `executeAction` switch routes to the M4 routines, sourcing every collaborator from the single `ReconcileDeps` bag (no per-executor bags). The `work` executor invokes `runHandoff` inline on agent `done` (the `handoff` kind is never returned by `decideAction`). Sketch:
+
+```ts
+// inside executeAction(action, snapshot, deps: ReconcileDeps)
+case 'review_check':
+  await runReviewCheck(deps.adapter, action.issueNumber, snapshot.mr!, deps.workflow);
+  break;
+case 'merge':
+  await runMerge(deps.adapter, snapshot.mr!.number, deps.workflow);
+  break;
+// 'handoff' is NOT a case here — it is invoked inline by the 'work' executor on
+// agent `done`, e.g.:
+//   await runHandoff({
+//     adapter: deps.adapter, exec: deps.exec /* CommandRunner from ReconcileDeps */,
+//     proofCtx: { workspaceDir, workflow: deps.workflow, exec: deps.exec },
+//     branch: `maestro/issue-${action.issueNumber}`,
+//     issueNumber: action.issueNumber, mrNumber: snapshot.mr!.number,
+//     reviewerUsername: snapshot.issue.authorUsername,
+//   });
+```
+
+> Both `runHandoff`'s `exec` and the `ProofContext.exec` are sourced from `ReconcileDeps.exec` (the shared `util/exec.ts` seam, default `execaRunner`), so proof strategies and the proof-commit step run through one injectable runner.
+
+- [ ] **Step 1: Add exports to the barrel**
+
+> Surface the M4 proof API and reconciler routines through the package barrel so M5 (CLI/web) and the daemon loop can import them. No per-executor deps bags are exported (forbidden by the contract); the routines take plain parameters and the single `ReconcileDeps` bag (M1) wires them into `executeAction`.
 
 - [ ] **Step 1: Add exports to the barrel**
 
@@ -1049,12 +1163,10 @@ export {
   type ProofStrategy,
 } from './proof/index.js';
 export {
-  executeHandoff,
-  executeReviewCheck,
-  executeMerge,
-  type HandoffDeps,
-  type ReviewCheckDeps,
-  type MergeDeps,
+  runHandoff,
+  commitProof,
+  runReviewCheck,
+  runMerge,
 } from './reconciler/index.js';
 ```
 
@@ -1071,31 +1183,25 @@ Expected: no errors.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add packages/core/src/index.ts
-git commit -m "feat(core): export proof API and reconciler executors"
+git add packages/core/src/reconciler/index.ts packages/core/src/index.ts
+git commit -m "feat(core): wire executeAction cases and export proof API + reconciler routines"
 ```
 
 ---
 
-## Self-Review (performed against spec + contracts)
+## Self-Review (performed against contracts)
 
-- **Proof strategies (spec §6/§8, contract `ProofStrategy`/`runProof`):** `none` (Task 1), `test-output` (Task 3), `diff-summary` (Task 4), `playwright` (Task 5), all dispatched by `runProof` (Task 6). Covered.
-- **Handoff ordering guarantee (spec §7):** proof → comment issue+MR → assignReviewer → setMrReady → setLifecycleLabel(in_review), asserted by exact call-order test (Task 7). Covered.
-- **review_check (spec §7):** approved→merge, changesRequested→in_progress+comment (Task 9). Covered.
-- **merge (spec §7):** `mergeMr(mrNumber, mergeStrategy, deleteSourceBranch)`; auto-close via `Closes #N` (Task 8). Covered.
-- **Type consistency:** `ProofArtifact`/`ProofContext`/`ProofStrategy`/`runProof` match contracts exactly; executor dep-interfaces are M4-local and flagged. `setLifecycleLabel` takes `LifecycleState` (`in_progress`/`in_review`) per contract. `mergeMr` arg order matches `ForgeAdapter`.
+- **Proof strategies (contract `ProofStrategy`/`runProof`):** `none` (Task 1), `test-output` (Task 3), `diff-summary` (Task 4), `playwright` (Task 5), all dispatched by `runProof` (Task 6). Each writes into `<workspaceDir>/proof/`; `ProofArtifact.path` is workspace-relative. Covered.
+- **Handoff order (contract "Handoff order"):** runProof → commit+push `proof/` (`chore: add proof artifacts for #<n>`) → comment issue+MR with `blobUrl` links → assignReviewer → setMrReady → setLifecycleLabel(in_review), asserted by exact runner + adapter call-order test (Task 7). Covered.
+- **review_check (contract):** approved→merge, changesRequested→in_progress+comment; `mr.changesRequested` derived in adapter per `review.changesSignal` (Task 9). Covered.
+- **merge (contract):** `mergeMr(mrNumber, mergeStrategy, deleteSourceBranch)`; auto-close via `Closes #N` (Task 8). Covered.
+- **Executor architecture (contract "Reconciler orchestration"):** no per-executor deps bags — `runHandoff`/`runReviewCheck`/`runMerge`/`commitProof` take plain parameters and are wired into the single `executeAction(action, snapshot, deps: ReconcileDeps)` (Task 10); `handoff` is an inline routine invoked by the `work` executor, never a returned `Action`. The proof-commit step and proof strategies run through `deps.exec`/`ProofContext.exec` (both = `ReconcileDeps.exec`, the shared `util/exec.ts` seam). Covered.
+- **changesRequested / review (contract):** every `WorkflowConfig` fixture carries `review: { changesSignal: 'label' }`. Covered.
+- **Type consistency:** `ProofArtifact`/`ProofContext`/`ProofStrategy`/`runProof` match contracts exactly; `renderArtifactComment(adapter, branch, artifacts)` emits `blobUrl` links; `RecordingForge` implements `getMrDescription`, `createIssue`, `blobUrl`. `setLifecycleLabel` takes `LifecycleState`. `mergeMr` arg order matches `ForgeAdapter`.
 - **No placeholders:** every code/command step is complete.
 
 ---
 
 ## Open questions
 
-1. **No binary upload capability on `ForgeAdapter` (FLAGGED per task brief).** `comment(target, body)` accepts **text only**; there is no method to upload/attach a video, screenshot, or file artifact to an issue or MR. The `playwright` and (file-based) proof strategies produce real artifacts (`ProofArtifact.path`, kinds `video`/`image`/`text`), but the handoff executor can currently only post a **Markdown text reference** listing each artifact's relative path/kind/caption (`renderArtifactComment`). To actually surface videos/screenshots inline, the contracts need a new adapter capability (e.g. `uploadArtifact(path): Promise<string /* url/markdown */>` or `comment` accepting attachments). Until added, reviewers must inspect artifacts on the MR's source branch / in the workspace. **Needs a contract addition before binary proof is reviewer-visible.**
-
-2. **Executor signatures and tick wiring are unspecified.** The contracts define `reconcileRepo(...)` as "orchestrates derive+decide+execute" but specify no signatures for the per-action executors, nor how a tick supplies the loaded `WorkflowConfig`, the M3 workspace dir, the resolved `reviewerUsername` (= `issue.authorUsername`), or the `mrNumber` to the execute phase. This plan introduces M4-local `HandoffDeps`/`ReviewCheckDeps`/`MergeDeps` and standalone `execute*` functions so they are unit-testable in isolation. The daemon loop (M-daemon) that constructs these deps and routes `Action` → executor is **out of scope here and needs a contract decision** on the `reconcileRepo` execute-phase interface.
-
-3. **Proof artifact path semantics.** `ProofArtifact.path` — is it relative to `workspaceDir` (assumed here) or absolute? The contract field is just `path: string`. This plan treats it as **relative to `workspaceDir`** so the text comment can reference a stable repo-relative location; the strategies write files into `workspaceDir` accordingly. If absolute paths are expected, the renderer and strategies need adjustment.
-
-4. **Playwright base-URL plumbing convention.** The contract gives `environment.baseUrl` but does not specify *how* the proof command receives it. This plan exports it as `PLAYWRIGHT_BASE_URL` (a Playwright config convention). If repos expect a different mechanism (CLI flag, `BASE_URL`, config file), the strategy needs that instead — a per-repo WORKFLOW.md detail not currently modelled.
-
-5. **`start_command`/`seed_command`/`health_check` not used by M4.** Spec §6/§17 describe booting+seeding a local instance for proof when none is running. This plan assumes an **already-running** instance at `baseUrl` (the supported local case per §17) and does **not** boot/seed. Who owns lifecycle of the runnable instance (workspace manager? a separate environment manager? the daemon loop?) is unspecified in the contracts and deferred.
+None. All M4 contract dependencies are resolved: proof artifacts live under `proof/`, are committed/pushed and linked via `blobUrl`; the handoff routine and proof strategies source their `CommandRunner` from `ReconcileDeps.exec` / `ProofContext.exec`; `review.changesSignal` is on every fixture; the reconciler uses the single `ReconcileDeps` bag with no per-executor bags.

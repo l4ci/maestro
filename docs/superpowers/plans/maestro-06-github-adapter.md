@@ -1,13 +1,13 @@
 # Maestro M6 — GitHub Forge Adapter — Implementation Plan
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement `GitHubForge implements ForgeAdapter` (`packages/core/src/forge/github.ts`) that drives a GitHub repo through the maestro lifecycle by shelling out to the `gh` CLI via `execa`, mapping `gh` JSON into the normalized `Issue` / `MergeRequest` (PR) domain model, enforcing flat-label (`maestro:<state>`) mutual exclusion, deriving approval/changes-requested from PR `reviewDecision`, and creating maestro labels idempotently. Wire `'github'` into `createForge` (`packages/core/src/forge/factory.ts`). `ensureBoard` is a no-op (Projects V2 deferred).
+**Goal:** Implement `GitHubForge implements ForgeAdapter` (`packages/core/src/forge/github.ts`) that drives a GitHub repo through the maestro lifecycle by shelling out to the `gh` CLI via the shared `CommandRunner` (`util/exec.ts`), mapping `gh` JSON into the normalized `Issue` / `MergeRequest` (PR) domain model (incl. PR `description` and `linkedIssueNumbers`), enforcing flat-label (`maestro:<state>`) mutual exclusion, deriving `approved`/`changesRequested` per `WorkflowConfig.review.changesSignal` (both `'native'` and `'label'` paths), and creating maestro labels idempotently (incl. the changes-requested label in `'label'` mode). Implements the full `ForgeAdapter` surface including `createIssue`, `getMrDescription`, and `blobUrl`. Wire `'github'` into `createForge` (`packages/core/src/forge/factory.ts`). `ensureBoard` is a no-op (Projects V2 deferred).
 
-**Architecture:** The adapter is the *only* GitHub-aware code; everything above it (reconciler, daemon) consumes the normalized `ForgeAdapter` interface from `packages/core/src/forge/adapter.ts`. It mirrors the M2 GitLab adapter (`packages/core/src/forge/gitlab.ts`): a class taking an injected `execa`-shaped runner (so tests stub the subprocess; no real network), constructed from a normalized `repo` + `deps` by the factory. Tokens are passed by reading the env var whose *name* is `tokenEnv` (config never holds the token itself) and exporting it to `gh` as `GH_TOKEN`. Labels are FLAT: `lifecycleLabel('github', state)` → `maestro:in_progress` etc. `setLifecycleLabel` adds the one target label and removes every *other* maestro flat label, enforcing exclusivity in code (GitHub has no scoped-label semantics).
+**Architecture:** The adapter is the *only* GitHub-aware code; everything above it (reconciler, daemon) consumes the normalized `ForgeAdapter` interface from `packages/core/src/forge/adapter.ts`. It mirrors the M2 GitLab adapter (`packages/core/src/forge/gitlab.ts`): a class taking the injected shared `CommandRunner` from `util/exec.ts` (so tests stub `run`; no real network), constructed from a normalized `repo` + `deps` by the factory. Tokens are passed by reading the env var whose *name* is `tokenEnv` (config never holds the token itself) and exporting it to `gh` as `GH_TOKEN` (never embedded in URLs/logs). Labels are FLAT: `lifecycleLabel('github', state)` → `maestro:in_progress` etc. `setLifecycleLabel` adds the one target label and removes every *other* maestro flat label, enforcing exclusivity in code (GitHub has no scoped-label semantics).
 
-**Tech Stack:** Node 20+, TypeScript 5.x, ESM (`"type": "module"`). Vitest (tests colocated as `*.test.ts`). `execa` for subprocess. Package `@maestro/core`. No real `gh`/network in tests — the subprocess runner is injected and stubbed.
+**Tech Stack:** Node 20+, TypeScript 5.x, ESM (`"type": "module"`). Vitest (tests colocated as `*.test.ts`). Shared `CommandRunner` (`util/exec.ts`, `execaRunner` over `execa`) for subprocess. Package `@maestro/core`. No real `gh`/network in tests — the `CommandRunner` is injected and stubbed.
 
-**Depends on:** M1 (`ForgeAdapter` interface in `forge/adapter.ts`, `ForgeError`, `CreateMrArgs`, `CommentTarget`; lifecycle label helpers in `domain/lifecycle.ts`; domain types in `domain/types.ts`), M2 (forge factory pattern in `forge/factory.ts` + GitLab adapter `forge/gitlab.ts` as the reference implementation to mirror).
+**Depends on:** M1 (`ForgeAdapter` interface in `forge/adapter.ts`, `ForgeError`, `CreateMrArgs`, `CommentTarget`; the shared `CommandRunner`/`execaRunner` seam in `util/exec.ts`; lifecycle label helpers in `domain/lifecycle.ts`; domain types in `domain/types.ts`; `WorkflowConfig` in `workflow/schema.ts`), M2 (forge factory pattern in `forge/factory.ts` + GitLab adapter `forge/gitlab.ts` as the reference implementation to mirror — including how it threads `WorkflowConfig.review`).
 
 ---
 
@@ -33,36 +33,42 @@ Files this milestone **reads only** (from M1/M2 — do NOT modify):
 packages/core/src/forge/adapter.ts        # ForgeAdapter, ForgeError, CreateMrArgs, CommentTarget
 packages/core/src/domain/types.ts         # Forge, Issue, MergeRequest, LifecycleState, MergeStrategy
 packages/core/src/domain/lifecycle.ts     # lifecycleLabel, allMaestroLabels, labeledStateOf, LABELED_STATES
-packages/core/src/forge/gitlab.ts         # reference: structure, deps shape, exec injection
+packages/core/src/util/exec.ts            # CommandRunner + execaRunner (shared subprocess seam — import, never redeclare)
+packages/core/src/workflow/schema.ts      # WorkflowConfig (review.changesSignal / review.changesLabel)
+packages/core/src/forge/gitlab.ts         # reference: structure, deps shape, CommandRunner injection, WorkflowConfig.review threading
 ```
 
 ### Adapter construction contract (mirror M2)
 
-`createForge(forge, repo, deps)` (per contracts `forge/factory.ts`) is the only constructor entry point. The contracts do not spell out the concrete shapes of `repo` and `deps`; this plan mirrors what M2's GitLab adapter must already have established. To stay self-contained and stubbable, `GitHubForge` is constructed with:
+`createForge(forge, { url, project, botUser }, deps)` (per contracts `forge/factory.ts`) is the only constructor entry point, where `deps: ForgeDeps = { config, review, runner?, fetchImpl? }` (`review: WorkflowConfig['review']` is a required field). `GitHubForge` is constructed with the normalized fields the factory resolves from `repo` + `deps` — `changesSignal`/`changesLabel` are sourced from `deps.review`:
 
 ```ts
 // All fields below are derived from the normalized repo entry + injected deps.
+import type { CommandRunner } from '../util/exec.js';
+import type { WorkflowConfig } from '../workflow/schema.js';
+
 export interface GitHubForgeArgs {
-  project: string;   // "org/repo"
-  botUser: string;   // bot account username
-  host: string;      // e.g. "github.com" (from forges.github.host)
-  token: string;     // resolved value of process.env[forges.github.tokenEnv]
-  exec: ExecFn;      // injected execa-shaped runner (stubbed in tests)
+  project: string;        // "org/repo"
+  botUser: string;        // bot account username
+  host: string;           // e.g. "github.com" (from forges.github.host)
+  token: string;          // resolved value of process.env[forges.github.tokenEnv]
+  changesSignal: WorkflowConfig['review']['changesSignal'];  // 'native' | 'label'
+  changesLabel?: string;  // flat label name when changesSignal === 'label'
+  runner: CommandRunner;  // shared subprocess seam (util/exec.ts), stubbed in tests
 }
 ```
 
-`ExecFn` is the minimal execa-shaped seam used for stubbing (matches how M2 stubs `glab`):
+The subprocess seam is the **shared `CommandRunner`** from `packages/core/src/util/exec.ts` (per contracts "Shared exec seam" — no plan declares its own `ExecFn`/`CommandRunner`):
 
 ```ts
-export type ExecResult = { stdout: string; stderr: string };
-export type ExecFn = (
-  file: string,
-  args: string[],
-  options?: { env?: Record<string, string>; cwd?: string },
-) => Promise<ExecResult>;
+// from ../util/exec.js
+export interface CommandRunner {
+  run(cmd: string, args: string[], opts?: { cwd?: string; input?: string; env?: Record<string, string> }):
+    Promise<{ stdout: string; stderr: string; exitCode: number }>;
+}
 ```
 
-> **Open question (recorded, not invented):** the exact `repo`/`deps` parameter shapes of `createForge` and the exact `ExecFn`/deps seam are defined by M1/M2 and are not in the contracts. If M2 already exports these (e.g. a shared `ExecFn` type or a `ForgeDeps`), the implementor MUST import and reuse them rather than redeclare. See "## Open questions".
+Tests stub `CommandRunner.run` directly (returns `{ stdout, stderr, exitCode }`); no real `gh`/network.
 
 ---
 
@@ -70,7 +76,7 @@ export type ExecFn = (
 
 ### Task 0 — Read the references before writing code
 
-- [ ] Open and read `packages/core/src/forge/adapter.ts` (the `ForgeAdapter` interface, `ForgeError`, `CreateMrArgs`, `CommentTarget`) and `packages/core/src/forge/gitlab.ts` (the M2 reference adapter). Note exactly how GitLab injects/stubs the subprocess runner, how it shapes its constructor args, and how `createForge` builds it in `factory.ts`. **Mirror that structure.** Do not redeclare types M2 already exports — import them.
+- [ ] Open and read `packages/core/src/forge/adapter.ts` (the `ForgeAdapter` interface, `ForgeError`, `CreateMrArgs`, `CommentTarget`), `packages/core/src/util/exec.ts` (the shared `CommandRunner` seam — import it, do NOT redeclare), and `packages/core/src/forge/gitlab.ts` (the M2 reference adapter). Note exactly how GitLab injects the shared `CommandRunner`, how it shapes its constructor args, and how `createForge` builds it in `factory.ts`. **Mirror that structure.** Do not redeclare types M1/M2 already export — import them.
 - [ ] Open `packages/core/src/domain/lifecycle.ts` and confirm `lifecycleLabel('github', 'in_progress') === 'maestro:in_progress'`, and that `allMaestroLabels('github')` returns `['maestro:in_progress','maestro:in_review','maestro:blocked']`. These are the labels this adapter creates and strips.
 
 ---
@@ -84,22 +90,30 @@ Establish the class implementing `ForgeAdapter` with its three readonly props, s
 ```ts
 import { describe, it, expect, vi } from 'vitest';
 import { GitHubForge } from './github.js';
-import type { ExecFn } from './github.js';
+import type { CommandRunner } from '../util/exec.js';
 
-function makeExec(impl: Partial<Record<string, () => unknown>> = {}): ExecFn {
-  // default: any unexpected call fails the test loudly
-  return vi.fn(async (file: string, args: string[]) => {
-    throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
-  }) as unknown as ExecFn;
+// A stub CommandRunner whose `run` returns canned {stdout,stderr,exitCode}.
+function makeRunner(
+  run: CommandRunner['run'] = vi.fn(async (cmd, args) => {
+    // default: any unexpected call fails the test loudly
+    throw new Error(`unexpected exec: ${cmd} ${args.join(' ')}`);
+  }),
+): CommandRunner {
+  return { run } as CommandRunner;
 }
 
-function makeForge(exec: ExecFn = makeExec()): GitHubForge {
+function makeForge(
+  run?: CommandRunner['run'],
+  opts: { changesSignal?: 'native' | 'label'; changesLabel?: string } = {},
+): GitHubForge {
   return new GitHubForge({
     project: 'org/web',
     botUser: 'maestro-bot',
     host: 'github.com',
     token: 'tok_test',
-    exec,
+    changesSignal: opts.changesSignal ?? 'label',
+    changesLabel: opts.changesLabel ?? 'maestro:changes-requested',
+    runner: makeRunner(run),
   });
 }
 
@@ -138,20 +152,17 @@ import {
   LABELED_STATES,
 } from '../domain/lifecycle.js';
 import type { LabeledState } from '../domain/lifecycle.js';
-
-export type ExecResult = { stdout: string; stderr: string };
-export type ExecFn = (
-  file: string,
-  args: string[],
-  options?: { env?: Record<string, string>; cwd?: string },
-) => Promise<ExecResult>;
+import type { CommandRunner } from '../util/exec.js';
+import type { WorkflowConfig } from '../workflow/schema.js';
 
 export interface GitHubForgeArgs {
   project: string;
   botUser: string;
   host: string;
   token: string;
-  exec: ExecFn;
+  changesSignal: WorkflowConfig['review']['changesSignal'];
+  changesLabel?: string;
+  runner: CommandRunner;
 }
 
 export class GitHubForge implements ForgeAdapter {
@@ -160,20 +171,24 @@ export class GitHubForge implements ForgeAdapter {
   readonly botUser: string;
   private readonly host: string;
   private readonly token: string;
-  private readonly exec: ExecFn;
+  private readonly changesSignal: WorkflowConfig['review']['changesSignal'];
+  private readonly changesLabel?: string;
+  private readonly runner: CommandRunner;
 
   constructor(args: GitHubForgeArgs) {
     this.project = args.project;
     this.botUser = args.botUser;
     this.host = args.host;
     this.token = args.token;
-    this.exec = args.exec;
+    this.changesSignal = args.changesSignal;
+    this.changesLabel = args.changesLabel;
+    this.runner = args.runner;
   }
 
-  // --- internal: run gh with the token + repo flags wired in ---
+  // --- internal: run gh with the token + host wired in ---
   private async gh(args: string[]): Promise<string> {
     try {
-      const res = await this.exec('gh', args, {
+      const res = await this.runner.run('gh', args, {
         env: { GH_TOKEN: this.token, GH_HOST: this.host },
       });
       return res.stdout;
@@ -193,6 +208,12 @@ export class GitHubForge implements ForgeAdapter {
     throw new ForgeError('not implemented');
   }
   getMrForIssue(_issueNumber: number): Promise<MergeRequest | null> {
+    throw new ForgeError('not implemented');
+  }
+  getMrDescription(_mrNumber: number): Promise<string> {
+    throw new ForgeError('not implemented');
+  }
+  createIssue(_args: { title: string; body: string; assignee?: string }): Promise<Issue> {
     throw new ForgeError('not implemented');
   }
   createBranch(_name: string, _fromRef: string): Promise<void> {
@@ -228,6 +249,12 @@ export class GitHubForge implements ForgeAdapter {
   }
   ensureBoard(): Promise<void> {
     throw new ForgeError('not implemented');
+  }
+
+  // --- pure helper (no I/O) ---
+  // GitHub blob URL: https://<host>/<project>/blob/<branch>/<path>
+  blobUrl(branch: string, path: string): string {
+    return `https://${this.host}/${this.project}/blob/${branch}/${path}`;
   }
 
   // referenced by later tasks; keep imports live
@@ -274,18 +301,18 @@ const GH_ISSUE_JSON = JSON.stringify([
 
 describe('GitHubForge.listAssignedOpenIssues', () => {
   it('maps gh issue JSON to normalized Issue[]', async () => {
-    const exec = vi.fn(async (file: string, args: string[]) => {
-      expect(file).toBe('gh');
+    const run = vi.fn(async (cmd: string, args: string[]) => {
+      expect(cmd).toBe('gh');
       expect(args).toContain('issue');
       expect(args).toContain('list');
       expect(args).toContain('--assignee');
       expect(args).toContain('maestro-bot');
       expect(args).toContain('--state');
       expect(args).toContain('open');
-      return { stdout: GH_ISSUE_JSON, stderr: '' };
-    }) as unknown as ExecFn;
+      return { stdout: GH_ISSUE_JSON, stderr: '', exitCode: 0 };
+    });
 
-    const forge = makeForge(exec);
+    const forge = makeForge(run);
     const issues = await forge.listAssignedOpenIssues();
 
     expect(issues).toHaveLength(1);
@@ -344,7 +371,7 @@ describe('GitHubForge.listAssignedOpenIssues', () => {
   }
 ```
 
-Add these raw `gh` JSON shapes near the top of `github.ts` (below the `ExecFn` types):
+Add these raw `gh` JSON shapes near the top of `github.ts` (below the `GitHubForgeArgs`/`CommandRunner` imports):
 
 ```ts
 interface GhUser {
@@ -384,26 +411,26 @@ interface GhIssue {
 describe('GitHubForge.getIssue', () => {
   it('maps a single issue via gh issue view', async () => {
     const single = JSON.parse(GH_ISSUE_JSON)[0];
-    const exec = vi.fn(async (_file: string, args: string[]) => {
+    const run = vi.fn(async (_cmd: string, args: string[]) => {
       expect(args).toContain('view');
       expect(args).toContain('7');
-      return { stdout: JSON.stringify(single), stderr: '' };
-    }) as unknown as ExecFn;
+      return { stdout: JSON.stringify(single), stderr: '', exitCode: 0 };
+    });
 
-    const forge = makeForge(exec);
+    const forge = makeForge(run);
     const issue = await forge.getIssue(7);
     expect(issue?.number).toBe(7);
     expect(issue?.state).toBe('open');
   });
 
   it('returns null when gh reports the issue is not found', async () => {
-    const exec = vi.fn(async () => {
+    const run = vi.fn(async () => {
       const err = new Error('gh: issue not found') as Error & { exitCode: number };
       err.exitCode = 1;
       throw err;
-    }) as unknown as ExecFn;
+    });
 
-    const forge = makeForge(exec);
+    const forge = makeForge(run);
     expect(await forge.getIssue(999)).toBeNull();
   });
 });
@@ -440,7 +467,7 @@ Add two private helpers to `github.ts` (the raw runner without the catch-wrap, s
 ```ts
   // raw runner: surfaces the original error so callers can branch (e.g. not-found)
   private async execGhRaw(args: string[]): Promise<string> {
-    const res = await this.exec('gh', args, {
+    const res = await this.runner.run('gh', args, {
       env: { GH_TOKEN: this.token, GH_HOST: this.host },
     });
     return res.stdout;
@@ -461,9 +488,9 @@ Add two private helpers to `github.ts` (the raw runner without the catch-wrap, s
 
 ---
 
-### Task 4 — PR (MergeRequest) mapping core + `getMrForIssue`
+### Task 4 — PR (MergeRequest) mapping core + `getMrForIssue` + `getMrDescription`
 
-Map `gh pr view --json ...` (incl. `reviewDecision`, `isDraft`, `closingIssuesReferences`) into a normalized `MergeRequest`, with `approved`/`changesRequested` derived from `reviewDecision`.
+Map `gh pr view --json ...` (incl. `reviewDecision`, `isDraft`, `closingIssuesReferences`, `body`, `labels`) into a normalized `MergeRequest`. `approved` derives from `reviewDecision === 'APPROVED'`; `description` from the PR `body`; `changesRequested` per `WorkflowConfig.review.changesSignal` — `'native'` reads `reviewDecision === 'CHANGES_REQUESTED'`, `'label'` (default) reads whether `changesLabel` is present on the PR. `getMrDescription` reads back the PR `body` by number.
 
 - [ ] **Write failing test.** Append to `github.test.ts`:
 
@@ -479,6 +506,8 @@ function ghPr(overrides: Record<string, unknown> = {}): string {
     reviewDecision: '',
     reviewRequests: [{ login: 'alice' }],
     closingIssuesReferences: [{ number: 7 }],
+    body: 'Living plan\n- [ ] step one',
+    labels: [],
     url: 'https://github.com/org/web/pull/42',
     ...overrides,
   });
@@ -486,13 +515,13 @@ function ghPr(overrides: Record<string, unknown> = {}): string {
 
 describe('GitHubForge PR mapping', () => {
   it('maps an APPROVED PR to approved:true', async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       expect(args).toContain('pr');
       expect(args).toContain('view');
-      return { stdout: ghPr({ reviewDecision: 'APPROVED' }), stderr: '' };
-    }) as unknown as ExecFn;
+      return { stdout: ghPr({ reviewDecision: 'APPROVED' }), stderr: '', exitCode: 0 };
+    });
 
-    const mr = await makeForge(exec).getMrForIssue(7);
+    const mr = await makeForge(run).getMrForIssue(7);
     expect(mr).toEqual({
       id: 'PR_kw1',
       number: 42,
@@ -504,43 +533,79 @@ describe('GitHubForge PR mapping', () => {
       changesRequested: false,
       reviewers: ['alice'],
       linkedIssueNumbers: [7],
+      description: 'Living plan\n- [ ] step one',
       webUrl: 'https://github.com/org/web/pull/42',
     });
   });
 
-  it('maps CHANGES_REQUESTED to changesRequested:true', async () => {
-    const exec = vi.fn(async () => ({
+  it('maps CHANGES_REQUESTED to changesRequested:true under changesSignal=native', async () => {
+    const run = vi.fn(async () => ({
       stdout: ghPr({ reviewDecision: 'CHANGES_REQUESTED' }),
       stderr: '',
-    })) as unknown as ExecFn;
-    const mr = await makeForge(exec).getMrForIssue(7);
+      exitCode: 0,
+    }));
+    const mr = await makeForge(run, { changesSignal: 'native' }).getMrForIssue(7);
     expect(mr?.approved).toBe(false);
     expect(mr?.changesRequested).toBe(true);
   });
 
+  it('ignores reviewDecision for changes under changesSignal=label (uses label instead)', async () => {
+    // default makeForge uses changesSignal='label', changesLabel='maestro:changes-requested'
+    const withLabel = vi.fn(async () => ({
+      stdout: ghPr({
+        reviewDecision: 'CHANGES_REQUESTED',
+        labels: [{ name: 'maestro:changes-requested' }],
+      }),
+      stderr: '',
+      exitCode: 0,
+    }));
+    expect((await makeForge(withLabel).getMrForIssue(7))?.changesRequested).toBe(true);
+
+    // native CHANGES_REQUESTED but NO label → not flagged in label mode
+    const noLabel = vi.fn(async () => ({
+      stdout: ghPr({ reviewDecision: 'CHANGES_REQUESTED', labels: [] }),
+      stderr: '',
+      exitCode: 0,
+    }));
+    expect((await makeForge(noLabel).getMrForIssue(7))?.changesRequested).toBe(false);
+  });
+
   it('maps REVIEW_REQUIRED / empty to neither', async () => {
-    const exec = vi.fn(async () => ({
+    const run = vi.fn(async () => ({
       stdout: ghPr({ reviewDecision: 'REVIEW_REQUIRED' }),
       stderr: '',
-    })) as unknown as ExecFn;
-    const mr = await makeForge(exec).getMrForIssue(7);
+      exitCode: 0,
+    }));
+    const mr = await makeForge(run, { changesSignal: 'native' }).getMrForIssue(7);
     expect(mr?.approved).toBe(false);
     expect(mr?.changesRequested).toBe(false);
   });
 
   it('maps MERGED and CLOSED PR states', async () => {
-    const exec = vi.fn(async () => ({
+    const run = vi.fn(async () => ({
       stdout: ghPr({ state: 'MERGED' }),
       stderr: '',
-    })) as unknown as ExecFn;
-    expect((await makeForge(exec).getMrForIssue(7))?.state).toBe('merged');
+      exitCode: 0,
+    }));
+    expect((await makeForge(run).getMrForIssue(7))?.state).toBe('merged');
   });
 
   it('returns null when no PR exists for the issue', async () => {
-    const exec = vi.fn(async () => {
+    const run = vi.fn(async () => {
       throw new Error('no pull requests found');
-    }) as unknown as ExecFn;
-    expect(await makeForge(exec).getMrForIssue(7)).toBeNull();
+    });
+    expect(await makeForge(run).getMrForIssue(7)).toBeNull();
+  });
+
+  it('getMrDescription reads the PR body by number', async () => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
+      expect(args).toContain('pr');
+      expect(args).toContain('view');
+      expect(args).toContain('42');
+      expect(args).toContain('body');
+      return { stdout: JSON.stringify({ body: 'living plan' }), stderr: '', exitCode: 0 };
+    });
+    expect(await makeForge(run).getMrDescription(42)).toBe('living plan');
   });
 });
 ```
@@ -561,11 +626,13 @@ interface GhPr {
   reviewDecision?: string; // 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | ''
   reviewRequests?: GhUser[];
   closingIssuesReferences?: { number: number }[];
+  body?: string;
+  labels?: GhLabel[];
   url: string;
 }
 
 const PR_JSON_FIELDS =
-  'id,number,headRefName,baseRefName,isDraft,state,reviewDecision,reviewRequests,closingIssuesReferences,url';
+  'id,number,headRefName,baseRefName,isDraft,state,reviewDecision,reviewRequests,closingIssuesReferences,body,labels,url';
 ```
 
 ```ts
@@ -576,6 +643,14 @@ const PR_JSON_FIELDS =
       MERGED: 'merged',
       CLOSED: 'closed',
     };
+    const labels = (raw.labels ?? []).map((l) => l.name);
+    // changesRequested per WorkflowConfig.review.changesSignal (contracts "Review signal"):
+    //  'native' → PR reviewDecision === 'CHANGES_REQUESTED'
+    //  'label'  (default) → the changesLabel is present on the PR
+    const changesRequested =
+      this.changesSignal === 'native'
+        ? decision === 'CHANGES_REQUESTED'
+        : this.changesLabel != null && labels.includes(this.changesLabel);
     return {
       id: raw.id,
       number: raw.number,
@@ -584,9 +659,10 @@ const PR_JSON_FIELDS =
       isDraft: raw.isDraft,
       state: stateMap[raw.state],
       approved: decision === 'APPROVED',
-      changesRequested: decision === 'CHANGES_REQUESTED',
+      changesRequested,
       reviewers: (raw.reviewRequests ?? []).map((r) => r.login),
       linkedIssueNumbers: (raw.closingIssuesReferences ?? []).map((c) => c.number),
+      description: raw.body ?? '',
       webUrl: raw.url,
     };
   }
@@ -614,16 +690,30 @@ const PR_JSON_FIELDS =
     const msg = err instanceof Error ? err.message.toLowerCase() : '';
     return msg.includes('no pull requests found') || msg.includes('no pull request');
   }
+
+  // Read the PR body (the agent's living plan/checklist) for M3 context.
+  async getMrDescription(mrNumber: number): Promise<string> {
+    const stdout = await this.gh([
+      'pr',
+      'view',
+      String(mrNumber),
+      '--repo',
+      this.project,
+      '--json',
+      'body',
+    ]);
+    return (JSON.parse(stdout) as { body?: string }).body ?? '';
+  }
 ```
 
-> Note: PR lookup keys off the branch name `maestro/issue-<number>` (fixed branch convention in contracts: "Branch name: `maestro/issue-<number>`"). `gh pr view <branch>` resolves the PR for that head branch.
+> Note: PR lookup keys off the branch name `maestro/issue-<number>` (fixed branch convention in contracts: "Branch name: `maestro/issue-<number>`"). `gh pr view <branch>` resolves the PR for that head branch. `getMrDescription(mrNumber)` reads back the same `body` field by PR number.
 
 - [ ] **Run & see it pass.** Command: `pnpm --filter @maestro/core test forge/github.test.ts`
-  Expected: all PR-mapping cases pass (9 passed total).
+  Expected: all PR-mapping cases pass (description, both changesSignal paths, states, null, getMrDescription).
 
 - [ ] **Commit.**
   `git add packages/core/src/forge/github.ts packages/core/src/forge/github.test.ts`
-  `git commit -m "feat(core): map gh PR JSON incl reviewDecision to MergeRequest"`
+  `git commit -m "feat(core): map gh PR JSON incl body/reviewDecision/changesSignal to MergeRequest"`
 
 ---
 
@@ -636,17 +726,17 @@ List open PRs authored by the bot and map them.
 ```ts
 describe('GitHubForge.listOpenMrsByBot', () => {
   it('lists open PRs authored by the bot', async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       expect(args).toContain('pr');
       expect(args).toContain('list');
       expect(args).toContain('--author');
       expect(args).toContain('maestro-bot');
       expect(args).toContain('--state');
       expect(args).toContain('open');
-      return { stdout: `[${ghPr({ reviewDecision: 'APPROVED' })}]`, stderr: '' };
-    }) as unknown as ExecFn;
+      return { stdout: `[${ghPr({ reviewDecision: 'APPROVED' })}]`, stderr: '', exitCode: 0 };
+    });
 
-    const mrs = await makeForge(exec).listOpenMrsByBot();
+    const mrs = await makeForge(run).listOpenMrsByBot();
     expect(mrs).toHaveLength(1);
     expect(mrs[0].approved).toBe(true);
     expect(mrs[0].number).toBe(42);
@@ -697,15 +787,15 @@ Create a branch from a ref via the git refs REST API (`gh api`). `gh` has no fir
 describe('GitHubForge.createBranch', () => {
   it('resolves the base sha then creates the ref via gh api', async () => {
     const calls: string[][] = [];
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       calls.push(args);
       if (args.includes('git/ref/heads/main')) {
-        return { stdout: JSON.stringify({ object: { sha: 'deadbeef' } }), stderr: '' };
+        return { stdout: JSON.stringify({ object: { sha: 'deadbeef' } }), stderr: '', exitCode: 0 };
       }
-      return { stdout: '{}', stderr: '' };
-    }) as unknown as ExecFn;
+      return { stdout: '{}', stderr: '', exitCode: 0 };
+    });
 
-    await makeForge(exec).createBranch('maestro/issue-7', 'main');
+    await makeForge(run).createBranch('maestro/issue-7', 'main');
 
     // first call resolves base sha
     expect(calls[0]).toContain('repos/org/web/git/ref/heads/main');
@@ -762,16 +852,16 @@ Create a draft PR, then read it back as a normalized `MergeRequest`.
 describe('GitHubForge.createDraftMr', () => {
   it('creates a draft PR and returns the mapped MergeRequest', async () => {
     const calls: string[][] = [];
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       calls.push(args);
       if (args.includes('create')) {
-        return { stdout: 'https://github.com/org/web/pull/42\n', stderr: '' };
+        return { stdout: 'https://github.com/org/web/pull/42\n', stderr: '', exitCode: 0 };
       }
       // pr view readback
-      return { stdout: ghPr({ isDraft: true }), stderr: '' };
-    }) as unknown as ExecFn;
+      return { stdout: ghPr({ isDraft: true }), stderr: '', exitCode: 0 };
+    });
 
-    const mr = await makeForge(exec).createDraftMr({
+    const mr = await makeForge(run).createDraftMr({
       sourceBranch: 'maestro/issue-7',
       targetBranch: 'main',
       title: 'Fix login',
@@ -853,38 +943,38 @@ Three thin write commands that issue a single `gh` call each.
 ```ts
 describe('GitHubForge simple PR writes', () => {
   it('setMrReady un-drafts the PR', async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       expect(args).toContain('pr');
       expect(args).toContain('ready');
       expect(args).toContain('42');
-      return { stdout: '', stderr: '' };
-    }) as unknown as ExecFn;
-    await makeForge(exec).setMrReady(42);
-    expect(exec).toHaveBeenCalledTimes(1);
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    await makeForge(run).setMrReady(42);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   it('updateMrDescription edits the body', async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       expect(args).toContain('pr');
       expect(args).toContain('edit');
       expect(args).toContain('--body');
       expect(args).toContain('new plan');
-      return { stdout: '', stderr: '' };
-    }) as unknown as ExecFn;
-    await makeForge(exec).updateMrDescription(42, 'new plan');
-    expect(exec).toHaveBeenCalledTimes(1);
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    await makeForge(run).updateMrDescription(42, 'new plan');
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   it('assignReviewer requests review from the user', async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       expect(args).toContain('pr');
       expect(args).toContain('edit');
       expect(args).toContain('--add-reviewer');
       expect(args).toContain('alice');
-      return { stdout: '', stderr: '' };
-    }) as unknown as ExecFn;
-    await makeForge(exec).assignReviewer(42, 'alice');
-    expect(exec).toHaveBeenCalledTimes(1);
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    await makeForge(run).assignReviewer(42, 'alice');
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });
 ```
@@ -948,24 +1038,24 @@ describe('GitHubForge.mergeMr', () => {
   ];
   for (const [strategy, flag] of cases) {
     it(`merges with ${flag} for strategy ${strategy}`, async () => {
-      const exec = vi.fn(async (_f: string, args: string[]) => {
+      const run = vi.fn(async (_f: string, args: string[]) => {
         expect(args).toContain('pr');
         expect(args).toContain('merge');
         expect(args).toContain('42');
         expect(args).toContain(flag);
         expect(args).toContain('--delete-branch');
-        return { stdout: '', stderr: '' };
-      }) as unknown as ExecFn;
-      await makeForge(exec).mergeMr(42, strategy, true);
+        return { stdout: '', stderr: '', exitCode: 0 };
+      });
+      await makeForge(run).mergeMr(42, strategy, true);
     });
   }
 
   it('omits --delete-branch when deleteSource is false', async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       expect(args).not.toContain('--delete-branch');
-      return { stdout: '', stderr: '' };
-    }) as unknown as ExecFn;
-    await makeForge(exec).mergeMr(42, 'squash', false);
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    await makeForge(run).mergeMr(42, 'squash', false);
   });
 });
 ```
@@ -1014,25 +1104,25 @@ import type { MergeStrategy } from '../domain/types.js';
 ```ts
 describe('GitHubForge.comment', () => {
   it('comments on an issue', async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       expect(args).toContain('issue');
       expect(args).toContain('comment');
       expect(args).toContain('7');
       expect(args).toContain('--body');
       expect(args).toContain('hello');
-      return { stdout: '', stderr: '' };
-    }) as unknown as ExecFn;
-    await makeForge(exec).comment({ type: 'issue', number: 7 }, 'hello');
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    await makeForge(run).comment({ type: 'issue', number: 7 }, 'hello');
   });
 
   it('comments on a PR', async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       expect(args).toContain('pr');
       expect(args).toContain('comment');
       expect(args).toContain('42');
-      return { stdout: '', stderr: '' };
-    }) as unknown as ExecFn;
-    await makeForge(exec).comment({ type: 'mr', number: 42 }, 'done');
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    await makeForge(run).comment({ type: 'mr', number: 42 }, 'done');
   });
 });
 ```
@@ -1075,7 +1165,7 @@ Add the one target label and remove every *other* maestro flat label in a single
 ```ts
 describe('GitHubForge.setLifecycleLabel (flat exclusivity)', () => {
   it('adds in_progress and removes the other maestro labels', async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       expect(args).toContain('issue');
       expect(args).toContain('edit');
       expect(args).toContain('7');
@@ -1090,21 +1180,21 @@ describe('GitHubForge.setLifecycleLabel (flat exclusivity)', () => {
       const removeIdxs = args.flatMap((a, i) => (a === '--remove-label' ? [i + 1] : []));
       const removed = removeIdxs.map((i) => args[i]);
       expect(removed).not.toContain('maestro:in_progress');
-      return { stdout: '', stderr: '' };
-    }) as unknown as ExecFn;
-    await makeForge(exec).setLifecycleLabel(7, 'in_progress');
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    await makeForge(run).setLifecycleLabel(7, 'in_progress');
   });
 
   it('for new/done adds no label and removes all maestro labels', async () => {
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       const joined = args.join(' ');
       expect(joined).not.toContain('--add-label');
       expect(joined).toContain('maestro:in_progress');
       expect(joined).toContain('maestro:in_review');
       expect(joined).toContain('maestro:blocked');
-      return { stdout: '', stderr: '' };
-    }) as unknown as ExecFn;
-    await makeForge(exec).setLifecycleLabel(7, 'done');
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    await makeForge(run).setLifecycleLabel(7, 'done');
   });
 });
 ```
@@ -1153,28 +1243,48 @@ Create each maestro flat label via `gh label create --force` (idempotent). `ensu
 
 ```ts
 describe('GitHubForge.ensureLabels / ensureBoard', () => {
-  it('creates each maestro label idempotently', async () => {
+  it('creates each maestro lifecycle label idempotently (changesSignal=native: no changes label)', async () => {
     const created: string[] = [];
-    const exec = vi.fn(async (_f: string, args: string[]) => {
+    const run = vi.fn(async (_f: string, args: string[]) => {
       expect(args).toContain('label');
       expect(args).toContain('create');
       // --force makes create idempotent
       expect(args).toContain('--force');
       const nameIdx = args.indexOf('create') + 1;
       created.push(args[nameIdx]);
-      return { stdout: '', stderr: '' };
-    }) as unknown as ExecFn;
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
 
-    await makeForge(exec).ensureLabels();
+    await makeForge(run, { changesSignal: 'native' }).ensureLabels();
     expect(created.sort()).toEqual(
       ['maestro:blocked', 'maestro:in_progress', 'maestro:in_review'].sort(),
     );
   });
 
+  it('also creates the changes-requested label when changesSignal=label', async () => {
+    const created: string[] = [];
+    const run = vi.fn(async (_f: string, args: string[]) => {
+      const nameIdx = args.indexOf('create') + 1;
+      created.push(args[nameIdx]);
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    // default makeForge: changesSignal='label', changesLabel='maestro:changes-requested'
+    await makeForge(run).ensureLabels();
+    expect(created.sort()).toEqual(
+      [
+        'maestro:blocked',
+        'maestro:changes-requested',
+        'maestro:in_progress',
+        'maestro:in_review',
+      ].sort(),
+    );
+  });
+
   it('ensureBoard is a no-op (no exec calls)', async () => {
-    const exec = vi.fn(async () => ({ stdout: '', stderr: '' })) as unknown as ExecFn;
-    await makeForge(exec).ensureBoard();
-    expect(exec).not.toHaveBeenCalled();
+    const run = vi.fn(async () => ({ stdout: '', stderr: '', exitCode: 0 }));
+    await makeForge(run).ensureBoard();
+    expect(run).not.toHaveBeenCalled();
   });
 });
 ```
@@ -1186,7 +1296,12 @@ describe('GitHubForge.ensureLabels / ensureBoard', () => {
 
 ```ts
   async ensureLabels(): Promise<void> {
-    for (const name of this.allLabels()) {
+    const names = [...this.allLabels()];
+    // When changes are signaled by a flat label, that label must exist too.
+    if (this.changesSignal === 'label' && this.changesLabel) {
+      names.push(this.changesLabel);
+    }
+    for (const name of names) {
       await this.gh([
         'label',
         'create',
@@ -1205,11 +1320,97 @@ describe('GitHubForge.ensureLabels / ensureBoard', () => {
 ```
 
 - [ ] **Run & see it pass.** Command: `pnpm --filter @maestro/core test forge/github.test.ts`
-  Expected: 25 passed.
+  Expected: lifecycle-only (native), lifecycle+changes (label), and ensureBoard no-op all pass.
 
 - [ ] **Commit.**
   `git add packages/core/src/forge/github.ts packages/core/src/forge/github.test.ts`
-  `git commit -m "feat(core): GitHubForge ensureLabels idempotent; ensureBoard no-op"`
+  `git commit -m "feat(core): GitHubForge ensureLabels idempotent (incl changes label); ensureBoard no-op"`
+
+---
+
+### Task 12b — `createIssue` + `blobUrl`
+
+Two remaining `ForgeAdapter` methods. `createIssue` (M7 onboarding) creates an issue via `gh issue create` and reads it back as a normalized `Issue`. `blobUrl` is a pure helper (no I/O) returning the GitHub committed-file URL `https://<host>/<project>/blob/<branch>/<path>` (already added in the skeleton — this task adds its test).
+
+- [ ] **Write failing test.** Append to `github.test.ts`:
+
+```ts
+describe('GitHubForge.createIssue', () => {
+  it('creates an issue and returns the mapped Issue', async () => {
+    const calls: string[][] = [];
+    const run = vi.fn(async (_f: string, args: string[]) => {
+      calls.push(args);
+      if (args.includes('create')) {
+        return { stdout: 'https://github.com/org/web/issues/7\n', stderr: '', exitCode: 0 };
+      }
+      // issue view readback returns the single issue object
+      return { stdout: JSON.stringify(JSON.parse(GH_ISSUE_JSON)[0]), stderr: '', exitCode: 0 };
+    });
+
+    const issue = await makeForge(run).createIssue({
+      title: 'Onboard maestro',
+      body: 'WORKFLOW.md self-creation',
+      assignee: 'maestro-bot',
+    });
+
+    const create = calls[0];
+    expect(create).toContain('issue');
+    expect(create).toContain('create');
+    expect(create).toContain('--title');
+    expect(create).toContain('Onboard maestro');
+    expect(create).toContain('--body');
+    expect(create).toContain('--assignee');
+    expect(create).toContain('maestro-bot');
+    expect(issue.number).toBe(7);
+  });
+});
+
+describe('GitHubForge.blobUrl', () => {
+  it('builds the GitHub blob URL (no exec)', () => {
+    const forge = makeForge();
+    expect(forge.blobUrl('maestro/issue-7', 'proof/issue-7.png')).toBe(
+      'https://github.com/org/web/blob/maestro/issue-7/proof/issue-7.png',
+    );
+  });
+});
+```
+
+- [ ] **Run & see it fail.** Command: `pnpm --filter @maestro/core test forge/github.test.ts`
+  Expected failure: `createIssue` throws `ForgeError: not implemented`; `blobUrl` may already pass (skeleton impl).
+
+- [ ] **Minimal complete implementation.** Replace the `createIssue` stub in `github.ts` (`blobUrl` is already implemented in the skeleton):
+
+```ts
+  async createIssue(args: {
+    title: string;
+    body: string;
+    assignee?: string;
+  }): Promise<Issue> {
+    const createArgs = [
+      'issue',
+      'create',
+      '--repo',
+      this.project,
+      '--title',
+      args.title,
+      '--body',
+      args.body,
+    ];
+    if (args.assignee) createArgs.push('--assignee', args.assignee);
+    const url = (await this.gh(createArgs)).trim();
+    const number = Number(url.split('/').pop());
+    const issue = await this.getIssue(number);
+    if (!issue) throw new ForgeError(`created issue ${number} could not be read back`);
+    return issue;
+  }
+```
+
+- [ ] **Run & see it pass.** Command: `pnpm --filter @maestro/core test forge/github.test.ts`
+  Expected: `createIssue` and `blobUrl` pass.
+
+- [ ] **Commit.**
+  `git add packages/core/src/forge/github.ts packages/core/src/forge/github.test.ts`
+  `git commit -m "feat(core): implement GitHubForge.createIssue; cover blobUrl"`
 
 ---
 
@@ -1219,34 +1420,67 @@ Add the `'github'` branch to `createForge` so the daemon can build a `GitHubForg
 
 - [ ] **Read** `packages/core/src/forge/factory.ts` to confirm the existing `'gitlab'` branch shape: how it reads the forge auth (`host`, `tokenEnv`), how it resolves the token from `process.env`, how it derives `project`/`botUser`, and how it injects the `exec` dependency. Mirror that branch.
 
-- [ ] **Write failing test.** Append to (or create alongside M2's) `packages/core/src/forge/factory.test.ts` a github case. (The exact `createForge` signature is owned by M2; this test uses whatever shape M2's gitlab test already uses, swapping `forge: 'github'`.) Sketch:
+- [ ] **Write failing test.** Append to (or create alongside M2's) `packages/core/src/forge/factory.test.ts` a github case using the contract signature `createForge(forge, { url, project, botUser }, ForgeDeps)`:
 
 ```ts
 import { describe, it, expect } from 'vitest';
 import { createForge } from './factory.js';
 import { GitHubForge } from './github.js';
+import type { MaestroConfig } from '../config/schema.js';
+import type { WorkflowConfig } from '../workflow/schema.js';
+import type { CommandRunner } from '../util/exec.js';
+
+const stubRunner: CommandRunner = {
+  run: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+};
+
+const review: WorkflowConfig['review'] = { changesSignal: 'label', changesLabel: 'maestro:changes-requested' };
+
+function ghConfig(): MaestroConfig {
+  return {
+    defaults: {} as MaestroConfig['defaults'],
+    forges: { github: { host: 'github.com', tokenEnv: 'MAESTRO_GITHUB_TOKEN' } },
+    repos: [],
+  };
+}
 
 describe('createForge github branch', () => {
   it('builds a GitHubForge for forge=github', () => {
-    // NOTE: mirror M2's gitlab test setup for repo/deps/env exactly; only swap forge.
     process.env.MAESTRO_GITHUB_TOKEN = 'tok';
-    const forge = createForge(/* mirror M2 gitlab args, forge: 'github' */);
+    const forge = createForge(
+      'github',
+      { url: 'https://github.com/org/web', project: 'org/web', botUser: 'maestro-bot' },
+      { config: ghConfig(), review, runner: stubRunner },
+    );
     expect(forge).toBeInstanceOf(GitHubForge);
     expect(forge.forge).toBe('github');
+    expect(forge.project).toBe('org/web');
+  });
+
+  it('throws when the token env var is unset', () => {
+    delete process.env.MAESTRO_GITHUB_TOKEN;
+    expect(() =>
+      createForge(
+        'github',
+        { url: 'https://github.com/org/web', project: 'org/web', botUser: 'maestro-bot' },
+        { config: ghConfig(), review, runner: stubRunner },
+      ),
+    ).toThrow(/MAESTRO_GITHUB_TOKEN/);
   });
 });
 ```
 
 - [ ] **Run & see it fail.** Command: `pnpm --filter @maestro/core test forge/factory.test.ts`
-  Expected failure: `createForge` throws / returns undefined for `forge === 'github'` (no `'github'` branch yet) — assertion `expect(forge).toBeInstanceOf(GitHubForge)` fails.
+  Expected failure: `createForge` has no `'github'` branch yet — `expect(forge).toBeInstanceOf(GitHubForge)` fails (returns/throws for unknown forge).
 
-- [ ] **Minimal complete implementation.** In `packages/core/src/forge/factory.ts`, add the `'github'` branch mirroring the `'gitlab'` one. Conceptually:
+- [ ] **Minimal complete implementation.** In `packages/core/src/forge/factory.ts`, add the `'github'` branch mirroring the `'gitlab'` one. The factory resolves the token name from `config.forges.github.tokenEnv` and reads `process.env` (token is never embedded in URLs/logs), and threads the changes-requested signal from `deps.review` (the contract's `ForgeDeps` now carries `review: WorkflowConfig['review']` as a required field — same as M2). Use the same `config`/`repo`/`deps` variable names M2 established:
 
 ```ts
 import { GitHubForge } from './github.js';
-// ...inside createForge, mirroring the gitlab branch:
+import { execaRunner } from '../util/exec.js';
+// ...inside createForge(forge, repo, deps), mirroring the gitlab branch:
 if (forge === 'github') {
-  const auth = config.forges.github;
+  const auth = deps.config.forges.github;
   if (!auth) throw new ForgeError('github forge not configured');
   const token = process.env[auth.tokenEnv];
   if (!token) throw new ForgeError(`env var ${auth.tokenEnv} is not set`);
@@ -1255,12 +1489,17 @@ if (forge === 'github') {
     botUser: repo.botUser,
     host: auth.host,
     token,
-    exec: deps.exec,
+    changesSignal: deps.review.changesSignal,
+    // flat default on GitHub; only meaningful when changesSignal === 'label'
+    changesLabel: deps.review.changesLabel ?? 'maestro:changes-requested',
+    runner: deps.runner ?? execaRunner,
   });
 }
 ```
 
-> The precise variable names (`config`, `repo`, `deps`, `auth`) MUST match M2's existing `factory.ts`. Reuse them; do not introduce a parallel convention. If M2 resolves the token elsewhere (e.g. a shared `resolveToken` helper), call that instead of re-reading `process.env` here.
+> **`changesSignal`/`changesLabel` source.** `deps.review` is the per-repo `WorkflowConfig['review']` block, a required `ForgeDeps` field in the reconciled contract (`{ config, review, runner?, fetchImpl? }`). Source both from there exactly as M2's gitlab branch does — do not re-read the workflow elsewhere or invent a parallel mechanism. `changesSignal` defaults to `'label'` at the `WorkflowConfig` schema level, so it is always present on `deps.review`; the only adapter-side default is the flat changes label `maestro:changes-requested` when `changesLabel` is omitted.
+>
+> The precise variable names (`config`, `repo`, `deps`, `auth`) MUST match M2's existing `factory.ts`. Reuse them; do not introduce a parallel convention. If M2 resolves the token via a shared helper, call that instead of re-reading `process.env` here.
 
 - [ ] **Run & see it pass.** Command: `pnpm --filter @maestro/core test forge/factory.test.ts`
   Expected: the github factory case passes (alongside the existing gitlab case).
@@ -1274,10 +1513,10 @@ if (forge === 'github') {
 ### Task 14 — Full-suite green + typecheck
 
 - [ ] **Run the whole core suite.** Command: `pnpm --filter @maestro/core test`
-  Expected: all forge tests pass, including `github.test.ts` (25) and `factory.test.ts` (gitlab + github). No regressions in M1/M2 tests.
+  Expected: all forge tests pass, including `github.test.ts` and `factory.test.ts` (gitlab + github). No regressions in M1/M2 tests.
 
 - [ ] **Typecheck.** Command: `pnpm --filter @maestro/core typecheck` (or `pnpm -w typecheck` if that is how M1 wired it — use the script M1/M2 established).
-  Expected: no TypeScript errors; `GitHubForge` fully satisfies `ForgeAdapter` (every interface method implemented with the contract signature).
+  Expected: no TypeScript errors; `GitHubForge` fully satisfies `ForgeAdapter` — **every** interface method implemented with the contract signature, including `createIssue`, `getMrDescription`, and `blobUrl`. The structural `implements ForgeAdapter` check is the proof there are no missing/mismatched methods.
 
 - [ ] **Lint.** Command: `pnpm --filter @maestro/core lint`
   Expected: clean (no unused imports — all of `lifecycleLabel`/`allMaestroLabels`/`LABELED_STATES`/`ForgeError` are used).
@@ -1288,32 +1527,44 @@ if (forge === 'github') {
 
 ---
 
+### Task 15 — Pin `gh` + record one real JSON fixture per read method
+
+Contracts mandate: "Version-pin `glab` and `gh` and record one real JSON fixture per read method to lock field shapes (a setup task in M2/M6)." The unit tests above hand-author JSON; this task captures **real** `gh --json` output once so the hand-authored shapes can be verified against the installed CLI and don't silently drift.
+
+- [ ] **Pin `gh`.** Record the exact `gh` version this adapter targets (e.g. in the repo README / a `.tool-versions` or docs note alongside the M2 `glab` pin). Use the same mechanism M2 used for `glab`.
+- [ ] **Capture fixtures.** Against a scratch repo, run each read command and save the raw stdout under `packages/core/src/forge/__fixtures__/github/`:
+  - `gh issue list --json id,number,title,body,state,assignees,author,labels,createdAt,url` → `issue-list.json`
+  - `gh issue view <n> --json ...` → `issue-view.json`
+  - `gh pr view <branch> --json id,number,headRefName,baseRefName,isDraft,state,reviewDecision,reviewRequests,closingIssuesReferences,body,labels,url` → `pr-view.json`
+  - `gh pr list --json ...` → `pr-list.json`
+- [ ] **Verify field names** in the captured fixtures match the mappers (`mapIssue`/`mapPr`) — especially `reviewDecision`, `reviewRequests[].login`, `closingIssuesReferences[].number`, `headRefName`/`baseRefName`, `author.login`, `assignees[].login`, and the `body`/`labels` fields added for `description`/changes-label. Run `gh pr view --json` (no value) to list the actually-supported fields for the pinned version. Adjust `PR_JSON_FIELDS`/mappers if any name differs.
+- [ ] **Wire one mapper test against a fixture** (read the fixture file, feed it through the mapper) so a CLI shape change breaks CI rather than silently producing wrong domain objects.
+- [ ] **Commit.**
+  `git add packages/core/src/forge/__fixtures__/github packages/core/src/forge/github.test.ts`
+  `git commit -m "test(core): pin gh + lock github JSON fixtures for read methods"`
+
+---
+
 ## Verification checklist (definition of done)
 
-- [ ] `GitHubForge` implements every method on the `ForgeAdapter` interface from `forge/adapter.ts` (typecheck proves it).
-- [ ] JSON→domain mapping covered by tests: `Issue` (Task 2/3) and `MergeRequest`/PR (Task 4), including all three `state` values and `reviewDecision` → `approved`/`changesRequested`.
+- [ ] `GitHubForge` implements every method on the `ForgeAdapter` interface from `forge/adapter.ts` (typecheck proves it) — **including `createIssue`, `getMrDescription`, and `blobUrl`** (Tasks 4, 12b).
+- [ ] JSON→domain mapping covered by tests: `Issue` (Task 2/3) and `MergeRequest`/PR (Task 4), including all three `state` values, `description` (PR `body`), and `approved`/`changesRequested`.
 - [ ] Flat-label mutual exclusion enforced in code and tested: setting one maestro label removes the others; `new`/`done` strip all (Task 11).
-- [ ] `reviewDecision` mapping tested for `APPROVED`, `CHANGES_REQUESTED`, and `REVIEW_REQUIRED`/empty (Task 4).
-- [ ] `ensureLabels` idempotent (`--force`); `ensureBoard` a no-op (Task 12).
-- [ ] Factory builds `GitHubForge` for `forge: 'github'`, resolving the token from `process.env[tokenEnv]` (Task 13).
-- [ ] No real `gh`/network in any test — the injected `ExecFn` is always stubbed.
+- [ ] `approved` from `reviewDecision === 'APPROVED'`; `changesRequested` implements **both** `WorkflowConfig.review.changesSignal` paths — `'native'` (reviewDecision) and `'label'` default (changesLabel present), tested both ways (Task 4).
+- [ ] `ensureLabels` idempotent (`--force`) and **also creates the changes-requested label when `changesSignal === 'label'`**; `ensureBoard` a no-op (Task 12).
+- [ ] `blobUrl(branch, path)` returns `https://<host>/<project>/blob/<branch>/<path>` (Task 12b).
+- [ ] Factory builds `GitHubForge` via the contract signature `createForge(forge, { url, project, botUser }, ForgeDeps)`, resolving the token from `process.env[tokenEnv]` and threading `changesSignal`/`changesLabel` (Task 13).
+- [ ] `gh` pinned + one real JSON fixture recorded per read method; at least one mapper test runs against a fixture (Task 15).
+- [ ] No real `gh`/network in any test — the injected `CommandRunner` is always stubbed.
 
 ---
 
 ## Open questions
 
-These are not specified by `maestro-00-contracts.md` (or the spec) and were **not invented** in the plan. They must be resolved against the actual M1/M2 code at implementation time, or escalated.
+The reconciled contract (`maestro-00-contracts.md`) resolved the former Q1 (factory signature), Q2 (shared exec seam), Q4 (`getMrForIssue` by head branch), Q7 (`reviewers` = requested), and the `WorkflowConfig.review` threading question (`ForgeDeps` now carries a required `review: WorkflowConfig['review']` field, sourced via `deps.review` in `createForge`) — those are now fixed in the plan body. The following are genuinely still open and must be resolved against the actual M1/M2 code at implementation time, or escalated.
 
-1. **`createForge` parameter shapes.** The contracts declare `createForge(forge, repo, deps)` in `forge/factory.ts` but do not define the concrete types of `repo` or `deps` (e.g. whether `repo` carries `project`/`botUser` already-normalized, and what `deps` contains). M2 owns these. The implementor MUST read `factory.ts`/`gitlab.ts` and mirror them; this plan's `GitHubForgeArgs` is a mirror assumption, not a contract.
+1. **Token → `gh` env wiring.** Contracts say `tokenEnv` holds the *name* of the env var and the token must never be embedded in URLs/logs, but do not name the variable `gh` expects. This plan exports `GH_TOKEN` (and `GH_HOST` for the host) on each `runner.run`. If M2 established a different convention (e.g. a `gh auth login` step), align with it.
 
-2. **Subprocess injection seam (`ExecFn`).** The contracts fix `execa` as the subprocess tool but do not specify how adapters take it for testing (constructor-injected runner vs. importing `execa` directly). This plan injects an `ExecFn` to keep tests network-free, matching the stated M2 approach ("stub execa; no real network"). If M2 already exports a shared `ExecFn`/`ForgeDeps` type, reuse it instead of the local declaration here.
+2. **Not-found detection.** Contracts require `getIssue`/`getMrForIssue` to return `null` on absence but do not specify how `gh` signals it (exit code vs. stderr text). This plan matches on stderr/message substrings (`not found`, `no pull requests found`). A more robust approach (parsing `gh`'s exit code via the `CommandRunner`'s `exitCode`, or `gh api` with a 404 check) should be adopted if M2 established one.
 
-3. **Token → `gh` env wiring.** Contracts say `tokenEnv` holds the *name* of the env var and the adapter authenticates `gh` with that token, but do not name the variable `gh` expects. This plan uses `GH_TOKEN` (and `GH_HOST` for the host). If M2 established a different convention (e.g. a login step), align with it.
-
-4. **PR↔issue association key.** Contracts fix the branch convention `maestro/issue-<number>` and the MR body `Closes #N`, and `MergeRequest.linkedIssueNumbers` "from Closes #N". They do not state *how* `getMrForIssue` finds the PR. This plan resolves the PR by head branch (`gh pr view maestro/issue-<number>`), which is consistent with the fixed branch convention; confirm this matches how M2's `getMrForIssue` locates the MR (e.g. it may instead list-and-filter on `linkedIssueNumbers`).
-
-5. **Not-found detection.** Contracts require `getIssue`/`getMrForIssue` to return `null` on absence but do not specify how `gh` signals it (exit code vs. stderr text). This plan matches on stderr/message substrings (`not found`, `no pull requests found`). A more robust approach (parsing `gh`'s exit code, or using `gh api` with a 404 check) should be adopted if M2 established one.
-
-6. **`gh` JSON field names.** The raw `gh` field names used here (`headRefName`, `baseRefName`, `reviewDecision`, `reviewRequests`, `closingIssuesReferences`, `assignees[].login`, `author.login`) are taken from the `gh` CLI's documented `--json` fields, not from the contracts. They should be verified against the installed `gh` version during implementation (e.g. `gh pr view --json` with no value lists available fields).
-
-7. **`reviewRequests` vs. completed reviewers.** `MergeRequest.reviewers` is normalized but the contracts don't define whether it means *requested* reviewers or *those who reviewed*. This plan maps `gh`'s `reviewRequests` (pending requested reviewers). Confirm intended semantics against how the reconciler consumes `reviewers`.
+3. **`gh` JSON field names (verified by Task 15 fixtures).** The raw `gh` field names used here (`headRefName`, `baseRefName`, `reviewDecision`, `reviewRequests`, `closingIssuesReferences`, `assignees[].login`, `author.login`, `body`, `labels[].name`) are taken from the `gh` CLI's documented `--json` fields. Task 15 records real fixtures to lock them; if the pinned `gh` version uses different names, adjust `PR_JSON_FIELDS`/mappers accordingly.

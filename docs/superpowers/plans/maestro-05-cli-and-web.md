@@ -32,7 +32,9 @@
 
 ### Shared type: `DashboardState`
 
-`status`, `/api/state`, and `/` all serialize the same shape. Its source fields come from the daemon's `RunState` (M1) plus config `repos`. **The exact `RunState` type is not defined in contracts** (see Open questions) — this plan defines `DashboardState` as the wire contract the web layer owns, and treats `RunState` as the provider that fills it. `DashboardState` lives in `packages/core/src/daemon/state.ts` exports so both packages import it from `@maestro/core`.
+`status`, `/api/state`, and `/` all serialize the same shape. Its source fields come from the daemon's `RunState` (M1, defined in `daemon/state.ts` per the contract's "Daemon state + IPC") plus config `repos`. `DashboardState` is the wire projection the web layer owns; `toDashboardState(runState, repos)` (Task 15) maps the contract's `RunState`/`RunningEntry` into it. `DashboardState` lives in `packages/core/src/daemon/state.ts` exports so both packages import it from `@maestro/core`.
+
+`RunningEntry` (the slot record) has **no `title`** — title is forge-derived, not slot state — so `DashboardIssue` carries only repo/issue/lifecycle. The read-only dashboard shows those three; titles would need a per-tick forge fetch the daemon does not retain.
 
 ```ts
 // added to packages/core/src/daemon/state.ts (M5 contribution)
@@ -43,7 +45,6 @@ export interface DashboardRepo {
 export interface DashboardIssue {
   repoUrl: string;
   issueNumber: number;
-  title: string;
   lifecycle: import('../domain/types.js').LifecycleState;
 }
 export interface DashboardState {
@@ -54,7 +55,7 @@ export interface DashboardState {
 }
 ```
 
-> If M1 ships a richer `RunState`, M5 adds a `toDashboardState(runState, repos): DashboardState` mapper in the same file. This plan builds against `DashboardState` only; the mapper is a thin adapter added in Task 12.
+> `RunState`/`RunningEntry` are owned by M1 (contract). M5 builds `DashboardState` and the `toDashboardState` mapper (Task 15) as the thin projection the web/CLI layers consume.
 
 ---
 
@@ -142,7 +143,6 @@ export interface DashboardRepo {
 export interface DashboardIssue {
   repoUrl: string;
   issueNumber: number;
-  title: string;
   lifecycle: LifecycleState;
 }
 
@@ -171,10 +171,10 @@ import { renderDashboardHtml } from './render.js';
 
 const sample: DashboardState = {
   running: [
-    { repoUrl: 'gitlab.com/group/api', issueNumber: 7, title: 'Fix login', lifecycle: 'in_progress' },
+    { repoUrl: 'gitlab.com/group/api', issueNumber: 7, lifecycle: 'in_progress' },
   ],
   queued: [
-    { repoUrl: 'github.com/org/web', issueNumber: 12, title: 'Add search', lifecycle: 'in_progress' },
+    { repoUrl: 'github.com/org/web', issueNumber: 12, lifecycle: 'in_progress' },
   ],
   repos: [
     { url: 'gitlab.com/group/api', forge: 'gitlab' },
@@ -188,18 +188,17 @@ describe('renderDashboardHtml', () => {
     const html = renderDashboardHtml(sample);
     expect(html).toContain('<!doctype html>');
     expect(html).toContain('Maestro');
-    expect(html).toContain('Fix login');
     expect(html).toContain('#7');
-    expect(html).toContain('Add search');
+    expect(html).toContain('#12');
     expect(html).toContain('gitlab.com/group/api');
     expect(html).toContain('github.com/org/web');
     expect(html).toContain('2026-06-03T10:00:00.000Z');
   });
 
-  it('escapes HTML in titles to prevent injection', () => {
+  it('escapes HTML in repo urls to prevent injection', () => {
     const html = renderDashboardHtml({
       ...sample,
-      running: [{ repoUrl: 'r', issueNumber: 1, title: '<script>x</script>', lifecycle: 'in_progress' }],
+      running: [{ repoUrl: '<script>x</script>', issueNumber: 1, lifecycle: 'in_progress' }],
     });
     expect(html).not.toContain('<script>x</script>');
     expect(html).toContain('&lt;script&gt;x&lt;/script&gt;');
@@ -228,12 +227,12 @@ function esc(s: string): string {
 }
 
 function issueRow(i: DashboardIssue): string {
-  return `<tr><td>${esc(i.repoUrl)}</td><td>#${i.issueNumber}</td><td>${esc(i.title)}</td><td>${esc(i.lifecycle)}</td></tr>`;
+  return `<tr><td>${esc(i.repoUrl)}</td><td>#${i.issueNumber}</td><td>${esc(i.lifecycle)}</td></tr>`;
 }
 
 export function renderDashboardHtml(state: DashboardState): string {
-  const running = state.running.map(issueRow).join('') || '<tr><td colspan="4">none</td></tr>';
-  const queued = state.queued.map(issueRow).join('') || '<tr><td colspan="4">none</td></tr>';
+  const running = state.running.map(issueRow).join('') || '<tr><td colspan="3">none</td></tr>';
+  const queued = state.queued.map(issueRow).join('') || '<tr><td colspan="3">none</td></tr>';
   const repos = state.repos
     .map((r) => `<li>${esc(r.url)} <em>(${esc(r.forge)})</em></li>`)
     .join('') || '<li>none</li>';
@@ -246,9 +245,9 @@ export function renderDashboardHtml(state: DashboardState): string {
 <h1>Maestro</h1>
 <p>Read-only dashboard. Generated at ${esc(state.generatedAt)}.</p>
 <h2>Running</h2>
-<table><thead><tr><th>Repo</th><th>Issue</th><th>Title</th><th>State</th></tr></thead><tbody>${running}</tbody></table>
+<table><thead><tr><th>Repo</th><th>Issue</th><th>State</th></tr></thead><tbody>${running}</tbody></table>
 <h2>Queued</h2>
-<table><thead><tr><th>Repo</th><th>Issue</th><th>Title</th><th>State</th></tr></thead><tbody>${queued}</tbody></table>
+<table><thead><tr><th>Repo</th><th>Issue</th><th>State</th></tr></thead><tbody>${queued}</tbody></table>
 <h2>Watched repos</h2>
 <ul>${repos}</ul>
 </body>
@@ -287,7 +286,7 @@ import type { DashboardState } from '@maestro/core';
 import { registerRoutes } from './routes.js';
 
 const sample: DashboardState = {
-  running: [{ repoUrl: 'gitlab.com/g/api', issueNumber: 7, title: 'Fix login', lifecycle: 'in_progress' }],
+  running: [{ repoUrl: 'gitlab.com/g/api', issueNumber: 7, lifecycle: 'in_progress' }],
   queued: [],
   repos: [{ url: 'gitlab.com/g/api', forge: 'gitlab' }],
   generatedAt: '2026-06-03T10:00:00.000Z',
@@ -314,7 +313,7 @@ describe('routes', () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('text/html');
     expect(res.body).toContain('<!doctype html>');
-    expect(res.body).toContain('Fix login');
+    expect(res.body).toContain('gitlab.com/g/api');
   });
 });
 ```
@@ -444,7 +443,7 @@ git commit -m "feat(web): add buildServer Fastify app factory"
 - Create: `packages/cli/src/deps.ts`
 - Test: `packages/cli/src/deps.test.ts`
 
-> **Default port & daemon URL (flagged in Open questions):** Neither the web PORT nor the daemon base URL is defined in contracts. This plan defaults to port **7330** and base URL **`http://127.0.0.1:7330`**, overridable via env vars `MAESTRO_WEB_PORT` and `MAESTRO_DAEMON_URL`. **Default log path (flagged):** contracts say `logs/` is a gitignored cache but name no file; this plan defaults to `logs/maestro.log`, overridable via `MAESTRO_LOG_FILE`.
+> **Web bind + daemon URL (per contract):** the contract defines `DefaultsCfg.web = { port; host }` (default `{ port: 7330, host: '127.0.0.1' }`) as the source of truth for where the daemon serves the web app, and `maestro status` reaches it via `GET http://<web.host>:<web.port>/api/state` with `MAESTRO_DAEMON_URL` as the override. So `defaultCliDeps` loads the config, derives the daemon base URL from `config.defaults.web`, and lets `MAESTRO_DAEMON_URL` win when set. **Log path (per contract):** the daemon log is `logs/maestro.log` (JSON-lines); this plan defaults there, overridable via `MAESTRO_LOG_FILE`.
 
 - [ ] **Step 1: Create the package manifest**
 
@@ -495,12 +494,35 @@ git commit -m "feat(web): add buildServer Fastify app factory"
 
 ```ts
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { defaultCliDeps } from './deps.js';
 
+function tempConfig(yaml: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'maestro-deps-'));
+  const path = join(dir, 'maestro.config.yaml');
+  writeFileSync(path, yaml);
+  return path;
+}
+
+const configWithWeb = `defaults:
+  pollIntervalActive: "30s"
+  pollIntervalIdle: "5m"
+  pollJitter: "5s"
+  botUser: maestro-bot
+  concurrency: { globalMax: 2 }
+  workspaces: { root: ./workspaces, diskCap: 20GB, cleanup: lru }
+  web: { port: 8080, host: 0.0.0.0 }
+forges:
+  gitlab: { host: gitlab.com, tokenEnv: MAESTRO_GITLAB_TOKEN }
+repos: []
+`;
+
 describe('defaultCliDeps', () => {
-  it('provides config path, daemon URL, log file, and the real collaborators', () => {
-    const deps = defaultCliDeps();
-    expect(deps.configPath).toMatch(/maestro\.config\.yaml$/);
+  it('falls back to the contract web default (7330 / 127.0.0.1) when no config exists', () => {
+    const deps = defaultCliDeps({ MAESTRO_CONFIG: '/nonexistent/maestro.config.yaml' });
+    expect(deps.configPath).toBe('/nonexistent/maestro.config.yaml');
     expect(deps.daemonUrl).toBe('http://127.0.0.1:7330');
     expect(deps.logFile).toMatch(/logs\/maestro\.log$/);
     expect(typeof deps.createForge).toBe('function');
@@ -509,15 +531,19 @@ describe('defaultCliDeps', () => {
     expect(typeof deps.log).toBe('function');
   });
 
-  it('honors env overrides', () => {
+  it('derives the daemon URL from config.defaults.web', () => {
+    const deps = defaultCliDeps({ MAESTRO_CONFIG: tempConfig(configWithWeb) });
+    expect(deps.daemonUrl).toBe('http://0.0.0.0:8080');
+  });
+
+  it('honors env overrides (MAESTRO_DAEMON_URL wins over config)', () => {
     const deps = defaultCliDeps({
       MAESTRO_DAEMON_URL: 'http://example:9000',
       MAESTRO_LOG_FILE: '/tmp/x.log',
-      MAESTRO_CONFIG: '/tmp/c.yaml',
+      MAESTRO_CONFIG: tempConfig(configWithWeb),
     });
     expect(deps.daemonUrl).toBe('http://example:9000');
     expect(deps.logFile).toBe('/tmp/x.log');
-    expect(deps.configPath).toBe('/tmp/c.yaml');
   });
 });
 ```
@@ -534,7 +560,7 @@ Expected: FAIL with "Cannot find module './deps.js'".
 ```ts
 import { resolve } from 'node:path';
 import { execa } from 'execa';
-import { createForge } from '@maestro/core';
+import { createForge, loadConfig } from '@maestro/core';
 
 // Injection seam: every command receives a CliDeps so tests pass fakes.
 export interface CliDeps {
@@ -547,13 +573,26 @@ export interface CliDeps {
   log: (line: string) => void;
 }
 
-const DEFAULT_PORT = 7330;
+// Contract default when config is absent/unreadable (DefaultsCfg.web).
+const DEFAULT_WEB = { port: 7330, host: '127.0.0.1' };
+
+// Source the web bind from config.defaults.web (contract); fall back to the
+// contract default if the config file does not exist or cannot be parsed yet
+// (e.g. before `maestro add` has created it).
+function webFromConfig(configPath: string): { port: number; host: string } {
+  try {
+    return loadConfig(configPath).defaults.web ?? DEFAULT_WEB;
+  } catch {
+    return DEFAULT_WEB;
+  }
+}
 
 export function defaultCliDeps(env: NodeJS.ProcessEnv = process.env): CliDeps {
-  const port = env.MAESTRO_WEB_PORT ?? String(DEFAULT_PORT);
+  const configPath = env.MAESTRO_CONFIG ?? resolve(process.cwd(), 'maestro.config.yaml');
+  const web = webFromConfig(configPath);
   return {
-    configPath: env.MAESTRO_CONFIG ?? resolve(process.cwd(), 'maestro.config.yaml'),
-    daemonUrl: env.MAESTRO_DAEMON_URL ?? `http://127.0.0.1:${port}`,
+    configPath,
+    daemonUrl: env.MAESTRO_DAEMON_URL ?? `http://${web.host}:${web.port}`,
     logFile: env.MAESTRO_LOG_FILE ?? resolve(process.cwd(), 'logs/maestro.log'),
     createForge,
     fetch: globalThis.fetch,
@@ -568,7 +607,7 @@ export function defaultCliDeps(env: NodeJS.ProcessEnv = process.env): CliDeps {
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `pnpm --filter @maestro/cli test -- deps`
-Expected: PASS (2 passed).
+Expected: PASS (3 passed).
 
 - [ ] **Step 7: Install and commit**
 
@@ -701,8 +740,8 @@ import type { DashboardState } from '@maestro/core';
 import { renderDashboardText } from './render.js';
 
 const sample: DashboardState = {
-  running: [{ repoUrl: 'gitlab.com/g/api', issueNumber: 7, title: 'Fix login', lifecycle: 'in_progress' }],
-  queued: [{ repoUrl: 'github.com/o/web', issueNumber: 12, title: 'Add search', lifecycle: 'in_progress' }],
+  running: [{ repoUrl: 'gitlab.com/g/api', issueNumber: 7, lifecycle: 'in_progress' }],
+  queued: [{ repoUrl: 'github.com/o/web', issueNumber: 12, lifecycle: 'in_progress' }],
   repos: [{ url: 'gitlab.com/g/api', forge: 'gitlab' }, { url: 'github.com/o/web', forge: 'github' }],
   generatedAt: '2026-06-03T10:00:00.000Z',
 };
@@ -712,7 +751,7 @@ describe('renderDashboardText', () => {
     const out = renderDashboardText(sample);
     expect(out).toMatch(/Running \(1\)/);
     expect(out).toContain('gitlab.com/g/api#7');
-    expect(out).toContain('Fix login');
+    expect(out).toContain('[in_progress]');
     expect(out).toMatch(/Queued \(1\)/);
     expect(out).toContain('github.com/o/web#12');
   });
@@ -738,7 +777,7 @@ Expected: FAIL with "Cannot find module './render.js'".
 import type { DashboardState, DashboardIssue } from '@maestro/core';
 
 function line(i: DashboardIssue): string {
-  return `  ${i.repoUrl}#${i.issueNumber}  ${i.title}  [${i.lifecycle}]`;
+  return `  ${i.repoUrl}#${i.issueNumber}  [${i.lifecycle}]`;
 }
 
 export function renderDashboardText(state: DashboardState): string {
@@ -782,7 +821,7 @@ import type { DashboardState } from '@maestro/core';
 import { statusCommand } from './status.js';
 
 const state: DashboardState = {
-  running: [{ repoUrl: 'gitlab.com/g/api', issueNumber: 7, title: 'Fix login', lifecycle: 'in_progress' }],
+  running: [{ repoUrl: 'gitlab.com/g/api', issueNumber: 7, lifecycle: 'in_progress' }],
   queued: [],
   repos: [{ url: 'gitlab.com/g/api', forge: 'gitlab' }],
   generatedAt: '2026-06-03T10:00:00.000Z',
@@ -807,7 +846,7 @@ describe('statusCommand', () => {
     });
     const out = lines.join('\n');
     expect(out).toContain('gitlab.com/g/api#7');
-    expect(out).toContain('Fix login');
+    expect(out).toContain('[in_progress]');
   });
 
   it('prints a helpful error when the daemon is unreachable', async () => {
@@ -881,7 +920,7 @@ git commit -m "feat(cli): add maestro status command reading daemon /api/state"
 - Create: `packages/cli/src/commands/logs.ts`
 - Test: `packages/cli/src/commands/logs.test.ts`
 
-> Default (non-follow) prints the last N lines of the log file. `--follow` streaming tail is flagged in Open questions; this task implements the read-and-print path so the command is complete and testable without long-lived processes.
+> The daemon log is `logs/maestro.log` in **JSON-lines** format (one JSON object per line — the structured logger from `core/logger.ts`), per the contract. `maestro logs` prints the last N **raw lines** (one JSON record per line) — acceptable and simplest; pretty-printing/field extraction is a future enhancement, not required here. `--follow` streaming is deferred per the contract (`--follow` deferred); this task implements the read-and-print path so the command is complete and testable without long-lived processes.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -902,11 +941,17 @@ function tempLog(content: string): string {
 }
 
 describe('logsCommand', () => {
-  it('prints the last N lines of the log file', async () => {
-    const content = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n') + '\n';
+  it('prints the last N raw JSON-lines of the log file', async () => {
+    // JSON-lines: one structured record per line (core/logger.ts shape).
+    const content =
+      Array.from({ length: 10 }, (_, i) => JSON.stringify({ msg: `event ${i + 1}` })).join('\n') + '\n';
     const lines: string[] = [];
     await logsCommand({ logFile: tempLog(content), log: (l) => lines.push(l) }, { lines: 3 });
-    expect(lines).toEqual(['line 8', 'line 9', 'line 10']);
+    expect(lines).toEqual([
+      '{"msg":"event 8"}',
+      '{"msg":"event 9"}',
+      '{"msg":"event 10"}',
+    ]);
   });
 
   it('reports when the log file does not exist yet', async () => {
@@ -943,12 +988,15 @@ export async function logsCommand(deps: LogsDeps, opts: LogsOpts): Promise<void>
     deps.log(`No log file at ${deps.logFile} (daemon may not have started yet).`);
     return;
   }
+  // JSON-lines file: each line is one JSON record. Print raw (no parse) — last N.
   const all = readFileSync(deps.logFile, 'utf8').split('\n').filter((l) => l.length > 0);
   for (const line of all.slice(-opts.lines)) {
     deps.log(line);
   }
 }
 ```
+
+> The log is JSON-lines (`core/logger.ts`); printing raw lines is the contract-faithful minimum. A future flag could parse + format fields, but raw passthrough keeps each line a valid JSON record.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -970,7 +1018,7 @@ git commit -m "feat(cli): add maestro logs command (tail last N lines)"
 - Create: `packages/cli/src/commands/run.ts`
 - Test: `packages/cli/src/commands/run.test.ts`
 
-> Workspace resolution uses `WorkspaceManager.pathFor(repoUrl, issueNumber)` from `@maestro/core`. **One repo per issue number is ambiguous when several repos are watched** — flagged in Open questions. This task requires `--repo <url>` to disambiguate, defaulting to the single watched repo when exactly one exists.
+> Workspace resolution uses `WorkspaceManager.pathFor(repoUrl, issueNumber)` from `@maestro/core`. Per the contract, `maestro run <issue>` takes `--repo <url>`, defaulting to the sole watched repo. This task implements exactly that: `--repo` disambiguates, defaulting to the single watched repo when exactly one exists.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1255,12 +1303,13 @@ describe('addCommand', () => {
       }
       return Promise.resolve({ exitCode: 0, stdout: '' });
     });
+    const createForge = vi.fn(() => forge);
     const lines: string[] = [];
 
     await addCommand(
       {
         configPath,
-        createForge: (() => forge) as never,
+        createForge: createForge as never,
         execa: fakeExeca as never,
         cloneRoot: mkdtempSync(join(tmpdir(), 'maestro-clones-')),
         log: (l) => lines.push(l),
@@ -1269,6 +1318,13 @@ describe('addCommand', () => {
       { commit: true },
     );
 
+    // createForge gets the contract repo object + ForgeDeps; review falls back
+    // to the schema default since the clone has no WORKFLOW.md yet.
+    expect(createForge).toHaveBeenCalledWith(
+      'github',
+      { url: 'github.com/org/web', project: 'org/web', botUser: 'maestro-bot' },
+      expect.objectContaining({ review: { changesSignal: 'label' } }),
+    );
     // forge setup ran
     expect(forge.ensureLabels).toHaveBeenCalledOnce();
     expect(forge.ensureBoard).toHaveBeenCalledOnce();
@@ -1309,28 +1365,50 @@ describe('addCommand', () => {
     expect(readFileSync(configPath, 'utf8')).toContain('github.com/org/web');
   });
 
-  it('skips onboarding guidance when the clone already has a WORKFLOW.md', async () => {
+  it('skips onboarding guidance and uses the file review when the clone has a WORKFLOW.md', async () => {
     const configPath = tempConfigFile(baseConfig);
     const forge = fakeForge();
+    // Schema-valid WORKFLOW.md (front matter satisfies WorkflowConfigSchema, M1/M7 own
+    // defaults). It pins review.changesSignal: native so we can assert it reaches createForge.
+    const workflowMd = `---
+forge: github
+project: org/web
+botUser: maestro-bot
+manageBoard: false
+trigger: { assignee: bot, requireLabel: null, allowedActors: [] }
+proof: { type: none }
+review: { changesSignal: native }
+git: { defaultBranch: main, target: main, mergeStrategy: squash, deleteSourceBranch: true }
+claude: { command: claude, maxTurns: 20, permissionMode: acceptEdits }
+concurrency: { maxActive: 1 }
+---
+body`;
     const fakeExeca = vi.fn((file: string, args: string[]) => {
       if (file === 'git' && args[0] === 'clone') {
         const dest = args[args.length - 1];
         mkdirSync(dest, { recursive: true });
-        writeFileSync(join(dest, 'WORKFLOW.md'), '---\nforge: github\n---\nbody');
+        writeFileSync(join(dest, 'WORKFLOW.md'), workflowMd);
       }
       return Promise.resolve({ exitCode: 0, stdout: '' });
     });
+    const createForge = vi.fn(() => forge);
     const lines: string[] = [];
     await addCommand(
       {
         configPath,
-        createForge: (() => forge) as never,
+        createForge: createForge as never,
         execa: fakeExeca as never,
         cloneRoot: mkdtempSync(join(tmpdir(), 'maestro-clones-')),
         log: (l) => lines.push(l),
       },
       'github.com/org/web',
       { commit: false },
+    );
+    // the file's review wins over the default fallback
+    expect(createForge).toHaveBeenCalledWith(
+      'github',
+      expect.anything(),
+      expect.objectContaining({ review: { changesSignal: 'native' } }),
     );
     expect(lines.join('\n')).not.toMatch(/run.*onboarding/i);
     expect(lines.join('\n')).toMatch(/already has a WORKFLOW\.md|onboarded/i);
@@ -1351,7 +1429,7 @@ Append to `packages/cli/src/commands/add.ts`:
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { execa } from 'execa';
-import { loadConfig, type createForge } from '@maestro/core';
+import { loadConfig, loadWorkflow, type createForge } from '@maestro/core';
 
 export interface AddDeps {
   configPath: string;
@@ -1365,24 +1443,29 @@ export interface AddOpts {
   commit: boolean;        // commander maps --no-commit to commit:false
 }
 
-// Derive forge from host, and clone target dir name, from a repo url like "github.com/org/web".
-function parseRepoUrl(url: string): { forge: 'gitlab' | 'github'; cloneUrl: string; dirName: string } {
+// Derive forge, project path, clone url, and clone dir name from a repo url like "github.com/org/web".
+function parseRepoUrl(url: string): { forge: 'gitlab' | 'github'; project: string; cloneUrl: string; dirName: string } {
   const host = url.split('/')[0];
   const forge = host.includes('gitlab') ? 'gitlab' : 'github';
+  const project = url.slice(host.length + 1);   // path after host, e.g. "org/web"
   const dirName = url.replace(/[^A-Za-z0-9]+/g, '_');
   const cloneUrl = `https://${url}.git`;
-  return { forge, cloneUrl, dirName };
+  return { forge, project, cloneUrl, dirName };
 }
 
 export async function addCommand(deps: AddDeps, url: string, opts: AddOpts): Promise<void> {
-  const { forge, cloneUrl, dirName } = parseRepoUrl(url);
+  const { forge, project, cloneUrl, dirName } = parseRepoUrl(url);
   const dest = join(deps.cloneRoot, dirName);
 
   deps.log(`Cloning ${url} ...`);
   await deps.execa('git', ['clone', '--depth', '1', cloneUrl, dest]);
 
   const config = loadConfig(deps.configPath);
-  const adapter = deps.createForge(forge, url, { config });
+  const botUser = config.defaults.botUser;
+  // The clone may not have a WORKFLOW.md yet (M7 onboarding creates it later),
+  // so fall back to the schema default review signal.
+  const review = loadWorkflow(dest, forge)?.review ?? { changesSignal: 'label' };
+  const adapter = deps.createForge(forge, { url, project, botUser }, { config, review });
   deps.log('Ensuring labels ...');
   await adapter.ensureLabels();
   deps.log('Ensuring board ...');
@@ -1406,7 +1489,7 @@ export async function addCommand(deps: AddDeps, url: string, opts: AddOpts): Pro
 }
 ```
 
-> **`createForge` signature note:** the contract names `createForge(forge, repo, deps)` but does not specify the `deps` shape. This plan passes `{ config }`; flagged in Open questions. The test fakes `createForge` so the exact `deps` shape does not block M5.
+> **`createForge` signature:** per the contract `forge/factory.ts`, `createForge(forge, { url, project, botUser }, deps)` — the repo object is `{ url; project; botUser }` and `deps` is `ForgeDeps { config; review; runner?; fetchImpl? }`. The adapter derives `MergeRequest.changesRequested` from `review.changesSignal`, and `ensureLabels` uses it to decide whether to also create the changes-requested label — so `review` is **required**. `maestro add` clones a repo that may not have a `WORKFLOW.md` yet (M7 onboarding creates it later), so it sources `review` via `loadWorkflow(dest, forge)?.review ?? { changesSignal: 'label' }` — the schema default when the file is absent. Token resolution happens inside the adapter via `config.forges[forge].tokenEnv`; `manageBoard` is enforced by the caller (here, `add` calls `ensureBoard` unconditionally for setup). The test fakes `createForge`, so the adapter internals don't block M5. `loadWorkflow(repoDir, forgeHint?)` is the contract `workflow/load.ts` export (re-exported from `@maestro/core`; add `export { loadWorkflow } from './workflow/load.js';` to `packages/core/src/index.ts` if not yet present).
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1611,7 +1694,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 }
 ```
 
-> **`WorkspaceManager` construction note:** the contract declares the `WorkspaceManager` interface but not its constructor. `new WorkspaceManager({ root })` is the assumed shape; flagged in Open questions. If M3 exports a factory instead, swap the construction here — no command handler changes needed since `pathFor` is injected.
+> **`WorkspaceManager` construction note:** the contract declares the `WorkspaceManager` interface (and that it takes a `CommandRunner` + `forge`) but not its concrete constructor. `new WorkspaceManager({ root })` is the assumed shape; flagged in Open questions (item 1). If M3 exports a factory or a different constructor, swap the construction here — no command handler changes needed since `pathFor` is injected.
 
 - [ ] **Step 2: Run the full CLI test suite to confirm nothing broke**
 
@@ -1634,6 +1717,8 @@ git commit -m "feat(cli): add main() entrypoint wiring real core dependencies"
 - Test: `packages/core/src/daemon/state.test.ts`
 
 > The daemon process must serve `buildServer` so `maestro status` can read `/api/state`. The daemon entrypoint is `packages/cli/src/daemon.ts` (M1 owns its lifecycle). M5's contribution is the `RunState → DashboardState` mapper and a documented wiring point. **M5 does not own the daemon loop**, so wiring is a documented call, not a new daemon file. The mapper lives in core where `DashboardState` is defined.
+>
+> **`RunState` is the contract type from `daemon/state.ts`** (`maestro-00-contracts.md` → "Daemon state + IPC"), owned by M1 — M5 does **not** declare it. It is `{ running: RunningEntry[]; queued: RunningEntry[]; totals: { active; watchedRepos } }`, where `RunningEntry { repoUrl; issueNumber; lifecycle; startedAt }`. `RunningEntry` has **no `title`** (intentionally — title is forge-derived, not slot state). The mapper therefore maps `RunningEntry → DashboardIssue` and **drops `title` from the dashboard row**: the daemon's slot state is the source of truth here and does not carry issue titles, so `DashboardIssue` no longer has a `title` field (its source change is reflected in Task 2). Rows show repo, issue number, and lifecycle — enough for an at-a-glance read-only view; titles would require a per-tick forge fetch the daemon doesn't keep.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1641,19 +1726,21 @@ git commit -m "feat(cli): add main() entrypoint wiring real core dependencies"
 
 ```ts
 import { describe, it, expect } from 'vitest';
-import { toDashboardState, type RunState } from './state.js';
+import { toDashboardState } from './state.js';
+import type { RunState } from './state.js';
 import type { RepoEntry } from '../config/schema.js';
 
 describe('toDashboardState', () => {
-  it('maps running/queued slots and repos into a DashboardState', () => {
+  it('maps RunningEntry slots and repos into a DashboardState', () => {
     const runState: RunState = {
-      running: [{ repoUrl: 'gitlab.com/g/api', issueNumber: 7, title: 'Fix login', lifecycle: 'in_progress' }],
-      queued: [{ repoUrl: 'github.com/o/web', issueNumber: 9, title: 'Add x', lifecycle: 'in_progress' }],
+      running: [{ repoUrl: 'gitlab.com/g/api', issueNumber: 7, lifecycle: 'in_progress', startedAt: 1000 }],
+      queued: [{ repoUrl: 'github.com/o/web', issueNumber: 9, lifecycle: 'in_progress', startedAt: 2000 }],
+      totals: { active: 1, watchedRepos: 2 },
     };
     const repos: RepoEntry[] = [{ url: 'gitlab.com/g/api' }, { url: 'github.com/o/web' }];
     const dash = toDashboardState(runState, repos);
-    expect(dash.running).toEqual(runState.running);
-    expect(dash.queued).toEqual(runState.queued);
+    expect(dash.running).toEqual([{ repoUrl: 'gitlab.com/g/api', issueNumber: 7, lifecycle: 'in_progress' }]);
+    expect(dash.queued).toEqual([{ repoUrl: 'github.com/o/web', issueNumber: 9, lifecycle: 'in_progress' }]);
     expect(dash.repos).toEqual([
       { url: 'gitlab.com/g/api', forge: 'gitlab' },
       { url: 'github.com/o/web', forge: 'github' },
@@ -1670,33 +1757,32 @@ Expected: FAIL with "toDashboardState is not a function" (or missing `RunState` 
 
 - [ ] **Step 3: Write minimal implementation**
 
-Append to `packages/core/src/daemon/state.ts`:
+Append to `packages/core/src/daemon/state.ts`. **`RunState`/`RunningEntry` are already defined in this file by M1** (per contract "Daemon state + IPC") — M5 only adds the mapper:
 
 ```ts
 import type { RepoEntry } from '../config/schema.js';
-
-// M5-assumed RunState shape (NOT defined in contracts — see Open questions).
-// running = slots actively held; queued = claimed/in_progress awaiting a slot.
-export interface RunState {
-  running: DashboardIssue[];
-  queued: DashboardIssue[];
-}
+// RunState, RunningEntry already declared above (M1, per contract).
 
 function forgeOf(url: string): Forge {
   return url.split('/')[0].includes('gitlab') ? 'gitlab' : 'github';
 }
 
+// RunningEntry → DashboardIssue: drop startedAt; no title (not in slot state).
+function toDashboardIssue(e: RunningEntry): DashboardIssue {
+  return { repoUrl: e.repoUrl, issueNumber: e.issueNumber, lifecycle: e.lifecycle };
+}
+
 export function toDashboardState(runState: RunState, repos: RepoEntry[]): DashboardState {
   return {
-    running: runState.running,
-    queued: runState.queued,
+    running: runState.running.map(toDashboardIssue),
+    queued: runState.queued.map(toDashboardIssue),
     repos: repos.map((r) => ({ url: r.url, forge: forgeOf(r.url) })),
     generatedAt: new Date().toISOString(),
   };
 }
 ```
 
-> Re-export from `packages/core/src/index.ts`: `export { toDashboardState } from './daemon/state.js'; export type { RunState } from './daemon/state.js';`
+> Re-export the mapper from `packages/core/src/index.ts`: `export { toDashboardState } from './daemon/state.js';`. `RunState`/`RunningEntry` are exported by M1.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1750,20 +1836,8 @@ git commit -m "chore: lint and format cli and web packages"
 
 ## Open questions
 
-These are gaps the contracts (`maestro-00-contracts.md`) did not cover. The plan picked reasonable defaults where it had to, marked here so the contract can be updated rather than treating any of these as settled.
+These are gaps the reconciled contract (`maestro-00-contracts.md`) still does not cover. The plan picked reasonable defaults where it had to, marked here so the contract can be updated rather than treating any of these as settled. (Items previously listed for `RunState`, web port, status IPC, `createForge` deps, log path, and `run --repo` are now defined by the contract and have been removed.)
 
-1. **`RunState` shape is undefined.** `daemon/state.ts` is listed as "in-memory RunState (running slots, no persistence)" but no `RunState` type/interface is given. `status`, `/api/state`, and the dashboard all need it. This plan **invented** a minimal `RunState { running: DashboardIssue[]; queued: DashboardIssue[] }` plus a `DashboardState` wire type. Contracts should define the authoritative `RunState` and whether `DashboardState` is its public projection (M5 Task 2/15). If M1 ships a richer `RunState`, only `toDashboardState` changes.
+1. **`WorkspaceManager` constructor is undefined.** The contract specifies the `WorkspaceManager` interface and that it takes a `CommandRunner` + the repo's `forge`, but not the concrete constructor/factory signature. `maestro run` and `add` need `pathFor`/clone dirs. This plan assumes `new WorkspaceManager({ root })` and injects `pathFor` into the `run` handler so tests don't depend on it. Contracts should pin the constructor or a factory (M3 owns it).
 
-2. **Web server PORT is undefined.** Contracts name `web/src/server.ts` as a Fastify factory but give no port and no `listen` convention. This plan defaults to **7330** (`MAESTRO_WEB_PORT` env override). Needs confirmation + a contract entry, and a decision on bind address (this plan assumes loopback `127.0.0.1`).
-
-3. **How `maestro status` reaches the daemon is undefined.** No daemon-discovery mechanism, socket, or URL is specified. This plan has `status` make an HTTP `GET` to **`http://127.0.0.1:7330/api/state`** (`MAESTRO_DAEMON_URL` override), relying on "the daemon process serves the web app". Confirm whether HTTP-over-loopback is the intended IPC, or whether a unix socket / pid file is expected.
-
-4. **`createForge(forge, repo, deps)` `deps` shape is undefined.** The factory is named in the file tree but its `deps` parameter is unspecified. `add` needs `createForge` to build an adapter with enough context (token env, host) to call `ensureLabels`/`ensureBoard`. This plan passes `{ config }` and fakes the factory in tests. Contracts should pin the exact `createForge` signature (M2 owns it).
-
-5. **`WorkspaceManager` constructor is undefined.** The interface is specified but not how to construct an instance. `maestro run` and `add` need `pathFor`/clone dirs. This plan assumes `new WorkspaceManager({ root })` and injects `pathFor` into the `run` handler so tests don't depend on it. Contracts should specify the constructor or a factory (M3 owns it).
-
-6. **Daemon log file path/format is undefined.** `logs/` is described as a gitignored cache with no filename. `maestro logs` defaults to **`logs/maestro.log`** (`MAESTRO_LOG_FILE` override) and prints trailing lines. Whether the daemon writes a single file, rotates, or uses JSON-lines (and whether `--follow` streaming is required) is unspecified — this plan implements last-N-lines only and flags `--follow` as deferred.
-
-7. **`maestro run <issue>` repo disambiguation.** An issue number alone does not identify a repo when several are watched, but `pathFor(repoUrl, issueNumber)` requires a repo URL. This plan adds a `--repo <url>` flag, defaulting to the sole watched repo. Contracts should confirm whether `run` is keyed by issue+repo or whether workspaces are keyed differently.
-
-8. **Clone URL scheme / auth for `maestro add`.** Contracts give repo URLs as `host/path` (e.g. `github.com/org/web`) but not the clone transport. This plan constructs `https://<url>.git`. SSH vs HTTPS and how the bot token authenticates the clone are unspecified.
+2. **Clone transport for `maestro add`.** The contract says `WorkspaceManager` clones via the **forge CLI** (`glab repo clone` / `gh repo clone`) so tokens are handled by the CLI and never embedded in URLs. `maestro add` currently does its own `git clone https://<url>.git` for the one-shot inspection clone, which (a) does not match the forge-CLI convention and (b) won't authenticate private repos. This should be reconciled — either reuse the forge CLI for `add`'s clone or have `add` delegate to `WorkspaceManager`/the forge CLI. Flagged for M3/M2 alignment.

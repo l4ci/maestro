@@ -28,8 +28,8 @@
 | `packages/cli/src/commands/add.test.ts` | Test: `add` triggers `onboardRepo` only when `WORKFLOW.md` absent. | Modify (or create if absent) |
 
 **Contract anchors (do not deviate):**
-- `WorkflowConfig` fields: `forge`, `project`, `botUser`, `manageBoard`, `trigger {assignee, requireLabel, allowedActors}`, `proof {type, command?}`, `git {defaultBranch, target, mergeStrategy, deleteSourceBranch}`, `environment?`, `claude {command, maxTurns, permissionMode}`, `concurrency`, `promptBody`. (`workflow/schema.ts`)
-- `ForgeAdapter` methods used: `listAssignedOpenIssues()`, `createBranch`, `createDraftMr`, `comment`, `getIssue`. Plus the read used to check for existing onboarding issue. (`forge/adapter.ts`)
+- `WorkflowConfig` fields: `forge`, `project`, `botUser`, `manageBoard`, `trigger {assignee, requireLabel, allowedActors}`, `proof {type, command?}`, `review {changesSignal, changesLabel?}` (changesSignal default `'label'`), `git {defaultBranch, target, mergeStrategy, deleteSourceBranch}`, `environment?`, `claude {command, maxTurns, permissionMode}`, `concurrency`, `promptBody`. (`workflow/schema.ts`)
+- `ForgeAdapter` methods used: `listAssignedOpenIssues()`, `createIssue({ title, body, assignee? })`, `createBranch`, `createDraftMr`, `comment`, `getIssue`. (`forge/adapter.ts`)
 - Branch/MR conventions: branch `maestro/issue-<number>`, MR body MUST contain `Closes #<number>`. (contracts §"Branch & MR conventions")
 - `loadWorkflow(repoDir): WorkflowConfig | null` — `null` means no `WORKFLOW.md`. (`workflow/load.ts`)
 - `RepoEntry { url; overrides? }`, `MaestroConfig { defaults; forges; repos }`, `loadConfig(path)`, `watchConfig(path, cb)`. (`config/schema.ts`, `config/load.ts`)
@@ -352,6 +352,8 @@ trigger:
 proof:
   type: {{proofType}}
   command: {{proofCommand}}
+review:
+  changes_signal: label
 git:
   default_branch: {{defaultBranch}}
   target: {{defaultBranch}}
@@ -422,6 +424,8 @@ trigger:
 proof:
   type: {{proofType}}
   command: {{proofCommand}}
+review:
+  changes_signal: label
 git:
   default_branch: {{defaultBranch}}
   target: {{defaultBranch}}
@@ -511,8 +515,13 @@ export interface SeedFacts {
 
 /**
  * Fill the WORKFLOW.md template with inferred facts. When a test command was
- * detected we use proof type `test-output`; otherwise `none` with a null
- * command. The result is a complete WORKFLOW.md the agent then refines.
+ * detected we seed proof type `test-output`; otherwise `none` with a null
+ * command. (Contracts prefer screenshot-oriented proof by default, but
+ * `ProofType` has no `screenshot` value — screenshots are produced by the
+ * `playwright` strategy, which is opt-in and needs a running environment we
+ * can't infer here. So we seed the safe mechanically-derivable choice and let
+ * the agent upgrade to `playwright` during onboarding when appropriate.)
+ * The result is a complete WORKFLOW.md the agent then refines.
  */
 export function seedWorkflow(template: string, facts: SeedFacts): string {
   const hasTest = facts.testCommand !== null;
@@ -654,12 +663,9 @@ the bot, with the onboarding prompt as the body. It is idempotent: if such an
 open issue already exists (assigned to the bot, matching title), it does nothing.
 After this, the issue flows through the normal lifecycle — `onboardRepo` returns.
 
-> **Contract gap (see Open questions):** `ForgeAdapter` (contracts §forge/adapter.ts)
-> has no `createIssue` method. The lifecycle creates *MRs*, not issues. To open
-> the onboarding issue we need an issue-create capability on the adapter. This
-> plan defines a minimal `IssueOpener` seam and a fake in tests; the real
-> adapters must grow a `createIssue` method (or `onboardRepo` must call `glab`/
-> `gh` directly). Flagged rather than invented into the canonical interface.
+`ForgeAdapter` exposes `createIssue(args: { title; body; assignee? }): Promise<Issue>`
+(contracts §forge/adapter.ts), so `onboardRepo` takes a `ForgeAdapter` directly —
+no bespoke issue-create seam.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -677,16 +683,19 @@ function fakeIssue(over: Partial<Issue> = {}): Issue {
 }
 
 function makeFakeForge() {
-  const created: { title: string; body: string; assignee: string }[] = [];
+  const created: { title: string; body: string; assignee?: string }[] = [];
   let existing: Issue[] = [];
   return {
     forge: 'github' as const,
     project: 'org/web',
     botUser: 'maestro-bot',
     listAssignedOpenIssues: async () => existing,
-    createIssue: async (title: string, body: string, assignee: string) => {
-      created.push({ title, body, assignee });
-      const issue = fakeIssue({ number: 7, title, body, assignees: [assignee] });
+    createIssue: async (args: { title: string; body: string; assignee?: string }) => {
+      created.push(args);
+      const issue = fakeIssue({
+        number: 7, title: args.title, body: args.body,
+        assignees: args.assignee ? [args.assignee] : [],
+      });
       existing = [...existing, issue];
       return issue;
     },
@@ -749,23 +758,16 @@ Expected: FAIL — `onboardRepo is not exported` / `ONBOARD_ISSUE_TITLE is not e
 
 export const ONBOARD_ISSUE_TITLE = 'Define my maestro workflow';
 
-/**
- * Minimal issue-create seam used by onboarding. NOTE: the canonical
- * `ForgeAdapter` (contracts) does not yet expose issue creation — see this
- * plan's Open questions. The real adapter must implement `createIssue` (or
- * `onboardRepo` must shell out to glab/gh). We keep the dependency narrow so
- * onboarding stays testable with a fake.
- */
-export interface IssueOpener {
-  readonly forge: Forge;
-  readonly project: string;
-  readonly botUser: string;
-  listAssignedOpenIssues(): Promise<import('../domain/types.js').Issue[]>;
-  createIssue(title: string, body: string, assignee: string): Promise<import('../domain/types.js').Issue>;
-}
+// onboardRepo depends only on this slice of ForgeAdapter (contracts §forge/adapter.ts):
+// the three members it actually touches. Production passes a real ForgeAdapter; tests
+// pass a fake. No bespoke seam — these are the exact ForgeAdapter signatures.
+type OnboardForge = Pick<
+  import('../forge/adapter.js').ForgeAdapter,
+  'forge' | 'project' | 'botUser' | 'listAssignedOpenIssues' | 'createIssue'
+>;
 
 export interface OnboardArgs {
-  forge: IssueOpener;
+  forge: OnboardForge;
   project: string;
   defaultBranch: string;
   packageJson: string | null;   // contents of the repo's root package.json, or null
@@ -798,7 +800,7 @@ export async function onboardRepo(args: OnboardArgs): Promise<OnboardResult> {
   });
 
   const body = buildOnboardingPrompt({ project: args.project, seededWorkflow: seeded });
-  const issue = await forge.createIssue(ONBOARD_ISSUE_TITLE, body, forge.botUser);
+  const issue = await forge.createIssue({ title: ONBOARD_ISSUE_TITLE, body, assignee: forge.botUser });
   return { created: true, issueNumber: issue.number };
 }
 ```
@@ -863,7 +865,6 @@ export {
 export type {
   OnboardArgs,
   OnboardResult,
-  IssueOpener,
   SeedFacts,
   Framework,
   PackageManager,
@@ -968,8 +969,7 @@ schema and `yaml`); this shows the new export and the guard wiring.
 // packages/core/src/config/load.ts  — add near the top-level exports
 
 import { parse as parseYaml } from 'yaml';
-// `MaestroConfigSchema` is the zod schema declared in config/schema.ts (M1).
-// If M1 named it differently, import that name here.
+// `MaestroConfigSchema` is the zod schema declared in config/schema.ts (contracts §config).
 import { MaestroConfigSchema } from './schema.js';
 import type { MaestroConfig } from './schema.js';
 
@@ -1056,7 +1056,7 @@ describe('watchConfig reload gate', () => {
     writeFileSync(path, 'repos: "not-an-array"\n');
     await new Promise((r) => setTimeout(r, 200));
 
-    expect(seen).toHaveLength(0); // initial load is NOT a reload event; broken write ignored
+    expect(seen).toHaveLength(0); // watchConfig fires only on change, never initial load (contracts §config); broken write rejected
     stop();
   });
 
@@ -1077,15 +1077,11 @@ describe('watchConfig reload gate', () => {
 });
 ```
 
-> If the M1 `watchConfig` already fires the callback on initial load, adjust the
-> first assertion to `expect(seen).toEqual([])` after filtering, or assert the
-> broken url never appears: `expect(seen).not.toContain('not-an-array')`.
-
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pnpm --filter @maestro/core test -- src/config/load.test.ts`
-Expected: FAIL — broken write currently either throws or invokes the callback
-(depending on M1 impl); the gate is not yet present.
+Expected: FAIL — without the gate, the broken write either throws or invokes the
+callback; the validation guard is not yet present.
 
 - [ ] **Step 3: Wire the gate into `watchConfig`**
 
@@ -1139,11 +1135,10 @@ setup, it must check for `WORKFLOW.md` and call `onboardRepo` when absent. Reuse
 `loadWorkflow(repoDir)` (returns `null` when missing). The maestro repo itself
 adds as a normal `RepoEntry` — no special path; this same code onboards it.
 
-> **Contract gap (see Open questions):** `onboardRepo` needs an `IssueOpener`
-> (a forge with `createIssue`). M5's `commands/add.ts` already builds a forge via
-> `createForge(...)` (contracts §forge/factory.ts), but `createIssue` is not on
-> the canonical `ForgeAdapter`. The test below uses a fake forge; the real wiring
-> depends on resolving the `createIssue` gap.
+> M5's `commands/add.ts` already builds a `ForgeAdapter` via `createForge(...)`
+> (contracts §forge/factory.ts), and that adapter exposes `createIssue` — so the
+> production wiring passes the real adapter straight into `onboardRepo`. The test
+> below injects a fake forge.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1202,21 +1197,19 @@ unit-testable, then call it from the `add` action after clone + setup.
 
 ```ts
 // packages/cli/src/commands/add.ts — add this helper (exported for tests)
-import { onboardRepo, type OnboardResult, type IssueOpener } from '@maestro/core';
+import { onboardRepo, type OnboardArgs, type OnboardResult } from '@maestro/core';
 import { loadWorkflow } from '@maestro/core'; // re-exported by core barrel (M1)
+import type { ForgeAdapter } from '@maestro/core';
 
 export interface MaybeOnboardArgs {
   repoDir: string;
-  forge: IssueOpener;
+  forge: ForgeAdapter;
   defaultBranch: string;
   packageJson: string | null;
   template: string;
   // injectable deps for testing
   deps?: {
-    onboardRepo?: (a: {
-      forge: IssueOpener; project: string; defaultBranch: string;
-      packageJson: string | null; template: string;
-    }) => Promise<OnboardResult>;
+    onboardRepo?: (a: OnboardArgs) => Promise<OnboardResult>;
     loadWorkflow?: (repoDir: string) => unknown | null;
   };
 }
@@ -1256,34 +1249,36 @@ Then, in the existing `add` command action (after clone, `RepoEntry` append, and
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const templatePath = join(repoRoot, 'templates', 'WORKFLOW.md');
-const template = readFileSync(templatePath, 'utf8');
+// `dest` is M5's clone dir (parseRepoUrl → join(cloneRoot, dirName)); `forge`
+// is the ForgeAdapter from createForge(); `log` is M5's logger.
+const template = readFileSync(resolveTemplatePath(), 'utf8'); // see Open question Q3
 
 let packageJson: string | null = null;
 try {
-  packageJson = readFileSync(join(clonedRepoDir, 'package.json'), 'utf8');
+  packageJson = readFileSync(join(dest, 'package.json'), 'utf8');
 } catch {
   packageJson = null; // not a Node repo; inference returns null/unknown
 }
 
 const onboardResult = await maybeOnboard({
-  repoDir: clonedRepoDir,
+  repoDir: dest,
   forge,                      // the ForgeAdapter built via createForge() in M5
-  defaultBranch,              // resolved during clone/setup in M5
+  defaultBranch,              // see Open question Q6 — M5 add does not resolve this today
   packageJson,
   template,
   // no deps override in production — uses real onboardRepo + loadWorkflow
 });
 
 if (onboardResult.onboarded) {
-  logger.info({ issue_number: onboardResult.issueNumber }, 'opened onboarding issue');
+  log.info({ issue_number: onboardResult.issueNumber }, 'opened onboarding issue');
 }
 ```
 
-> `repoRoot`, `clonedRepoDir`, `defaultBranch`, `forge`, and `logger` already
-> exist in M5's `add.ts` — reuse them. If the M5 forge object does not yet
-> implement `createIssue`, this production wiring is blocked on the Open-questions
-> gap; the `maybeOnboard` unit test (which injects fakes) still passes.
+> `dest`, `forge`, and `log` exist in M5's `add.ts` — reuse them. Two values M5
+> does NOT currently provide are flagged in Open questions: the template path
+> (Q3) and `defaultBranch` (Q6). The real `ForgeAdapter` already exposes
+> `createIssue`, so production passes it straight to `onboardRepo`; the
+> `maybeOnboard` unit test injects fakes.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1323,8 +1318,8 @@ Expected: PASS — includes `commands/add.test.ts`.
 - [ ] **Step 3: Typecheck the workspace**
 
 Run: `pnpm -r exec tsc --noEmit`
-Expected: PASS — no type errors. Confirms `onboardRepo`/`IssueOpener`/`SeedFacts`
-match the contract types they reference (`Forge`, `Issue`, `WorkflowConfig`).
+Expected: PASS — no type errors. Confirms `onboardRepo`/`OnboardArgs`/`SeedFacts`
+match the contract types they reference (`Forge`, `Issue`, `ForgeAdapter`, `WorkflowConfig`).
 
 - [ ] **Step 4: Lint**
 
@@ -1356,9 +1351,10 @@ git commit -m "chore: lint/format M7 onboarding + self-manage sources"
 - **Self-managed wrapper + config validation before reload:** Tasks 9, 10, 12. ✔
 - **Conventions:** TDD per step, explicit `git add <paths>`, Conventional Commits,
   no `Co-Authored-By`. ✔
-- **Type consistency:** `SeedFacts`, `OnboardArgs`, `IssueOpener`, `OnboardResult`,
-  `Framework`, `PackageManager`, `ValidateResult` are defined once and reused
-  consistently across Tasks 2–11. ✔
+- **Type consistency:** `SeedFacts`, `OnboardArgs`, `OnboardResult`, `Framework`,
+  `PackageManager`, `ValidateResult` are defined once and reused consistently
+  across Tasks 2–11; `onboardRepo`/`maybeOnboard` consume the canonical
+  `ForgeAdapter.createIssue({ title, body, assignee? })` — no bespoke seam. ✔
 
 ---
 
@@ -1367,47 +1363,31 @@ git commit -m "chore: lint/format M7 onboarding + self-manage sources"
 These are gaps the contracts (`maestro-00-contracts.md`) do not cover. They are
 flagged here rather than invented into canonical interfaces.
 
-1. **Issue creation is not on `ForgeAdapter`.** The canonical `ForgeAdapter`
-   (contracts §forge/adapter.ts) exposes MR/PR creation, comments, labels, and
-   reads — but no `createIssue`. Onboarding (§16) requires the bot to *open an
-   issue*. This plan defines a narrow `IssueOpener` seam with a `createIssue(title,
-   body, assignee)` method and tests it with a fake, but the real GitLab/GitHub
-   adapters (M2/M6) must grow a `createIssue` method (or `onboardRepo` must shell
-   out to `glab`/`gh` directly). Which approach is canonical? Should `createIssue`
-   be added to the `ForgeAdapter` interface in the contracts?
-
-2. **Onboarding seeds an issue, but the seed must reach the agent's MR.** The
+1. **Onboarding seeds an issue, but the seed must reach the agent's MR.** The
    agent writes `WORKFLOW.md` by following the onboarding issue body
    (`buildOnboardingPrompt`). That relies on the standard runner/loop (M3/M5)
    feeding the issue body into the agent prompt. Contracts do not specify how the
    issue body is incorporated into the runner prompt. Assumed: the standard
    "Orient" step (reads the issue) suffices. Confirm.
 
-3. **`templates/WORKFLOW.md` location at runtime.** Task 11 reads the template
-   from `<repoRoot>/templates/WORKFLOW.md`. In a packaged/installed daemon
+2. **`templates/WORKFLOW.md` location at runtime.** Task 11 reads the template via
+   a `resolveTemplatePath()` placeholder. M5's `add.ts` does NOT define a
+   `repoRoot` (verified against `maestro-05-cli-and-web.md` — it has `cloneRoot`/
+   `dest`, no install-root anchor), so M7 cannot "reuse" one. In a packaged daemon
    (`/opt/maestro`, spec §14) the template ships alongside `packages/`. Contracts
-   don't define a template-resolution helper. Assumed: resolve relative to the
-   maestro install root. Should `core` export a `templatePath()`/`loadTemplate()`
-   helper instead of CLI reading the file directly?
+   define `templates/WORKFLOW.md` as the canonical path (file tree) but no
+   resolution helper. Proposed: `core` exports `loadDefaultTemplate()` resolving
+   relative to its own module (`import.meta.url`) rather than the CLI reading a
+   path it has to guess. Confirm approach + helper ownership.
 
-4. **`MaestroConfigSchema` export name.** Task 9 imports `MaestroConfigSchema`
-   from `config/schema.ts`. Contracts state `config/schema.ts` defines
-   `MaestroConfig (zod + inferred type)` but do not fix the zod schema's export
-   name. Assumed `MaestroConfigSchema`. Confirm the actual M1 export name.
+3. **Default-branch detection during `add`.** Task 11 passes `defaultBranch` into
+   onboarding. Verified against `maestro-05-cli-and-web.md`: M5's `add` clones
+   `--depth 1` and does NOT resolve a default branch — so this value is not
+   available today. Either M5 must add detection (e.g. `git symbolic-ref
+   refs/remotes/origin/HEAD` or the forge API) or M7 must resolve it before
+   calling `maybeOnboard`. Where should default-branch resolution live?
 
-5. **`watchConfig` initial-load semantics.** Task 10's test assumes `watchConfig`
-   fires `cb` only on *changes*, not on initial load. Contracts give only the
-   signature `watchConfig(path, cb): () => void`. If M1 also fires on initial
-   load, the test assertions need the noted adjustment. Confirm initial-load
-   behavior.
-
-6. **Default-branch detection during `add`.** Task 11 passes `defaultBranch` into
-   onboarding, assuming M5's `add` already resolves it during clone (e.g. from
-   `git symbolic-ref refs/remotes/origin/HEAD` or the forge API). Contracts do not
-   define where `defaultBranch` is resolved. Confirm it is available in M5's `add`
-   action; otherwise M7 must add the detection.
-
-7. **Package-manager detection for `inferTestCommand`.** The helper accepts a
+4. **Package-manager detection for `inferTestCommand`.** The helper accepts a
    `packageManager` option but `onboardRepo` currently always infers `npm`.
    Detecting pnpm/yarn requires inspecting lockfiles in the clone, which the
    contracts do not model. Assumed `npm` as the safe default; the agent corrects
