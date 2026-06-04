@@ -10,6 +10,12 @@ export * from './exec/node-exec.js';
 export { ForgeCli, buildPath } from './forge/cli.js';
 export type { ForgeCliConfig, HttpMethod, ApiOptions } from './forge/cli.js';
 export { ForgeError } from './forge/errors.js';
+export {
+  type ForgePrimitives,
+  assembleSnapshot,
+  findMaestroMr,
+  computeChangesRequested,
+} from './forge/snapshot.js';
 // gitlab-adapter / github-adapter re-export their own encodeProject / repoSegments
 // and the *ClientConfig types alongside the adapter classes.
 export * from './forge/gitlab/gitlab-adapter.js';

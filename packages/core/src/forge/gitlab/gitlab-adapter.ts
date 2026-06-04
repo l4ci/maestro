@@ -1,7 +1,9 @@
 // GitLab forge adapter — the reference ForgeAdapter implementation (§0.3). All I/O
-// flows through the injected Exec seam via GitlabClient. Normalizes GitLab JSON to
-// the §0.2 model; idempotent mutations (§13); scoped labels give mutual exclusion
-// for free; §11 Free-tier board automation. botUser is construction config (§0.10).
+// flows through the injected Exec seam via the shared ForgeCli transport (cli.ts);
+// getSnapshot delegates the choreography to the shared snapshot algorithm (snapshot.ts)
+// and supplies only GitLab-specific primitives. Normalizes GitLab JSON to the §0.2
+// model; idempotent mutations (§13); scoped labels give mutual exclusion for free;
+// §11 Free-tier board automation. botUser is construction config (§0.10).
 
 import type {
   ApprovalState,
@@ -18,6 +20,7 @@ import type {
 } from '../../contracts/index.js';
 import { ForgeCli } from '../cli.js';
 import { ForgeError } from '../errors.js';
+import { type ForgePrimitives, assembleSnapshot } from '../snapshot.js';
 import {
   type RawApprovals,
   type RawIssue,
@@ -112,29 +115,7 @@ export class GitlabAdapter implements ForgeAdapter {
   }
 
   async getSnapshot(repo: RepoRef, issueIid: number): Promise<IssueSnapshot> {
-    const pid = this.#pid(repo);
-    const rawIssue = await this.#c.apiRequired<RawIssue>(
-      'GET',
-      `/projects/${pid}/issues/${issueIid}`,
-    );
-    const issue = normalizeIssue(rawIssue);
-
-    const lastActor = await this.#lastActor(repo, issueIid);
-    const issueWithActor: Issue = lastActor ? { ...issue, lastActor } : issue;
-
-    const mr = await this.#findMaestroMr(repo, issueIid);
-
-    const notes =
-      (await this.#c.api<RawNote[]>('GET', `/projects/${pid}/issues/${issueIid}/notes`, {
-        query: { sort: 'desc', order_by: 'created_at', per_page: this.#c.commentCap },
-      })) ?? [];
-    const recentComments = notes
-      .filter((n) => !n.system)
-      .map(normalizeComment)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, this.#c.commentCap);
-
-    return { repo, issue: issueWithActor, recentComments, ...(mr ? { mr } : {}) };
+    return assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap);
   }
 
   async getIssueState(repo: RepoRef, issueIid: number): Promise<'open' | 'closed' | 'missing'> {
@@ -337,29 +318,35 @@ export class GitlabAdapter implements ForgeAdapter {
     return top?.user ? normalizeUser(top.user) : undefined;
   }
 
-  async #findMaestroMr(repo: RepoRef, issueIid: number): Promise<MergeRequest | undefined> {
+  /** The §0.3 forge-specific fetches the shared snapshot algorithm composes (snapshot.ts).
+   *  Everything here is normalized GitLab JSON; the choreography lives above the seam. */
+  #primitives(repo: RepoRef): ForgePrimitives {
     const pid = this.#pid(repo);
-    const related =
-      (await this.#c.api<RawMr[]>(
-        'GET',
-        `/projects/${pid}/issues/${issueIid}/related_merge_requests`,
-      )) ?? [];
-    const branchPrefix = `maestro/issue-${issueIid}-`;
-    const candidate =
-      related.find(
-        (m) =>
-          m.state === 'opened' &&
-          (m.source_branch.startsWith(branchPrefix) || closesThis(m, issueIid)),
-      ) ?? related.find((m) => m.source_branch.startsWith(branchPrefix) || closesThis(m, issueIid));
-    if (!candidate) return undefined;
-
-    const approvals = await this.#approvalState(repo, candidate.iid);
-    const changesRequested = await this.#changesRequested(
-      repo,
-      candidate.iid,
-      candidate.source_branch,
-    );
-    return normalizeMergeRequest(candidate, { ...approvals, changesRequested });
+    return {
+      issue: async (iid) =>
+        normalizeIssue(
+          await this.#c.apiRequired<RawIssue>('GET', `/projects/${pid}/issues/${iid}`),
+        ),
+      lastActor: (iid) => this.#lastActor(repo, iid),
+      comments: async (iid) => {
+        const notes =
+          (await this.#c.api<RawNote[]>('GET', `/projects/${pid}/issues/${iid}/notes`, {
+            query: { sort: 'desc', order_by: 'created_at', per_page: this.#c.commentCap },
+          })) ?? [];
+        return notes.filter((n) => !n.system).map(normalizeComment);
+      },
+      openMergeRequests: async (iid) => {
+        const related =
+          (await this.#c.api<RawMr[]>(
+            'GET',
+            `/projects/${pid}/issues/${iid}/related_merge_requests`,
+          )) ?? [];
+        return related.map((m) => normalizeMergeRequest(m));
+      },
+      approvalBase: (mrIid) => this.#approvalState(repo, mrIid),
+      blockingThreadAt: (mrIid) => this.#blockingThreadAt(repo, mrIid),
+      lastBotPushAt: (mr) => this.#lastBotPushAt(repo, mr.sourceBranch),
+    };
   }
 
   async #approvalState(repo: RepoRef, mrIid: number): Promise<ApprovalState> {
@@ -371,32 +358,17 @@ export class GitlabAdapter implements ForgeAdapter {
     return normalizeApprovals(raw);
   }
 
-  /**
-   * Edge-triggered changes-requested (§0.3): true iff the newest non-bot blocking
-   * signal post-dates the newest bot-authored commit on the source branch. This is
-   * what stops re-triggering in-review→in-progress on feedback already addressed.
-   * Reference logic M7 mirrors.
-   */
-  async #changesRequested(repo: RepoRef, mrIid: number, sourceBranch: string): Promise<boolean> {
+  /** Newest unresolved non-bot blocking discussion timestamp (§0.3 edge-trigger half).
+   *  The shared algorithm compares this against the last bot push (snapshot.ts). */
+  async #blockingThreadAt(repo: RepoRef, mrIid: number): Promise<string | undefined> {
     const pid = this.#pid(repo);
     const bot = this.#c.botUser;
-
-    const commits =
-      (await this.#c.api<RawCommit[]>('GET', `/projects/${pid}/repository/commits`, {
-        query: { ref_name: sourceBranch, per_page: 100 },
-      })) ?? [];
-    const lastBotPush = commits
-      .filter((cm) => cm.author_name === bot || cm.author_email.split('@')[0] === bot)
-      .map((cm) => cm.committed_date)
-      .sort()
-      .at(-1);
-
     const discussions =
       (await this.#c.api<RawDiscussion[]>(
         'GET',
         `/projects/${pid}/merge_requests/${mrIid}/discussions`,
       )) ?? [];
-    const blockingSince = discussions
+    return discussions
       .map((d) => d.notes[0])
       .filter(
         (n): n is RawDiscussion['notes'][number] =>
@@ -409,10 +381,21 @@ export class GitlabAdapter implements ForgeAdapter {
       .map((n) => n.created_at)
       .sort()
       .at(-1);
+  }
 
-    if (!blockingSince) return false;
-    if (!lastBotPush) return true; // unaddressed feedback, no bot push since
-    return blockingSince > lastBotPush;
+  /** Newest bot-authored commit timestamp on the source branch (§0.3 edge-trigger half). */
+  async #lastBotPushAt(repo: RepoRef, sourceBranch: string): Promise<string | undefined> {
+    const pid = this.#pid(repo);
+    const bot = this.#c.botUser;
+    const commits =
+      (await this.#c.api<RawCommit[]>('GET', `/projects/${pid}/repository/commits`, {
+        query: { ref_name: sourceBranch, per_page: 100 },
+      })) ?? [];
+    return commits
+      .filter((cm) => cm.author_name === bot || cm.author_email.split('@')[0] === bot)
+      .map((cm) => cm.committed_date)
+      .sort()
+      .at(-1);
   }
 }
 
@@ -422,10 +405,4 @@ function withDraftPrefix(title: string): string {
 
 function stripDraftPrefix(title: string): string {
   return title.replace(/^(draft:|wip:)\s*/i, '');
-}
-
-function closesThis(m: RawMr, issueIid: number): boolean {
-  return new RegExp(`\\b(?:closes|fixes|resolves)\\s+#${issueIid}\\b`, 'i').test(
-    m.description ?? '',
-  );
 }
