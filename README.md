@@ -446,6 +446,12 @@ A small read-only **web dashboard** shows the same information in your browser �
 a live status table of every watched repo and its tickets, plus an "add a repo"
 form — and auto-refreshes every few seconds.
 
+![The Maestro dashboard: two repos with their tickets and colour-coded lifecycle states](docs/assets/dashboard.png)
+
+*Example view — each ticket shows its current lifecycle state, and each repo
+summarises its counts. A repo whose forge can't be reached shows as "unreachable"
+instead of looking idle.*
+
 ```sh
 node packages/web/dist/main.js      # → http://127.0.0.1:4000
 ```
