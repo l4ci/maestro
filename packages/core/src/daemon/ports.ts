@@ -16,7 +16,7 @@ import type {
   WorkflowFrontMatter,
 } from '../contracts/index.js';
 import type { ProofAndHandoffInput } from '../handoff/handoff.js';
-import type { SlotAccountant } from './slots.js';
+import type { InFlightSet, SlotAccountant } from './slots.js';
 
 /** A live per-issue workspace handle (structurally satisfied by M3 WorkspaceHandle). */
 export interface WorkspaceHandleLike {
@@ -73,6 +73,7 @@ export interface TickContext {
   workflow: WorkflowFrontMatter; // proof / environment / claude live here, not RepoSettings
   promptBody: string; // WORKFLOW body → RunnerInput.promptBody
   slots: SlotAccountant; // process-wide concurrency gate (§14)
+  inFlight: InFlightSet; // process-wide per-issue dedup (§14, #18)
   log: Logger;
 }
 

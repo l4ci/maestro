@@ -20,7 +20,7 @@ import type {
 } from '../../src/contracts/index.js';
 import { WorkflowSchema, labelNames } from '../../src/contracts/index.js';
 import type { TickContext, Workspace, WorkspaceHandleLike } from '../../src/daemon/ports.js';
-import { SlotAccountant } from '../../src/daemon/slots.js';
+import { InFlightSet, SlotAccountant } from '../../src/daemon/slots.js';
 
 export const repo: RepoRef = {
   forge: 'gitlab',
@@ -279,6 +279,7 @@ export interface BuiltContext {
   handoffSpy: ReturnType<typeof vi.fn>;
   proofHandoffSpy: ReturnType<typeof vi.fn>;
   slots: SlotAccountant;
+  inFlight: InFlightSet;
 }
 
 const RECOVERED_PROOF: ProofResult = { ok: true, kind: 'none', summary: 'recovered' };
@@ -292,6 +293,7 @@ export function buildContext(
     settings?: RepoSettings;
     workflow?: WorkflowFrontMatter;
     slots?: SlotAccountant;
+    inFlight?: InFlightSet;
     handoff?: ReturnType<typeof vi.fn>;
     proofAndHandoff?: ReturnType<typeof vi.fn>;
   } = {},
@@ -301,6 +303,7 @@ export function buildContext(
   const runnerSpy = partial.runner ?? scriptedRunner({ status: 'in_progress', summary: '' });
   const ws = partial.workspace ?? fakeWorkspace();
   const slots = partial.slots ?? new SlotAccountant(settings.concurrency.globalMax);
+  const inFlight = partial.inFlight ?? new InFlightSet();
   const handoffSpy = partial.handoff ?? vi.fn(async () => {});
   const proofHandoffSpy = partial.proofAndHandoff ?? vi.fn(async () => RECOVERED_PROOF);
   const ctx: TickContext = {
@@ -314,7 +317,8 @@ export function buildContext(
     workflow: partial.workflow ?? defaultWorkflow(),
     promptBody: 'do the work',
     slots,
+    inFlight,
     log: silentLogger(),
   };
-  return { ctx, adapterRec, runnerSpy, ws, handoffSpy, proofHandoffSpy, slots };
+  return { ctx, adapterRec, runnerSpy, ws, handoffSpy, proofHandoffSpy, slots, inFlight };
 }
