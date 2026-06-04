@@ -15,10 +15,10 @@ deleted the previous M1–M7 set.
 
 ## Milestones (sequential; each verified before the next depends on it)
 
-- [ ] **M0 — Scaffolding & Contracts** — `maestro-00-scaffolding-and-contracts.md`
+- [x] **M0 — Scaffolding & Contracts** — `maestro-00-scaffolding-and-contracts.md`
       Monorepo + toolchain + frozen contracts (forge model, reconciler, schemas,
       exec seam, runner, + §0.12 reconciled modules). *Gate: build/typecheck/test/lint
-      green; schemas round-trip the sample config + WORKFLOW.*
+      green; schemas round-trip the sample config + WORKFLOW.* **✓ merged to main.**
 - [ ] **M1 — Reconciler & Loaders** — `maestro-01-reconciler-and-loaders.md`
       Pure FSM (TDD vs §7); config + WORKFLOW load/validate/hot-reload.
 - [ ] **M2 — GitLab adapter (reference)** — `maestro-02-gitlab-adapter.md`
