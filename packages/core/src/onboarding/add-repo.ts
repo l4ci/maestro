@@ -11,6 +11,7 @@ import type { WorkflowSeed } from '../bootstrap/infer-workflow-seed.js';
 import { onboard } from '../bootstrap/onboard.js';
 import { parseConfig } from '../config/load-config.js';
 import type { Exec, ForgeAdapter, RepoRef } from '../contracts/index.js';
+import { labelNames } from '../contracts/labels.js';
 import { repoRefFromUrl } from '../daemon/reload.js';
 import { requirePublicOptIn } from './public-guard.js';
 
@@ -104,6 +105,14 @@ export async function addRepo(input: AddRepoInput, deps: AddRepoDeps): Promise<A
         repo,
         onboarded.issueIid,
         `🎼 Opened #${mr.iid} with a suggested \`WORKFLOW.md\` to refine.`,
+      );
+      // Move the issue to in-progress so the daemon RESUMES this PR (run-agent) instead of
+      // treating it as New and opening a second branch/PR (iteration 2).
+      await adapter.setIssueLabels(
+        repo,
+        onboarded.issueIid,
+        [labelNames(repo.forge).inProgress],
+        [],
       );
     } catch (err) {
       // Surfaced, not fatal — the issue + labels + watch entry already landed.

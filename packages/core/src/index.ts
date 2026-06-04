@@ -32,6 +32,7 @@ export * from './onboarding/public-guard.js';
 export * from './bootstrap/infer-workflow-seed.js';
 export * from './bootstrap/onboard.js';
 export * from './bootstrap/bootstrap-pr.js';
+export * from './bootstrap/bootstrap-workflow.js';
 export * from './security/scan-for-secrets.js';
 export * from './views/assemble.js';
 export * from './logs/file-log-reader.js';

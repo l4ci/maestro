@@ -227,6 +227,7 @@ describe('bootstrapPr — opens a sample-WORKFLOW PR and links the issue', () =>
     const p = tmpConfig();
     const createdMRs: CreateMRArgs[] = [];
     const comments: { iid: number; body: string }[] = [];
+    const labelOps: { iid: number; set: string[] }[] = [];
     const mr = { iid: 7 } as unknown as MergeRequest;
     const adapter = {
       kind: 'github',
@@ -249,6 +250,8 @@ describe('bootstrapPr — opens a sample-WORKFLOW PR and links the issue', () =>
       },
       commentIssue: async (_r: RepoRef, iid: number, body: string) =>
         void comments.push({ iid, body }),
+      setIssueLabels: async (_r: RepoRef, iid: number, set: string[]) =>
+        void labelOps.push({ iid, set }),
     } as unknown as ForgeAdapter;
 
     // Fake workspace: no real clone/push, but a REAL temp dir so the seed's WORKFLOW.md
@@ -289,5 +292,8 @@ describe('bootstrapPr — opens a sample-WORKFLOW PR and links the issue', () =>
     expect(comments).toHaveLength(1);
     expect(comments[0]).toMatchObject({ iid: 1 });
     expect(comments[0]?.body).toContain('#7');
+    // and moved to in-progress so the daemon resumes the PR instead of recreating one
+    expect(labelOps).toHaveLength(1);
+    expect(labelOps[0]?.set).toEqual([labelNames('github').inProgress]);
   });
 });

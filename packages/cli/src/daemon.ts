@@ -43,8 +43,10 @@ import {
   SlotAccountant,
   type TickContext,
   WatchedConfig,
+  type WorkflowParseResult,
   WorkflowStore,
   WorkspaceManager,
+  buildBootstrapWorkflow,
   checkBinaries,
   handoff,
   inferForge,
@@ -84,6 +86,18 @@ function buildAdapters(config: MaestroConfig, exec: Exec): ForgeAdapter[] {
 /** v1 WORKFLOW source: `<workflows_dir>/<repo-slug>/WORKFLOW.md` (M8 formalizes fetch). */
 function workflowPath(workflowsDir: string, repo: RepoRef): string {
   return join(workflowsDir, slugifyProject(repo.project), 'WORKFLOW.md');
+}
+
+/** The M0 template, base for a bootstrap-mode repo's workflow. Empty string if unreadable
+ *  (→ bootstrap build fails for those repos and they skip, logged). */
+function readTemplate(): string {
+  const p = process.env.MAESTRO_TEMPLATE ?? './templates/WORKFLOW.md';
+  try {
+    return readFileSync(p, 'utf8');
+  } catch {
+    log.warn('template not readable — bootstrap mode unavailable', { path: p });
+    return '';
+  }
 }
 
 export interface DaemonOptions {
@@ -126,18 +140,39 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     systemRng,
   );
 
+  // The M0 template — base for the bootstrap workflow a no-WORKFLOW repo runs on.
+  const templateText = readTemplate();
+
   // Per-repo settings cell (settings/promptBody/front matter re-derived live on reload).
   const cells = new Map<string, { repo: RepoRef; cell: RepoSettingsCell }>();
   for (const repo of watched.watchSet) {
-    const wf = parseWorkflow(readFileSync(workflowPath(workflowsDir, repo), 'utf8'), repo.host);
-    if (!wf.ok) {
-      log.error('skipping repo: WORKFLOW invalid', { repo: repo.project, error: wf.error });
+    // A repo with no committed WORKFLOW.md yet runs in BOOTSTRAP mode (iteration 2) so the
+    // daemon can still work its "define my workflow" issue; a present-but-invalid file is a
+    // user error and is skipped (loudly), as before. Missing file → ENOENT → bootstrap.
+    let workflowText: string | undefined;
+    try {
+      workflowText = readFileSync(workflowPath(workflowsDir, repo), 'utf8');
+    } catch {
+      workflowText = undefined;
+    }
+    let parsed: WorkflowParseResult;
+    if (workflowText !== undefined) {
+      parsed = parseWorkflow(workflowText, repo.host);
+    } else {
+      parsed = buildBootstrapWorkflow(repo, templateText, config.defaults.bot_user);
+      if (parsed.ok)
+        log.info('repo has no WORKFLOW.md yet — operating in bootstrap mode', {
+          repo: repo.project,
+        });
+    }
+    if (!parsed.ok) {
+      log.error('skipping repo: WORKFLOW invalid', { repo: repo.project, error: parsed.error });
       continue;
     }
     const override = config.repos.find((r) => r.url === repo.url)?.overrides;
     const cell = new RepoSettingsCell({
       repo,
-      store: new WorkflowStore(wf.value, repo.host),
+      store: new WorkflowStore(parsed.value, repo.host),
       defaults: config.defaults,
       ...(override ? { override } : {}),
       log,
