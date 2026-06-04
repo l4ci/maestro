@@ -43,3 +43,26 @@ export class SlotAccountant {
     return this.#perRepo.get(repoKey) ?? 0;
   }
 }
+
+/**
+ * Per-issue in-flight guard (§14, #18). The SlotAccountant bounds CAPACITY (how many
+ * workers run at once); this set enforces UNIQUENESS (an issue already being worked is not
+ * dispatched again). Needed because a repo stays "due" while its prior pass's agent work is
+ * still settling, so overlapping tick passes would otherwise stack a second agent on one
+ * issue whenever a slot is free (max_active ≥ 2). Keyed `${repoKey}:${iid}`.
+ */
+export class InFlightSet {
+  readonly #active = new Set<string>();
+  #key(repoKey: string, iid: number): string {
+    return `${repoKey}:${iid}`;
+  }
+  has(repoKey: string, iid: number): boolean {
+    return this.#active.has(this.#key(repoKey, iid));
+  }
+  add(repoKey: string, iid: number): void {
+    this.#active.add(this.#key(repoKey, iid));
+  }
+  delete(repoKey: string, iid: number): void {
+    this.#active.delete(this.#key(repoKey, iid));
+  }
+}

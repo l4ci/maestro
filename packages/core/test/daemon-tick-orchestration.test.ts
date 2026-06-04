@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DONE_SENTINEL, type RepoRef } from '../src/contracts/index.js';
+import { repoKey } from '../src/daemon/ports.js';
 import { SlotAccountant } from '../src/daemon/slots.js';
-import { selectAdapter, tick, tickRepo } from '../src/daemon/tick.js';
+import { evaluateLifecycle, selectAdapter, tick, tickRepo } from '../src/daemon/tick.js';
 import {
   buildContext,
   defaultSettings,
@@ -194,6 +195,59 @@ describe('C4 — slot released in finally even when the agent throws', () => {
 
     await expect(tickRepo(repo, ctx)).resolves.toBeDefined(); // caught, not thrown
     expect(slots.globalActive).toBe(0); // no leak
+  });
+});
+
+describe('C5 — an in-flight issue is not dispatched twice across overlapping passes (#18)', () => {
+  it('a second pass skips an issue whose prior agent is still running, then resumes after', async () => {
+    // a runner that blocks until released, so the first pass's agent stays in-flight
+    let releaseAgent: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      releaseAgent = r;
+    });
+    const inputs: unknown[] = [];
+    const blockingRunner = {
+      runner: {
+        run: async (i: never) => {
+          inputs.push(i);
+          await gate;
+          return { status: 'in_progress' as const, summary: '' };
+        },
+      },
+      inputs,
+    };
+    const adapter = recordingAdapter({
+      snapshot: makeSnapshot({ issue: { labels: [labels.inProgress] } }),
+    });
+    // global + per-repo headroom: the slot cap alone would NOT stop a second dispatch —
+    // only the in-flight guard does.
+    const { ctx, inFlight } = buildContext({
+      adapter,
+      runner: blockingRunner as never,
+      settings: defaultSettings({ concurrency: { globalMax: 4, maxActive: 2 } }),
+      slots: new SlotAccountant(4),
+    });
+    const key = repoKey(repo);
+
+    // pass 1: launches the (blocking) agent and claims the issue
+    const r1 = await evaluateLifecycle(repo, ctx);
+    expect(r1.pending).toHaveLength(1);
+    expect(inFlight.has(key, 42)).toBe(true);
+
+    // pass 2 while the agent is still in-flight: skipped — no second dispatch
+    const r2 = await evaluateLifecycle(repo, ctx);
+    expect(r2.pending).toHaveLength(0);
+
+    // let the first agent finish → the claim clears
+    releaseAgent();
+    await Promise.all(r1.pending);
+    expect(inFlight.has(key, 42)).toBe(false);
+
+    // a later pass dispatches again (normal resume), proving the guard only blocks overlap
+    const r3 = await evaluateLifecycle(repo, ctx);
+    expect(r3.pending).toHaveLength(1);
+    await Promise.all(r3.pending);
+    expect(inputs).toHaveLength(2); // one per non-overlapping pass, never the skipped one
   });
 });
 

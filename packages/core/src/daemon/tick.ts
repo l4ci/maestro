@@ -117,6 +117,14 @@ export async function evaluateLifecycle(
   }
 
   for (const { iid } of issues) {
+    // #18: claim the issue BEFORE any await. A repo stays "due" until this pass's agent work
+    // settles, so overlapping tick passes re-enter here; without a per-issue claim a free
+    // slot (max_active ≥ 2) would stack a second agent on the same workspace. Capacity is
+    // the slot accountant's; UNIQUENESS is the in-flight set's. Released below if this pass
+    // launches no work, else when that work settles.
+    if (ctx.inFlight.has(key, iid)) continue;
+    ctx.inFlight.add(key, iid);
+    let launched: { active: boolean; promise?: Promise<void> } = { active: false };
     try {
       const snapshot = await ctx.adapter.getSnapshot(repo, iid);
       const slotAvailable = ctx.slots.available(key, ctx.settings.concurrency.maxActive);
@@ -127,11 +135,17 @@ export async function evaluateLifecycle(
         workspaceExists: ctx.workspace.workspaceExists(repo, iid),
         workComplete: detectWorkComplete(snapshot),
       });
-      const launched = beginIntent(intent, snapshot, ctx, key, slotAvailable);
+      launched = beginIntent(intent, snapshot, ctx, key, slotAvailable);
       if (launched.active) active = true;
-      if (launched.promise) pending.push(launched.promise);
+      if (launched.promise) {
+        pending.push(launched.promise.finally(() => ctx.inFlight.delete(key, iid)));
+      }
     } catch (err) {
       ctx.log.error('lifecycle: issue tick failed', { repo: key, iid, err: String(err) });
+    } finally {
+      // No launched work (no-op intent, queued-no-slot, or a throw) → release the claim so
+      // the next due pass re-evaluates this issue.
+      if (!launched.promise) ctx.inFlight.delete(key, iid);
     }
   }
   return { pending, active };

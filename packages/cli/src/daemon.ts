@@ -32,6 +32,7 @@ import {
   type ForgeAdapter,
   GithubAdapter,
   GitlabAdapter,
+  InFlightSet,
   type Logger,
   type MaestroConfig,
   NodeExec,
@@ -137,6 +138,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
   );
   const runner = new ClaudeRunner(exec, { secretEnvKeys });
   const slots = new SlotAccountant(config.defaults.concurrency.global_max);
+  const inFlight = new InFlightSet(); // per-issue dedup across overlapping passes (#18)
   const scheduler = new Scheduler(
     {
       active: config.defaults.poll_interval_active,
@@ -200,6 +202,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
         workflow: cell.frontMatter,
         promptBody: cell.promptBody,
         slots,
+        inFlight,
         log,
       };
       return { repo, ctx };
