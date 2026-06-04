@@ -66,7 +66,10 @@ agent re-learns what it's doing by reading three things: the ticket, the merge
 request description (which doubles as its to-do list), and the recent git diff.
 This sounds wasteful but it's actually robust — there's no fragile session to
 lose, and a human can read the exact same three sources to understand what
-happened.
+happened. Anything that should outlive a single ticket — coding conventions,
+decisions the team has locked in — belongs in the repo's own `CLAUDE.md`, which
+the cold agent reads automatically on every run (see [Repo-specific
+conventions](#repo-specific-conventions)).
 
 ---
 
@@ -412,6 +415,16 @@ new human teammate would need to know on day one belongs there.
 > deliberate. Because the agent starts cold every session, the MR description is
 > its only durable scratchpad — and it's one you can read too. Open the MR and you
 > see exactly what the agent thinks it's doing and how far along it is.
+
+> **A second channel — `CLAUDE.md`.** The conventions block above rides in the
+> WORKFLOW.md body, so Maestro is the one injecting it. But the agent is Claude
+> Code, and Claude Code loads a `CLAUDE.md` from the repo root on its own, every
+> run, with no help from Maestro. That makes `CLAUDE.md` the home for durable,
+> repo-owned knowledge: conventions, decisions the team has settled, architecture
+> notes, links into `docs/` or your ADRs. And because a `CLAUDE.md` can point at
+> other files, you can wire up a whole tree of standing context and keep all of it
+> in git. It fits *the forge is the memory*: the knowledge survives because it's
+> committed, and it changes only when an MR merges it.
 
 ---
 
