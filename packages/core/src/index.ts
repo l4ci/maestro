@@ -11,3 +11,7 @@ export * from './forge/gitlab/gitlab-adapter.js';
 export { GitlabClient, encodeProject } from './forge/gitlab/client.js';
 export type { GitlabClientConfig } from './forge/gitlab/client.js';
 export { ForgeError } from './forge/gitlab/errors.js';
+export * from './workspace/workspace-manager.js';
+export { resolveWorkspacePath, assertInsideRoot, slugifyProject } from './workspace/paths.js';
+export { WorkspacePathError, MissingTokenError } from './workspace/errors.js';
+export * from './runner/claude-runner.js';
