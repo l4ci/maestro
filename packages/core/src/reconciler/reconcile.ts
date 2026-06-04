@@ -6,6 +6,7 @@
 // issue may have lost its assignee yet must still evict its workspace (§0.5).
 
 import type {
+  Comment,
   Intent,
   Issue,
   IssueSnapshot,
@@ -46,6 +47,20 @@ export function deriveState(snapshot: IssueSnapshot, settings: RepoSettings): Li
   if (issue.labels.includes(inReview)) return 'in-review';
   if (issue.labels.includes(inProgress)) return 'in-progress';
   return 'new';
+}
+
+/**
+ * Edge-triggered unblock — the issue-thread mirror of `computeChangesRequested` (§0.3).
+ * The bot's blocking comment (posted alongside the maestro:blocked label, §0.9) is the
+ * block marker; the maintainer's answer is any non-bot comment that post-dates it. Returns
+ * the answering comments in `recentComments` order (newest-first), or [] if the block still
+ * stands. No bot comment ⇒ no marker ⇒ stay parked: never self-unblock on stale or absent
+ * signal (fail-safe, like the changes-requested edge's `blockingAt === undefined → false`).
+ */
+function repliesSinceBlock(recentComments: Comment[], botUser: string): Comment[] {
+  const blockedAt = recentComments.find((c) => c.author.username === botUser)?.createdAt;
+  if (blockedAt === undefined) return [];
+  return recentComments.filter((c) => c.author.username !== botUser && c.createdAt > blockedAt);
 }
 
 export function reconcile(input: ReconcileInput): Intent {
@@ -97,8 +112,15 @@ export function reconcile(input: ReconcileInput): Intent {
       return { kind: 'poll-review' };
     }
 
-    case 'blocked':
-      return { kind: 'blocked-wait' };
+    case 'blocked': {
+      // Edge-triggered unblock: a maintainer reply post-dating the block resumes work,
+      // threading the answer to the agent. The reconciler only reports the edge; the
+      // daemon flips the label and gates on a slot (mirror of apply-changes-requested, §14).
+      const replies = repliesSinceBlock(snapshot.recentComments, settings.botUser);
+      return replies.length > 0
+        ? { kind: 'apply-unblock', feedback: { reviewComments: replies } }
+        : { kind: 'blocked-wait' };
+    }
 
     case 'done':
       // Unreachable for open issues (terminal handled above); kept for totality.

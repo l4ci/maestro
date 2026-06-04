@@ -50,6 +50,7 @@ export type Intent =
   | { kind: 'handoff' }
   | { kind: 'poll-review' }
   | { kind: 'apply-changes-requested'; feedback: AgentFeedback }
+  | { kind: 'apply-unblock'; feedback: AgentFeedback }
   | { kind: 'merge'; strategy: MergeStrategy; deleteSource: boolean }
   | { kind: 'cleanup' }
   | { kind: 'blocked-wait' }

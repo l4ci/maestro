@@ -8,6 +8,7 @@ import {
   recordingAdapter,
   repo,
   scriptedRunner,
+  user,
 } from './helpers/daemon.js';
 
 // Part A — single-tick lifecycle. One acting intent per slice. We assert the daemon's
@@ -88,6 +89,69 @@ describe('A3 — apply-changes-requested feeds feedback back to the agent', () =
       'please rename the handler',
     ]);
     expect(slots.globalActive).toBe(0);
+  });
+});
+
+describe('A3b — apply-unblock resumes a blocked issue with the maintainer answer', () => {
+  it('flips blocked→in-progress and runs the agent with the reply threaded in', async () => {
+    const snap = makeSnapshot({ issue: { labels: [labels.blocked] } });
+    // newest-first: maintainer reply (12:00) post-dates the bot block comment (10:00)
+    snap.recentComments = [
+      {
+        id: 'h1',
+        author: user('reporter'),
+        body: 'use postgres',
+        createdAt: '2026-06-04T12:00:00Z',
+      },
+      {
+        id: 'b1',
+        author: user('maestro-bot'),
+        body: '🚧 Blocked — agent needs input:\n\nwhich database?',
+        createdAt: '2026-06-04T10:00:00Z',
+      },
+    ];
+    const adapter = recordingAdapter({ snapshot: snap });
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    const { ctx, slots } = buildContext({ adapter, runner });
+
+    await tickRepo(repo, ctx);
+
+    // the edge-retiring label flip: blocked → in-progress
+    expect(adapter.labelOps).toEqual([
+      { iid: 42, set: [labels.inProgress], unset: [labels.blocked] },
+    ]);
+    // the agent runs with the maintainer's answer (not the bot's block comment)
+    expect(runner.inputs).toHaveLength(1);
+    expect(runner.inputs[0]?.context.recentComments.map((c) => c.body)).toEqual(['use postgres']);
+    expect(slots.globalActive).toBe(0);
+  });
+
+  it('queues (no label flip, no run) when no concurrency slot is free', async () => {
+    const snap = makeSnapshot({ issue: { labels: [labels.blocked] } });
+    snap.recentComments = [
+      {
+        id: 'h1',
+        author: user('reporter'),
+        body: 'use postgres',
+        createdAt: '2026-06-04T12:00:00Z',
+      },
+      {
+        id: 'b1',
+        author: user('maestro-bot'),
+        body: '🚧 Blocked',
+        createdAt: '2026-06-04T10:00:00Z',
+      },
+    ];
+    const adapter = recordingAdapter({ snapshot: snap });
+    const { SlotAccountant } = await import('../src/daemon/slots.js');
+    const slots = new SlotAccountant(1);
+    slots.acquire('someone-else'); // global cap already full
+    const { ctx, runnerSpy } = buildContext({ adapter, slots });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.calls).not.toContain('setIssueLabels');
+    expect(runnerSpy.inputs).toHaveLength(0);
   });
 });
 

@@ -183,6 +183,18 @@ function beginIntent(
         promise: guard(runApplyChanges(intent, snapshot, ctx), ctx, meta, release),
       };
     }
+    case 'apply-unblock': {
+      // reconcile does not gate this on a slot; the daemon does (§14). No slot → queue.
+      if (!slotAvailable) {
+        ctx.log.info('unblock queued: no concurrency slot', { repo: key, iid: issue.iid });
+        return { active: false };
+      }
+      const release = ctx.slots.acquire(key);
+      return {
+        active: true,
+        promise: guard(runApplyUnblock(intent, snapshot, ctx), ctx, meta, release),
+      };
+    }
     case 'merge':
       return {
         active: false,
@@ -276,6 +288,24 @@ async function runApplyChanges(
     snapshot.issue.iid,
     [ctx.settings.labels.inProgress],
     [ctx.settings.labels.inReview],
+  );
+  await runAgent(snapshot, snapshot.mr, intent.feedback.reviewComments, ctx);
+}
+
+/** Maintainer answered a blocked issue: flip blocked→in-progress, then run the agent with
+ *  the answer threaded into context (§7 Blocked→in-progress edge). The label flip is what
+ *  retires the edge — without it `deriveState` stays `blocked` and the next tick would
+ *  re-resume on every poll. Mirrors runApplyChanges; the agent re-blocks if it needs more. */
+async function runApplyUnblock(
+  intent: Extract<Intent, { kind: 'apply-unblock' }>,
+  snapshot: IssueSnapshot,
+  ctx: TickContext,
+): Promise<void> {
+  await ctx.adapter.setIssueLabels(
+    snapshot.repo,
+    snapshot.issue.iid,
+    [ctx.settings.labels.inProgress],
+    [ctx.settings.labels.blocked],
   );
   await runAgent(snapshot, snapshot.mr, intent.feedback.reviewComments, ctx);
 }
