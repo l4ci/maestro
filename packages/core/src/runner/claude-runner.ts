@@ -98,16 +98,25 @@ export class ClaudeRunner implements Runner {
 
 /** Cold-session argv. No --resume/--continue ever (every run is cold, §2/§8). */
 export function buildClaudeArgs(input: RunnerInput): string[] {
-  return [
+  const args = [
     '-p',
     '--output-format',
     'stream-json',
     '--verbose',
     '--max-turns',
     String(input.claude.maxTurns),
-    '--permission-mode',
-    input.claude.permissionMode, // honored verbatim — never widened (§13.1)
   ];
+  // The agent is headless: there is no human to approve tool calls. `--permission-mode`
+  // values other than bypass still gate Bash (git/pnpm), so a non-bypass agent can write
+  // files but never commit or run its proof. `bypassPermissions` maps to the flag that
+  // actually skips every prompt; safety comes from workspace ISOLATION (§13.1) — the agent
+  // runs in a throwaway clone with the forge token scrubbed — not from prompting.
+  if (input.claude.permissionMode === 'bypassPermissions') {
+    args.push('--dangerously-skip-permissions');
+  } else {
+    args.push('--permission-mode', input.claude.permissionMode); // honored verbatim (§13.1)
+  }
+  return args;
 }
 
 /** Assemble the stdin payload: operating-protocol prompt body + reconstructed context. */

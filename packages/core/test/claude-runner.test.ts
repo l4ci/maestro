@@ -102,6 +102,23 @@ describe('RUN-3 — claude argv + cold session', () => {
     expect(buildClaudeArgs(input())).not.toContain('--resume');
   });
 
+  it('bypassPermissions emits --dangerously-skip-permissions, not --permission-mode (headless)', () => {
+    const i = input();
+    i.claude.permissionMode = 'bypassPermissions';
+    const args = buildClaudeArgs(i);
+    expect(args).toContain('--dangerously-skip-permissions');
+    expect(args).not.toContain('--permission-mode');
+  });
+
+  it('a non-bypass mode still passes --permission-mode verbatim', () => {
+    const i = input();
+    i.claude.permissionMode = 'acceptEdits';
+    const args = buildClaudeArgs(i);
+    expect(args).toContain('--permission-mode');
+    expect(args).toContain('acceptEdits');
+    expect(args).not.toContain('--dangerously-skip-permissions');
+  });
+
   it('appends the §10 status contract so emission never depends on the WORKFLOW author', () => {
     const p = assemblePrompt(input());
     // every prompt instructs the agent to end with the {status,summary} JSON the daemon parses
