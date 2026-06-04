@@ -157,6 +157,33 @@ describe('unknown routes', () => {
   });
 });
 
+describe('HTML dashboard — browser content-negotiation', () => {
+  it('GET / with Accept: text/html serves the HTML page, never the JSON', async () => {
+    // fetch lets us set a real Accept header (the in-process `call` always omits it).
+    const server = createServer(fakeDeps());
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('no port');
+    try {
+      const res = await fetch(`http://127.0.0.1:${addr.port}/`, {
+        headers: { Accept: 'text/html' },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      expect(await res.text()).toContain('<title>maestro</title>');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it('GET / without an HTML Accept still returns the JSON read-model', async () => {
+    // The page's own data fetch, API clients, and every other test hit this path unchanged.
+    const res = await call(fakeDeps(), 'GET', '/');
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(JSON.parse(res.body)).toEqual(cannedDashboard);
+  });
+});
+
 describe('F3 — wiring smoke (the only socket-binding test)', () => {
   it('binds 127.0.0.1:0, serves GET / and accepts POST /repos', async () => {
     const addRepo = vi.fn(async () => ({ added: true, repo }) as AddResult);

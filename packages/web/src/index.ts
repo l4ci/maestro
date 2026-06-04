@@ -5,3 +5,5 @@ export { createServer } from './server.js';
 export type { ServerDeps } from './server.js';
 export { buildServerDeps } from './deps.js';
 export type { BuildServerDepsArgs } from './deps.js';
+export { startWebServer } from './main.js';
+export { DASHBOARD_HTML } from './page.js';

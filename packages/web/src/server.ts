@@ -8,6 +8,7 @@
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createServer as httpCreateServer } from 'node:http';
 import type { AddResult, DashboardView, IssueView } from '@maestro/core';
+import { DASHBOARD_HTML } from './page.js';
 
 export interface ServerDeps {
   /** Read-only: wraps assembleDashboard for the configured repos. */
@@ -39,6 +40,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
 
   // --- read paths: these close over read-only deps only ---
   if (method === 'GET' && path === '/') {
+    // A browser (Accept: text/html) gets the dashboard page; everything else — API
+    // clients, the page's own data fetch, the unit tests — gets the JSON read-model.
+    if (wantsHtml(req)) return sendHtml(res, 200, DASHBOARD_HTML);
     return sendJson(res, 200, await deps.loadDashboard());
   }
   const issue = path.match(/^\/repos\/([^/]+)$/);
@@ -96,4 +100,15 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(body);
+}
+
+function sendHtml(res: ServerResponse, status: number, html: string): void {
+  res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(html);
+}
+
+/** True only when the client explicitly prefers HTML (a browser navigation). Absent or
+ *  `* /*` Accept stays on the JSON path, so API clients and tests are unaffected. */
+function wantsHtml(req: IncomingMessage): boolean {
+  return (req.headers.accept ?? '').includes('text/html');
 }
