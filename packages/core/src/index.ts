@@ -17,3 +17,4 @@ export { WorkspacePathError, MissingTokenError } from './workspace/errors.js';
 export * from './runner/claude-runner.js';
 export * from './proof/strategies.js';
 export * from './handoff/handoff.js';
+export * from './daemon/index.js';
