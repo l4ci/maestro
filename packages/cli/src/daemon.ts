@@ -122,7 +122,13 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     root: config.defaults.workspaces.root,
     diskCap: config.defaults.workspaces.disk_cap,
     exec,
-    tokenEnv: config.forges.gitlab?.token_env ?? 'MAESTRO_GITLAB_TOKEN',
+    // Resolve the clone token from the repo's OWN forge — one daemon serves repos on
+    // different forges (gh/glab), each with its own token_env (#15).
+    tokenEnv: (repo) => {
+      const env = config.forges[repo.forge]?.token_env;
+      if (!env) throw new Error(`no '${repo.forge}' forge configured for ${repo.project}`);
+      return env;
+    },
   });
   // Scrub the configured forge token(s) from the agent's env (§13.1): the agent acts
   // with the bot's credentials OUTSIDE the workspace, never finds the token INSIDE it.

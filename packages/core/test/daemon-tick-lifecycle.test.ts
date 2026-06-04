@@ -27,6 +27,8 @@ describe('A1 — start-new executes the New path', () => {
       ['createBranch', 'createDraftMR', 'setIssueLabels', 'commentIssue'].includes(c),
     );
     expect(order).toEqual(['createBranch', 'createDraftMR', 'setIssueLabels', 'commentIssue']);
+    // the branch is seeded with a commit BEFORE the PR is opened, else GitHub 422s (#14)
+    expect(ws.seeded).toEqual([{ dir: '/ws/42', branch: adapter.branches[0]?.name }]);
     // branch + MR are consistent and target the resolved git target
     expect(adapter.branches[0]?.fromRef).toBe('main');
     expect(adapter.createdMRs[0]?.sourceBranch).toBe(adapter.branches[0]?.name);

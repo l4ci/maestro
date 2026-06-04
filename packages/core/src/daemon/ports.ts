@@ -37,6 +37,10 @@ export interface Workspace {
    *  token scrubbed (§13.1), so the DAEMON owns the push — without this the agent's work
    *  never reaches the PR. Push-only (no add/commit): the agent already committed. */
   pushBranch(handle: WorkspaceHandleLike, branchName: string): Promise<void>;
+  /** Seed the fresh work branch with an empty commit + push so the forge will open a PR —
+   *  GitHub rejects a PR whose head has no commits beyond base. Called in start-new before
+   *  createDraftMR; the agent's real commits land on top. */
+  seedBranch(handle: WorkspaceHandleLike, branchName: string): Promise<void>;
   evict(dir: string): Promise<void>;
   workspaceExists(repo: RepoRef, iid: number): boolean;
   listWorkspaces(repo: RepoRef): { dir: string; iid: number }[];

@@ -206,6 +206,7 @@ export interface WorkspaceFake extends Workspace {
   dirs: { dir: string; iid: number }[];
   ensured: { iid: number; fromRef: string }[]; // records ensureWorkspace(repo, iid, fromRef)
   pushed: { dir: string; branch: string }[]; // records pushBranch(handle, branch)
+  seeded: { dir: string; branch: string }[]; // records seedBranch(handle, branch)
 }
 
 /** Fake workspace: configurable existing dirs; eviction removes from the list. */
@@ -219,12 +220,14 @@ export function fakeWorkspace(
     dirs,
     ensured: [],
     pushed: [],
+    seeded: [],
     ensureWorkspace: async (r, iid, fromRef): Promise<WorkspaceHandleLike> => {
       ws.ensured.push({ iid, fromRef });
       return { dir: `/ws/${iid}`, repo: r, iid };
     },
     prepareBranch: async () => {},
     pushBranch: async (handle, branch) => void ws.pushed.push({ dir: handle.dir, branch }),
+    seedBranch: async (handle, branch) => void ws.seeded.push({ dir: handle.dir, branch }),
     evict: async (dir: string) => {
       ws.evicted.push(dir);
       const i = ws.dirs.findIndex((d) => d.dir === dir);
