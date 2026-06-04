@@ -122,8 +122,25 @@ export function assemblePrompt(input: RunnerInput): string {
       at: c.createdAt,
     })),
   };
-  return `${input.promptBody}\n\n--- CONTEXT (reconstructed from GitLab) ---\n${JSON.stringify(ctx, null, 2)}\n`;
+  return (
+    `${input.promptBody}\n\n` +
+    `--- CONTEXT (reconstructed from the forge) ---\n${JSON.stringify(ctx, null, 2)}\n\n` +
+    `--- HOW TO REPORT (required) ---\n${STATUS_CONTRACT}\n`
+  );
 }
+
+/** The §10 status contract, appended to EVERY prompt so emission never depends on the
+ *  per-repo WORKFLOW author getting it right. The daemon consumes only this final line; the
+ *  agent has no forge token, so the daemon (not the agent) acts on it. */
+export const STATUS_CONTRACT =
+  'Make your changes as atomic git commits in this working directory — the daemon pushes ' +
+  'them; never push or use the network yourself. You communicate ONLY through your final ' +
+  'message: end it with EXACTLY one JSON object on its own line, with nothing after it:\n' +
+  '  {"status":"done","summary":"<what you changed>"}          — work complete, hand off for review\n' +
+  '  {"status":"needs_input","summary":"<your questions>"}     — you need a human decision; you will be\n' +
+  '                                                              marked blocked and the summary is posted to\n' +
+  '                                                              them verbatim. Put questions HERE, never in a file.\n' +
+  '  {"status":"in_progress","summary":"<where you are>"}      — you ran out of turns; will resume next tick';
 
 interface StreamLine {
   type?: string;

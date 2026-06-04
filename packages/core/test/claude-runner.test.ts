@@ -101,6 +101,15 @@ describe('RUN-3 — claude argv + cold session', () => {
     expect(p).toContain('please fix');
     expect(buildClaudeArgs(input())).not.toContain('--resume');
   });
+
+  it('appends the §10 status contract so emission never depends on the WORKFLOW author', () => {
+    const p = assemblePrompt(input());
+    // every prompt instructs the agent to end with the {status,summary} JSON the daemon parses
+    expect(p).toContain('HOW TO REPORT');
+    expect(p).toContain('"status":"needs_input"');
+    expect(p).toContain('"status":"done"');
+    expect(p).toMatch(/never push|daemon pushes/i); // agent commits; daemon pushes
+  });
 });
 
 // --- RUN-4: malformed / truncated → safe in_progress ----------------------

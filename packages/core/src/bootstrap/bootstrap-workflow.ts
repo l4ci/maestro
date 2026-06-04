@@ -26,8 +26,9 @@ suggestion into the real, correct WORKFLOW.md — not to implement a feature.
 2. **Ask what you cannot safely infer** — the exact test and lint commands, the proof
    strategy (\`playwright\` | \`test-output\` | \`diff-summary\` | \`none\`) and its command,
    the target branch + merge strategy, how to boot a runnable instance (if any), and the
-   definition of done. Post these as ONE clear comment and STOP (you are blocked) until the
-   maintainer answers. Do NOT guess commands or conventions you are unsure about.
+   definition of done. Put the questions in your needs_input summary (see HOW TO REPORT
+   below) — that is what reaches the maintainer; do NOT write them to a file. You will be
+   marked blocked until they answer. Do NOT guess commands or conventions you are unsure of.
 3. **Finalize** — once answered, edit the WORKFLOW.md on the PR branch to the final version,
    commit it, and finish. The maintainer reviews and merges the PR; that is what makes this
    repo's workflow real.`;
