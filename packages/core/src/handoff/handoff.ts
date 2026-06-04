@@ -27,6 +27,16 @@ function proofCommentBody(proof: ProofResult): string {
   return `${header}\n\n${proof.summary}\n\n${DONE_SENTINEL}`;
 }
 
+/** Idempotency marker for the fallback reviewer @-mention (handoff step 3, #6). */
+const REVIEW_PING_SENTINEL = '<!-- maestro:reviewer-ping -->';
+
+function reviewPingBody(ticketCreator: string): string {
+  return (
+    `@${ticketCreator} this is ready for your review. I couldn't assign you to the MR ` +
+    `(you may not have access to this repo), so flagging it here instead.\n\n${REVIEW_PING_SENTINEL}`
+  );
+}
+
 /**
  * Execute the §7 handoff sequence idempotently. Reads current forge state once, then
  * runs each step only if its predicate is unsatisfied. Matches the frozen HandoffFn.
@@ -48,6 +58,17 @@ export async function handoff(input: HandoffInput): Promise<void> {
   const assigned = (mr?.assignees ?? []).some((a) => a.username === ticketCreator);
   if (!assigned) {
     await adapter.assignMR(repo, mrIid, ticketCreator);
+    // GitHub/GitLab SILENTLY DROP an un-assignable user (a non-collaborator ticket author on a
+    // public repo, or a misconfigured bot_user) — assignMR doesn't throw, so the guard above
+    // can't see the no-op and the human would never be pinged. Re-read; if the assignee didn't
+    // land, @-mention them instead (a mention notifies anyone, access or not). Idempotent via a
+    // sentinel so crash-recovery re-runs don't double-ping (#6).
+    const after = await adapter.getSnapshot(repo, issueIid);
+    const landed = (after.mr?.assignees ?? []).some((a) => a.username === ticketCreator);
+    const alreadyPinged = snap.recentComments.some((c) => c.body.includes(REVIEW_PING_SENTINEL));
+    if (!landed && !alreadyPinged) {
+      await adapter.commentIssue(repo, issueIid, reviewPingBody(ticketCreator));
+    }
   }
 
   // 4. Un-draft — guarded by draft state.

@@ -61,13 +61,29 @@ function snapshot(
   };
 }
 
-/** Recording fake adapter: pushes each mutating method onto `calls`. */
-function recorder(snap: IssueSnapshot) {
+/** Recording fake adapter: pushes each mutating method onto `calls`. `assignLands` models
+ *  whether the forge actually applies the assignee — GitHub/GitLab silently drop an
+ *  un-assignable user, so a re-read (getSnapshot) reflects it only when it landed. */
+function recorder(snap: IssueSnapshot, opts: { assignLands?: boolean } = {}) {
+  const assignLands = opts.assignLands ?? true;
   const calls: string[] = [];
   const assigned: string[] = [];
+  const comments: string[] = [];
   const adapter: Partial<ForgeAdapter> = {
-    getSnapshot: async () => snap,
-    commentIssue: async () => void calls.push('commentIssue'),
+    getSnapshot: async () =>
+      snap.mr
+        ? {
+            ...snap,
+            mr: {
+              ...snap.mr,
+              assignees: [...snap.mr.assignees, ...(assignLands ? assigned.map(user) : [])],
+            },
+          }
+        : snap,
+    commentIssue: async (_r, _i, body) => {
+      calls.push('commentIssue');
+      comments.push(body);
+    },
     commentMR: async () => void calls.push('commentMR'),
     assignMR: async (_r, _iid, username) => {
       calls.push('assignMR');
@@ -76,7 +92,7 @@ function recorder(snap: IssueSnapshot) {
     setDraft: async () => void calls.push('setDraft'),
     setIssueLabels: async () => void calls.push('setIssueLabels'),
   };
-  return { adapter: adapter as ForgeAdapter, calls, assigned };
+  return { adapter: adapter as ForgeAdapter, calls, assigned, comments };
 }
 
 const proof: ProofResult = { ok: true, kind: 'test-output', summary: 'all green' };
@@ -149,6 +165,42 @@ describe('Slice 6 — human pinged exactly once', () => {
     };
     await expect(handoff(hin(adapter))).rejects.toThrow('network');
     expect(calls).not.toContain('assignMR');
+  });
+});
+
+// --- Slice 6b: un-assignable reviewer → @-mention fallback (#6) -------------
+
+describe('Slice 6b — un-assignable reviewer falls back to an @-mention (#6)', () => {
+  const PING = '<!-- maestro:reviewer-ping -->';
+
+  it('pings the ticket creator when the assign silently no-ops', async () => {
+    const { adapter, calls, comments } = recorder(snapshot(), { assignLands: false });
+    await handoff(hin(adapter));
+    expect(calls.filter((c) => c === 'assignMR')).toHaveLength(1); // attempted
+    const ping = comments.find((b) => b.includes('@reporter'));
+    expect(ping).toBeDefined();
+    expect(ping).toContain('review');
+    expect(ping).toContain(PING);
+    // the rest of the sequence still completes
+    expect(calls).toContain('setDraft');
+    expect(calls).toContain('setIssueLabels');
+  });
+
+  it('does not ping when the assign lands', async () => {
+    const { adapter, comments } = recorder(snapshot(), { assignLands: true });
+    await handoff(hin(adapter));
+    expect(comments.some((b) => b.includes('@reporter'))).toBe(false);
+  });
+
+  it('idempotent: a crash-recovery re-run does not re-ping', async () => {
+    const { adapter, calls } = recorder(
+      snapshot({ comments: [`### Proof\nok\n${DONE_SENTINEL}`, PING] }),
+      { assignLands: false },
+    );
+    await handoff(hin(adapter));
+    // proof already posted AND already pinged → no commentIssue at all
+    expect(calls).not.toContain('commentIssue');
+    expect(calls).toEqual(['assignMR', 'setDraft', 'setIssueLabels']);
   });
 });
 
