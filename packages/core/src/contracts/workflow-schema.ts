@@ -38,7 +38,11 @@ export const WorkflowSchema = z.object({
     .object({
       command: z.string().default('claude'),
       max_turns: z.number().int().positive().default(40),
-      permission_mode: z.string().default('bypassPermissions'),
+      // Constrained to Claude's real modes (no free string). bypassPermissions maps to
+      // --dangerously-skip-permissions in the runner; the rest pass through verbatim.
+      permission_mode: z
+        .enum(['default', 'acceptEdits', 'plan', 'bypassPermissions'])
+        .default('bypassPermissions'),
     })
     .default({}),
   concurrency: z.object({ max_active: z.number().int().positive() }).default({ max_active: 2 }),
