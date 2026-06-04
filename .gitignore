@@ -2,9 +2,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# Pure caches — re-derivable, never committed (spec §3)
-workspaces/
-logs/
+# Pure caches — re-derivable, never committed (spec §3). Anchored to repo root so
+# they never shadow source dirs like packages/core/src/logs/.
+/workspaces/
+/logs/
 
 # Secrets — never committed (spec §5)
 .env

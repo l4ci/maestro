@@ -18,3 +18,6 @@ export * from './runner/claude-runner.js';
 export * from './proof/strategies.js';
 export * from './handoff/handoff.js';
 export * from './daemon/index.js';
+export * from './onboarding/add-repo.js';
+export * from './views/assemble.js';
+export * from './logs/file-log-reader.js';

@@ -1,0 +1,35 @@
+// Thin wiring: turn the real core routines (assembleDashboard / assembleIssue / addRepo)
+// into the seam-shaped ServerDeps that createServer consumes. Deliberately UN-unit-tested —
+// it's pure plumbing of real forge/git I/O (integration territory). The unit tests inject
+// fakes straight into createServer; this helper only exists so a production entrypoint can
+// say `createServer(buildServerDeps(...))` without duplicating the read-only/write split.
+
+import {
+  type AddRepoDeps,
+  type AssembleDeps,
+  type RepoRef,
+  addRepo,
+  assembleDashboard,
+  assembleIssue,
+} from '@maestro/core';
+import type { ServerDeps } from './server.js';
+
+export interface BuildServerDepsArgs {
+  /** The repos the dashboard projects (from the loaded config). */
+  repos: RepoRef[];
+  /** Read-only assembly seam (read-only-narrowed adapter inside). */
+  assemble: AssembleDeps;
+  /** Write seam for POST /repos — the SAME addRepo `maestro add` uses. */
+  add: AddRepoDeps;
+  /** Resolve a repo id (the :id path segment) back to a RepoRef for /repos/:id. */
+  repoForId: (repoId: string) => RepoRef;
+}
+
+export function buildServerDeps(args: BuildServerDepsArgs): ServerDeps {
+  return {
+    loadDashboard: () => assembleDashboard(args.repos, args.assemble),
+    loadIssue: (repoId, iid) => assembleIssue(args.repoForId(repoId), iid, args.assemble),
+    // commit:true by default — the web `add` has the same effect as `maestro add` (§8).
+    addRepo: (url) => addRepo({ url, commit: true }, args.add),
+  };
+}

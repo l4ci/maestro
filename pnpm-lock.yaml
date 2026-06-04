@@ -46,6 +46,10 @@ importers:
       '@maestro/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: 22.10.5
+        version: 22.10.5
 
 packages:
 
