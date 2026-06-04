@@ -9,6 +9,7 @@ export const DASHBOARD_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
 <title>maestro</title>
 <style>
   :root { color-scheme: light dark; }
@@ -57,6 +58,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   .s-blocked { background:#3a1216; color:#f47067; }
   .s-done { background:#12331c; color:#57ab5a; }
   .empty { color: #768390; padding: 16px; }
+  .err { color: #f47067; padding: 12px 16px; font-size: 13px; word-break: break-word; }
   #msg { min-height: 20px; color: #f47067; font-size: 13px; margin-bottom: 12px; }
 </style>
 </head>
@@ -89,16 +91,22 @@ function render(view) {
     return;
   }
   root.innerHTML = view.repos.map((r) => {
-    const counts = STATES
-      .filter((s) => r.counts[s] > 0)
-      .map((s) => badge(s) + ' ' + r.counts[s])
-      .join('  ') || '<span class="tag">idle</span>';
-    const rows = (r.issues || []).length
-      ? r.issues.map((i) =>
-          '<tr><td class="iid">#' + i.iid + '</td>' +
-          '<td class="state">' + badge(i.state) + '</td>' +
-          '<td>' + escapeHtml(i.title) + '</td></tr>').join('')
-      : '<tr><td class="empty" colspan="3">no open issues assigned to the bot</td></tr>';
+    // A repo whose forge call failed carries an error marker — show it as unreachable
+    // instead of a misleading idle, so broken auth never looks like a healthy empty repo.
+    const counts = r.error
+      ? '<span class="badge s-blocked">unreachable</span>'
+      : (STATES
+          .filter((s) => r.counts[s] > 0)
+          .map((s) => badge(s) + ' ' + r.counts[s])
+          .join('  ') || '<span class="tag">idle</span>');
+    const rows = r.error
+      ? '<tr><td class="err" colspan="3">⚠ ' + escapeHtml(r.error) + '</td></tr>'
+      : ((r.issues || []).length
+          ? r.issues.map((i) =>
+              '<tr><td class="iid">#' + i.iid + '</td>' +
+              '<td class="state">' + badge(i.state) + '</td>' +
+              '<td>' + escapeHtml(i.title) + '</td></tr>').join('')
+          : '<tr><td class="empty" colspan="3">no open issues assigned to the bot</td></tr>');
     return '<div class="repo"><h2>' + escapeHtml(r.repo.project) +
       '<span class="counts">' + counts + '</span></h2>' +
       '<table>' + rows + '</table></div>';
