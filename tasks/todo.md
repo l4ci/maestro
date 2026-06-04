@@ -57,9 +57,21 @@ deleted the previous M1–M7 set.
       composition root. NOTE: the logs-cache WRITER is still absent — M5 ships a
       console logger, so `FileLogReader` returns [] until a writer lands (deferred
       M5 obligation; reader + format are ready).**
-- [ ] **M7 — GitHub adapter** — `maestro-07-github-adapter.md`
+- [x] **M7 — GitHub adapter** — `maestro-07-github-adapter.md`
       `gh`; flat `maestro:*` labels w/ adapter-enforced mutual exclusion; Projects
       V2 deferred. *Proof the abstraction held: reconciler + daemon unchanged.*
+      **✓ implemented (36 new unit tests). `GithubAdapter` over `gh api` (`GithubClient`
+      + `normalize.ts`), all 14 §0.3 methods idempotent; `ensureBoard` left undefined
+      (Slice 11 asserts absent). Three divergences only: flat-label mutual exclusion in
+      `setIssueLabels`, review-derived `ApprovalState` + edge-triggered `changesRequested`
+      (latest-per-reviewer), GitHub-native `draft` + GraphQL ready/draft toggle. Token in
+      `GH_TOKEN` env, never argv. HEADLINE PROOF: `core/reconciler` + `core/daemon`
+      byte-for-byte unchanged — GitHub drops in only at the composition root
+      (`cli/daemon.ts buildAdapters`, `cli/main.ts makeAdapter`) via the pre-built
+      `selectAdapter`/`forges.github` seams. Tests mirror M2's inline-builder pattern (not
+      the plan's JSON `__fixtures__`, which M2 never materialized). Live New→Done E2E
+      env-gated (`MAESTRO_GITHUB_IT=1`) — deferred until a scratch GitHub repo + token
+      exist (mirrors M2/M3/M5); the reconcile-over-real-getSnapshot smoke is wired.**
 - [ ] **M8 — Bootstrap & self-manage (closeout)** — `maestro-08-bootstrap-and-self-manage.md`
       `maestro add` onboarding dogfoods the lifecycle (§16); maestro watches itself
       (§12); QA pyramid + §13/§13.1 security audit closeout. *Canonical v1 acceptance.*
