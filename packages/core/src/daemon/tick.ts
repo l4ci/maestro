@@ -240,6 +240,9 @@ async function runStartNew(
   const handle = await ctx.workspace.ensureWorkspace(repo, issue.iid, target);
   await ctx.workspace.prepareBranch(handle, intent.branch);
   await ctx.adapter.createBranch(repo, intent.branch, target);
+  // Seed the branch with an empty commit before opening the PR: GitHub 422s a PR whose head
+  // has no commits beyond base, and at this point the branch still equals `target` (#14).
+  await ctx.workspace.seedBranch(handle, intent.branch);
   const mr = await ctx.adapter.createDraftMR(repo, {
     sourceBranch: intent.branch,
     targetBranch: target,

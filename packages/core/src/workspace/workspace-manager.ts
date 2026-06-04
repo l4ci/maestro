@@ -20,7 +20,10 @@ export interface WorkspaceManagerConfig {
   root: string;
   diskCap: number; // bytes (§14 workspaces.disk_cap)
   exec: Exec;
-  tokenEnv: string; // NAME of the env var holding the forge token (§5)
+  /** NAME of the env var holding the forge token (§5). A function resolves it PER REPO so
+   *  one manager can clone repos on different forges (gh/glab) with their own tokens; a
+   *  bare string is the single-forge shorthand. */
+  tokenEnv: string | ((repo: RepoRef) => string);
   getEnv?: (key: string) => string | undefined; // injectable for tests; defaults to process.env
   now?: () => number; // injectable clock for LRU recency
 }
@@ -33,7 +36,7 @@ export class WorkspaceManager {
   readonly #root: string;
   readonly #diskCap: number;
   readonly #exec: Exec;
-  readonly #tokenEnv: string;
+  readonly #tokenEnv: string | ((repo: RepoRef) => string);
   readonly #getEnv: (key: string) => string | undefined;
   readonly #now: () => number;
   readonly #recency = new Map<string, number>();
@@ -50,7 +53,7 @@ export class WorkspaceManager {
   /** Materialize (clone or reuse) the per-issue workspace and reset it to `fromRef`. */
   async ensureWorkspace(repo: RepoRef, iid: number, fromRef: string): Promise<WorkspaceHandle> {
     const dir = resolveWorkspacePath(this.#root, repo, iid);
-    const auth = this.#cloneAuth();
+    const auth = this.#cloneAuth(repo);
 
     if (existsSync(join(dir, '.git'))) {
       // reuse: fetch + hard reset, no clone
@@ -74,7 +77,7 @@ export class WorkspaceManager {
    *  after the agent runs: the agent commits locally but its env has the forge token
    *  scrubbed (§13.1), so the daemon owns the push. No-op when there's nothing to push. */
   async pushBranch(handle: WorkspaceHandle, branchName: string): Promise<void> {
-    const auth = this.#cloneAuth();
+    const auth = this.#cloneAuth(handle.repo);
     await this.#git([...auth.args, '-C', handle.dir, 'push', '-u', 'origin', branchName], auth.env);
     this.#touch(handle.dir);
   }
@@ -86,7 +89,7 @@ export class WorkspaceManager {
     handle: WorkspaceHandle,
     opts: { paths: string[]; message: string; branch: string },
   ): Promise<void> {
-    const auth = this.#cloneAuth();
+    const auth = this.#cloneAuth(handle.repo);
     await this.#git(['-C', handle.dir, 'add', ...opts.paths]);
     // Identity via -c so a headless clone with no configured git user can still commit.
     await this.#git([
@@ -104,6 +107,29 @@ export class WorkspaceManager {
       [...auth.args, '-C', handle.dir, 'push', '-u', 'origin', opts.branch],
       auth.env,
     );
+    this.#touch(handle.dir);
+  }
+
+  /** Seed the fresh work branch with one empty commit and push it. GitHub refuses to open a
+   *  PR whose head has no commits beyond base ("No commits between …"); GitLab tolerates an
+   *  empty-diff MR but this keeps the New-issue path forge-uniform. The daemon calls this in
+   *  start-new BEFORE createDraftMR; the agent's real commits land on top and push later. */
+  async seedBranch(handle: WorkspaceHandle, branchName: string): Promise<void> {
+    const auth = this.#cloneAuth(handle.repo);
+    // Identity via -c so a headless clone with no configured git user can still commit.
+    await this.#git([
+      '-C',
+      handle.dir,
+      '-c',
+      'user.email=maestro-bot@users.noreply',
+      '-c',
+      'user.name=maestro',
+      'commit',
+      '--allow-empty',
+      '-m',
+      `maestro: start work on #${handle.iid}`,
+    ]);
+    await this.#git([...auth.args, '-C', handle.dir, 'push', '-u', 'origin', branchName], auth.env);
     this.#touch(handle.dir);
   }
 
@@ -156,9 +182,10 @@ export class WorkspaceManager {
 
   // --- internals ----------------------------------------------------------
 
-  #cloneAuth(): { args: string[]; env: Record<string, string> } {
-    const token = this.#getEnv(this.#tokenEnv);
-    if (!token) throw new MissingTokenError(this.#tokenEnv);
+  #cloneAuth(repo: RepoRef): { args: string[]; env: Record<string, string> } {
+    const tokenEnv = typeof this.#tokenEnv === 'function' ? this.#tokenEnv(repo) : this.#tokenEnv;
+    const token = this.#getEnv(tokenEnv);
+    if (!token) throw new MissingTokenError(tokenEnv);
     // reset any inherited helper, then install ours; token rides in env only
     return {
       args: ['-c', 'credential.helper=', '-c', `credential.helper=${CRED_HELPER}`],
