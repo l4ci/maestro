@@ -30,6 +30,7 @@ import {
   ConfigStore,
   type Exec,
   type ForgeAdapter,
+  GithubAdapter,
   GitlabAdapter,
   type Logger,
   type MaestroConfig,
@@ -63,18 +64,17 @@ const log: Logger = {
 const systemClock: Clock = { now: () => Date.now() };
 const systemRng: Rng = { next: () => Math.random() };
 
-/** One forge adapter per configured forge (GitHub adapter drops in here at M7). */
+/** One forge adapter per configured forge; selectAdapter() picks per repo.forge. */
 function buildAdapters(config: MaestroConfig, exec: Exec): ForgeAdapter[] {
   const out: ForgeAdapter[] = [];
+  const botUser = config.defaults.bot_user;
   if (config.forges.gitlab) {
     const { host, token_env } = config.forges.gitlab;
-    out.push(
-      new GitlabAdapter(exec, {
-        token: process.env[token_env] ?? '',
-        host,
-        botUser: config.defaults.bot_user,
-      }),
-    );
+    out.push(new GitlabAdapter(exec, { token: process.env[token_env] ?? '', host, botUser }));
+  }
+  if (config.forges.github) {
+    const { host, token_env } = config.forges.github;
+    out.push(new GithubAdapter(exec, { token: process.env[token_env] ?? '', host, botUser }));
   }
   return out;
 }
