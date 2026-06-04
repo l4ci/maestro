@@ -70,6 +70,43 @@ export class WorkspaceManager {
     this.#touch(handle.dir);
   }
 
+  /** Push an already-committed branch to origin (authenticated). The daemon calls this
+   *  after the agent runs: the agent commits locally but its env has the forge token
+   *  scrubbed (§13.1), so the daemon owns the push. No-op when there's nothing to push. */
+  async pushBranch(handle: WorkspaceHandle, branchName: string): Promise<void> {
+    const auth = this.#cloneAuth();
+    await this.#git([...auth.args, '-C', handle.dir, 'push', '-u', 'origin', branchName], auth.env);
+    this.#touch(handle.dir);
+  }
+
+  /** Stage EXPLICIT paths, commit, and push the current branch to origin (authenticated,
+   *  same credential helper as clone). Used by bootstrap onboarding to seed a WORKFLOW.md
+   *  onto a fresh PR branch. Never `git add .`/`-A` (§5): only the paths passed in. */
+  async commitAndPush(
+    handle: WorkspaceHandle,
+    opts: { paths: string[]; message: string; branch: string },
+  ): Promise<void> {
+    const auth = this.#cloneAuth();
+    await this.#git(['-C', handle.dir, 'add', ...opts.paths]);
+    // Identity via -c so a headless clone with no configured git user can still commit.
+    await this.#git([
+      '-C',
+      handle.dir,
+      '-c',
+      'user.email=maestro-bot@users.noreply',
+      '-c',
+      'user.name=maestro',
+      'commit',
+      '-m',
+      opts.message,
+    ]);
+    await this.#git(
+      [...auth.args, '-C', handle.dir, 'push', '-u', 'origin', opts.branch],
+      auth.env,
+    );
+    this.#touch(handle.dir);
+  }
+
   /** Does a live (cloned) workspace exist for this issue? Feeds ReconcileInput (§0.5). */
   workspaceExists(repo: RepoRef, iid: number): boolean {
     return existsSync(join(resolveWorkspacePath(this.#root, repo, iid), '.git'));

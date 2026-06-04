@@ -204,6 +204,8 @@ export function scriptedRunner(results: AgentResult | AgentResult[]): RunnerSpy 
 export interface WorkspaceFake extends Workspace {
   evicted: string[];
   dirs: { dir: string; iid: number }[];
+  ensured: { iid: number; fromRef: string }[]; // records ensureWorkspace(repo, iid, fromRef)
+  pushed: { dir: string; branch: string }[]; // records pushBranch(handle, branch)
 }
 
 /** Fake workspace: configurable existing dirs; eviction removes from the list. */
@@ -215,12 +217,14 @@ export function fakeWorkspace(
   const ws: WorkspaceFake = {
     evicted: [],
     dirs,
-    ensureWorkspace: async (r, iid): Promise<WorkspaceHandleLike> => ({
-      dir: `/ws/${iid}`,
-      repo: r,
-      iid,
-    }),
+    ensured: [],
+    pushed: [],
+    ensureWorkspace: async (r, iid, fromRef): Promise<WorkspaceHandleLike> => {
+      ws.ensured.push({ iid, fromRef });
+      return { dir: `/ws/${iid}`, repo: r, iid };
+    },
     prepareBranch: async () => {},
+    pushBranch: async (handle, branch) => void ws.pushed.push({ dir: handle.dir, branch }),
     evict: async (dir: string) => {
       ws.evicted.push(dir);
       const i = ws.dirs.findIndex((d) => d.dir === dir);

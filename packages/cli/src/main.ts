@@ -110,15 +110,42 @@ function buildAssembleDeps(env: Env): { repos: RepoRef[]; deps: AssembleDeps } {
   return { repos, deps: { adapterFor, settingsFor, logs: new FileLogReader(env.logsRoot) } };
 }
 
-/** Build the full (read+write) deps addRepo needs for the §11 onboarding setup. */
-function buildAddDeps(env: Env): AddRepoDeps {
+/** Build the full (read+write) deps addRepo needs for the §11 onboarding setup. Includes
+ *  the bootstrap-PR wiring (workspace + template) when both are resolvable, so `maestro
+ *  add` opens a sample-WORKFLOW PR alongside the issue. */
+function buildAddDeps(env: Env, url: string): AddRepoDeps {
   const exec = new NodeExec();
   const config = loadConfig(env.configPath);
-  return {
+  const deps: AddRepoDeps = {
     exec,
     configPath: env.configPath,
     adapterFor: (repo: RepoRef) => makeAdapter(repo, config, exec),
   };
+
+  // Best-effort: open the sample-WORKFLOW PR too, but only when we can resolve the repo's
+  // forge token env AND read the template. Any gap → fall back to issue-only onboarding.
+  try {
+    const repo = repoRefFromUrl(url, config.forges);
+    const tokenEnv =
+      repo.forge === 'github' ? config.forges.github?.token_env : config.forges.gitlab?.token_env;
+    const templatePath = process.env.MAESTRO_TEMPLATE ?? './templates/WORKFLOW.md';
+    if (tokenEnv) {
+      const workspace = new WorkspaceManager({
+        root: config.defaults.workspaces.root,
+        diskCap: config.defaults.workspaces.disk_cap,
+        exec,
+        tokenEnv,
+      });
+      deps.bootstrapPr = {
+        workspace,
+        templateText: readFileSync(templatePath, 'utf8'),
+        botUser: config.defaults.bot_user,
+      };
+    }
+  } catch {
+    // unresolvable forge / missing template → issue-only onboarding (addRepo handles it).
+  }
+  return deps;
 }
 
 function firstRepo(env: Env): { repo: RepoRef; deps: AssembleDeps } {
@@ -150,7 +177,7 @@ async function dispatch(cmd: ParsedCommand, env: Env): Promise<number> {
       console.error(cmd.message);
       return 1;
     case 'add': {
-      const out = await runAdd(cmd, { addRepo, addDeps: buildAddDeps(env) });
+      const out = await runAdd(cmd, { addRepo, addDeps: buildAddDeps(env, cmd.url) });
       console.log(out);
       return 0;
     }

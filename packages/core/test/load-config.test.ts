@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest';
 import { ConfigStore, inferForge, parseConfig } from '../src/config/load-config.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-const sample = readFileSync(resolve(repoRoot, 'maestro.config.yaml'), 'utf8');
+// The stable example fixture (the live maestro.config.yaml is user data and changes).
+const sample = readFileSync(resolve(repoRoot, 'maestro.config.example.yaml'), 'utf8');
 
 describe('B0 — parse + validate', () => {
   it('parses the sample config and resolves durations→ms and sizes→bytes', () => {

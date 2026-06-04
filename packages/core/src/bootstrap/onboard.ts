@@ -28,6 +28,9 @@ export interface OnboardDeps {
 export interface OnboardResult {
   openedIssue: boolean;
   reason?: 'has-workflow' | 'already-open' | 'opened';
+  /** iid of the bootstrap issue when one was just opened — lets the caller link a
+   *  sample-WORKFLOW PR to it. Present only when reason === 'opened'. */
+  issueIid?: number;
 }
 
 export async function onboard(repo: RepoRef, deps: OnboardDeps): Promise<OnboardResult> {
@@ -51,12 +54,12 @@ export async function onboard(repo: RepoRef, deps: OnboardDeps): Promise<Onboard
   }
 
   const seed = deps.seed ? await deps.seed() : undefined;
-  await adapter.createIssue(repo, {
+  const issue = await adapter.createIssue(repo, {
     title: BOOTSTRAP_TITLE,
     body: bootstrapBody(seed),
     assignToBot: true,
   });
-  return { openedIssue: true, reason: 'opened' };
+  return { openedIssue: true, reason: 'opened', issueIid: issue.iid };
 }
 
 /** Issue body: the onboarding prompt + (when inferred) a ready-to-commit WORKFLOW seed,

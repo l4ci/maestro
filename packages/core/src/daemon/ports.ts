@@ -33,6 +33,10 @@ export interface WorkspaceHandleLike {
 export interface Workspace {
   ensureWorkspace(repo: RepoRef, iid: number, fromRef: string): Promise<WorkspaceHandleLike>;
   prepareBranch(handle: WorkspaceHandleLike, branchName: string): Promise<void>;
+  /** Push the agent's local commits up to the MR branch. The agent's env has the forge
+   *  token scrubbed (§13.1), so the DAEMON owns the push — without this the agent's work
+   *  never reaches the PR. Push-only (no add/commit): the agent already committed. */
+  pushBranch(handle: WorkspaceHandleLike, branchName: string): Promise<void>;
   evict(dir: string): Promise<void>;
   workspaceExists(repo: RepoRef, iid: number): boolean;
   listWorkspaces(repo: RepoRef): { dir: string; iid: number }[];
