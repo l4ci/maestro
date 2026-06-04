@@ -15,8 +15,8 @@ function splitFrontMatter(src: string): { frontMatter: string; body: string } {
   return { frontMatter: m[1] as string, body: m[2] as string };
 }
 
-describe('maestro.config.yaml round-trips through ConfigSchema', () => {
-  const raw = parseYaml(read('maestro.config.yaml'));
+describe('maestro.config.example.yaml round-trips through ConfigSchema', () => {
+  const raw = parseYaml(read('maestro.config.example.yaml'));
 
   it('validates against ConfigSchema', () => {
     expect(() => ConfigSchema.parse(raw)).not.toThrow();
