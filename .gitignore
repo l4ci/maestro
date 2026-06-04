@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Pure caches — re-derivable, never committed (spec §3)
+workspaces/
+logs/
+
+# Secrets — never committed (spec §5)
+.env
+.env.*
+!.env.example
