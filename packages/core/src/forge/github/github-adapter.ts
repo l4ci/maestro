@@ -1,8 +1,10 @@
 // GitHub forge adapter — the SECOND ForgeAdapter implementation (§0.3), built
-// against the now-settled surface M2 (GitLab) established. All I/O flows through
-// the injected Exec seam via GithubClient. Normalizes GitHub JSON to the SAME §0.2
-// model M2 produces, so the reconciler + daemon drive GitHub with ZERO changes —
-// that zero-change property is the milestone's headline proof.
+// against the now-settled surface M2 (GitLab) established. All I/O flows through the
+// injected Exec seam via the shared ForgeCli transport (cli.ts); getSnapshot delegates
+// the choreography to the shared snapshot algorithm (snapshot.ts) and supplies only
+// GitHub-specific primitives. Normalizes GitHub JSON to the SAME §0.2 model M2 produces,
+// so the reconciler + daemon drive GitHub with ZERO changes — that zero-change property
+// is the milestone's headline proof.
 //
 // GitHub diverges from GitLab on exactly three things: (1) FLAT labels `maestro:*`
 // whose mutual exclusion the adapter enforces (GitLab got it free from scoped
@@ -11,6 +13,7 @@
 // construction config (§0.10), mirroring M2. MR≡PR throughout.
 
 import type {
+  ApprovalState,
   CreateIssueArgs,
   CreateMRArgs,
   Exec,
@@ -23,8 +26,9 @@ import type {
   RepoRef,
 } from '../../contracts/index.js';
 import { labelNames } from '../../contracts/labels.js';
-import { GithubClient, type GithubClientConfig, repoSegments } from './client.js';
-import { ForgeError } from './errors.js';
+import { ForgeCli } from '../cli.js';
+import { ForgeError } from '../errors.js';
+import { type ForgePrimitives, assembleSnapshot } from '../snapshot.js';
 import {
   type RawComment,
   type RawCommit,
@@ -42,6 +46,24 @@ import {
 
 const DEFAULT_LABEL_COLOR = '6699cc'; // GitHub label colors are hex WITHOUT the leading '#'
 
+/** Adapter construction config (M0 §0.10). Kept as a named type for the public barrel. */
+export interface GithubClientConfig {
+  token: string;
+  host: string; // github.com or a self-hosted GHE host
+  botUser: string; // edge-trigger / bot assignment
+  commentCap?: number; // recentComments bound (default 50)
+}
+
+/** Split 'org/repo' into URL-encoded path segments for /repos/:owner/:repo. */
+export function repoSegments(project: string): { owner: string; repo: string } {
+  const i = project.indexOf('/');
+  if (i === -1) throw new ForgeError('github', 'GET', project, 0, `invalid repo path '${project}'`);
+  return {
+    owner: encodeURIComponent(project.slice(0, i)),
+    repo: encodeURIComponent(project.slice(i + 1)),
+  };
+}
+
 interface RawLabelObj {
   name: string;
 }
@@ -54,10 +76,16 @@ const MAESTRO_PREFIX = (() => {
 
 export class GithubAdapter implements ForgeAdapter {
   readonly kind = 'github' as const;
-  readonly #c: GithubClient;
+  readonly #c: ForgeCli;
 
   constructor(exec: Exec, cfg: GithubClientConfig) {
-    this.#c = new GithubClient(exec, cfg);
+    this.#c = new ForgeCli(exec, {
+      bin: 'gh',
+      forge: 'github',
+      env: { GH_TOKEN: cfg.token, GH_HOST: cfg.host }, // gh reads these; GH_HOST targets GHE
+      botUser: cfg.botUser,
+      ...(cfg.commentCap !== undefined ? { commentCap: cfg.commentCap } : {}),
+    });
   }
 
   #base(repo: RepoRef): string {
@@ -77,26 +105,7 @@ export class GithubAdapter implements ForgeAdapter {
   }
 
   async getSnapshot(repo: RepoRef, issueIid: number): Promise<IssueSnapshot> {
-    const base = this.#base(repo);
-    const rawIssue = await this.#c.apiRequired<RawIssue>('GET', `${base}/issues/${issueIid}`);
-    const issue = normalizeIssue(rawIssue);
-
-    const lastActor = await this.#lastActor(repo, issueIid);
-    const issueWithActor: Issue = lastActor ? { ...issue, lastActor } : issue;
-
-    const mr = await this.#findMaestroPr(repo, issueIid);
-
-    const comments =
-      (await this.#c.api<RawComment[]>('GET', `${base}/issues/${issueIid}/comments`, {
-        query: { per_page: this.#c.commentCap },
-        paginate: true,
-      })) ?? [];
-    const recentComments = comments
-      .map(normalizeComment)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, this.#c.commentCap);
-
-    return { repo, issue: issueWithActor, recentComments, ...(mr ? { mr } : {}) };
+    return assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap);
   }
 
   async getIssueState(repo: RepoRef, issueIid: number): Promise<'open' | 'closed' | 'missing'> {
@@ -282,44 +291,56 @@ export class GithubAdapter implements ForgeAdapter {
     return top?.actor ? normalizeUser(top.actor) : undefined;
   }
 
-  async #findMaestroPr(repo: RepoRef, issueIid: number): Promise<MergeRequest | undefined> {
+  /** The §0.3 forge-specific fetches the shared snapshot algorithm composes (snapshot.ts).
+   *  GitHub diverges from GitLab on approvals (derived from PR reviews) and label shape,
+   *  but the choreography above the seam is identical. */
+  #primitives(repo: RepoRef): ForgePrimitives {
     const base = this.#base(repo);
-    const open =
-      (await this.#c.api<RawPr[]>('GET', `${base}/pulls`, {
-        query: { state: 'open', per_page: 100 },
-        paginate: true,
-      })) ?? [];
-    const branchPrefix = `maestro/issue-${issueIid}-`;
-    const candidate = open.find(
-      (p) => p.head.ref.startsWith(branchPrefix) || closesThis(p, issueIid),
-    );
-    if (!candidate) return undefined;
-
-    const approvals = await this.#reviewState(repo, candidate.number);
-    return normalizeMergeRequest(candidate, approvals);
+    return {
+      issue: async (iid) =>
+        normalizeIssue(await this.#c.apiRequired<RawIssue>('GET', `${base}/issues/${iid}`)),
+      lastActor: (iid) => this.#lastActor(repo, iid),
+      comments: async (iid) => {
+        const comments =
+          (await this.#c.api<RawComment[]>('GET', `${base}/issues/${iid}/comments`, {
+            query: { per_page: this.#c.commentCap },
+            paginate: true,
+          })) ?? [];
+        return comments.map(normalizeComment);
+      },
+      openMergeRequests: async () => {
+        // GitHub lists PRs repo-wide; the shared matcher filters by branch/closes (snapshot.ts).
+        const open =
+          (await this.#c.api<RawPr[]>('GET', `${base}/pulls`, {
+            query: { state: 'open', per_page: 100 },
+            paginate: true,
+          })) ?? [];
+        return open.map((p) => normalizeMergeRequest(p));
+      },
+      approvalBase: (mrIid) => this.#approvalBase(repo, mrIid),
+      blockingThreadAt: async (mrIid) => changesRequestedSince(await this.#reviews(repo, mrIid)),
+      lastBotPushAt: (mr) => this.#lastBotPushAt(repo, mr.iid),
+    };
   }
 
-  /** Full ApprovalState for a PR: APPROVED/CHANGES_REQUESTED from reviews, plus the
-   *  edge-triggered changesRequested (review newer than the last bot commit, §0.3). */
-  async #reviewState(repo: RepoRef, prNumber: number) {
-    const base = this.#base(repo);
-    const reviews =
-      (await this.#c.api<RawReview[]>('GET', `${base}/pulls/${prNumber}/reviews`, {
+  /** PR reviews for a PR (paginated). Read for both the approval base and the blocking
+   *  timestamp; the shared algorithm short-circuits the second read when no blocking exists. */
+  async #reviews(repo: RepoRef, prNumber: number): Promise<RawReview[]> {
+    return (
+      (await this.#c.api<RawReview[]>('GET', `${this.#base(repo)}/pulls/${prNumber}/reviews`, {
         query: { per_page: 100 },
         paginate: true,
-      })) ?? [];
-    const approvals = normalizeReviews(reviews);
-
-    const since = changesRequestedSince(reviews);
-    if (!since) return approvals; // no blocking review → no need to read commits
-
-    const lastBotPush = await this.#lastBotPush(repo, prNumber);
-    // Unaddressed feedback if there's no bot push since the changes-requested review.
-    const changesRequested = lastBotPush === undefined || since > lastBotPush;
-    return { ...approvals, changesRequested };
+      })) ?? []
+    );
   }
 
-  async #lastBotPush(repo: RepoRef, prNumber: number): Promise<string | undefined> {
+  /** Approval base for a PR: APPROVED/CHANGES_REQUESTED reduced from reviews (§0.2). */
+  async #approvalBase(repo: RepoRef, prNumber: number): Promise<ApprovalState> {
+    return normalizeReviews(await this.#reviews(repo, prNumber));
+  }
+
+  /** Newest bot-authored commit timestamp on the PR (§0.3 edge-trigger half). */
+  async #lastBotPushAt(repo: RepoRef, prNumber: number): Promise<string | undefined> {
     const bot = this.#c.botUser;
     const commits =
       (await this.#c.api<RawCommit[]>('GET', `${this.#base(repo)}/pulls/${prNumber}/commits`, {
@@ -338,8 +359,4 @@ export class GithubAdapter implements ForgeAdapter {
       .sort()
       .at(-1);
   }
-}
-
-function closesThis(p: RawPr, issueIid: number): boolean {
-  return new RegExp(`\\b(?:closes|fixes|resolves)\\s+#${issueIid}\\b`, 'i').test(p.body ?? '');
 }
