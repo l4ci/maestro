@@ -2,9 +2,9 @@
 // already carries the core-derived LifecycleState. Tests build fake views by hand.
 
 import type { DashboardView, IssueView } from '@maestro/core';
-import type { LogLine, RepoRef } from '@maestro/core';
+import type { LogLine, PreflightResult, RepoRef } from '@maestro/core';
 import { describe, expect, it } from 'vitest';
-import { renderList, renderLogs, renderStatus } from '../src/format.js';
+import { renderDoctor, renderList, renderLogs, renderStatus } from '../src/format.js';
 
 const repo = (project: string): RepoRef => ({
   forge: 'gitlab',
@@ -78,5 +78,28 @@ describe('renderLogs (C3)', () => {
 
   it('empty logs is a friendly message, not an error', () => {
     expect(renderLogs([])).toMatch(/no logs yet/i);
+  });
+});
+
+describe('renderDoctor', () => {
+  it('all present → ✓ rows and an OK verdict', () => {
+    const result: PreflightResult = { ok: true, present: ['git', 'glab'], missing: [] };
+    const out = renderDoctor(result);
+    expect(out).toContain('✓ git');
+    expect(out).toContain('✓ glab');
+    expect(out).toMatch(/all required tools found/i);
+  });
+
+  it('missing tool → ✗ row with the reason and a nonzero-worthy verdict', () => {
+    const result: PreflightResult = {
+      ok: false,
+      present: ['git'],
+      missing: [{ bin: 'gh', reason: 'GitHub API transport' }],
+    };
+    const out = renderDoctor(result);
+    expect(out).toContain('✓ git');
+    expect(out).toContain('✗ gh');
+    expect(out).toContain('GitHub API transport');
+    expect(out).toMatch(/missing 1 required tool/i);
   });
 });

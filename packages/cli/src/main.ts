@@ -20,18 +20,21 @@ import {
   type RepoSettings,
   WorkspaceManager,
   addRepo,
+  allBinaries,
   assembleDashboard,
   assembleIssue,
+  checkBinaries,
   deriveWatchSet,
   parseConfig,
   parseWorkflow,
   repoRefFromUrl,
+  requiredBinaries,
   resolveRepoSettings,
   slugifyProject,
 } from '@maestro/core';
 import { runAdd } from './commands/add.js';
 import { attach } from './commands/run.js';
-import { renderList, renderLogs, renderStatus } from './format.js';
+import { renderDoctor, renderList, renderLogs, renderStatus } from './format.js';
 import { type ParsedCommand, parse } from './parse.js';
 
 interface Env {
@@ -128,8 +131,21 @@ function firstRepo(env: Env): { repo: RepoRef; deps: AssembleDeps } {
 async function dispatch(cmd: ParsedCommand, env: Env): Promise<number> {
   switch (cmd.kind) {
     case 'help':
-      console.log('maestro <add|status|list|logs|run> — see docs');
+      console.log('maestro <add|status|list|logs|run|doctor> — see docs');
       return 0;
+    case 'doctor': {
+      // Check the binaries this install actually needs (config-scoped); if the config
+      // can't be read, fall back to probing the full set so doctor still helps mid-setup.
+      let reqs = allBinaries();
+      try {
+        reqs = requiredBinaries(loadConfig(env.configPath));
+      } catch {
+        // config missing/invalid — checking everything is the safe, useful default.
+      }
+      const result = await checkBinaries(new NodeExec(), reqs);
+      console.log(renderDoctor(result));
+      return result.ok ? 0 : 1;
+    }
     case 'usage-error':
       console.error(cmd.message);
       return 1;

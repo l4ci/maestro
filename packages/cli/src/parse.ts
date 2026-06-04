@@ -8,6 +8,7 @@ export type ParsedCommand =
   | { kind: 'list' }
   | { kind: 'logs'; issue: number }
   | { kind: 'run'; issue: number; attach: true }
+  | { kind: 'doctor' }
   | { kind: 'help' }
   | { kind: 'usage-error'; message: string };
 
@@ -56,6 +57,8 @@ export function parse(argv: string[]): ParsedCommand {
       if (!rest.includes('--attach')) return usage('run requires --attach (interactive only)');
       return { kind: 'run', issue, attach: true };
     }
+    case 'doctor':
+      return { kind: 'doctor' };
     default:
       return { kind: 'help' };
   }

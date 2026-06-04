@@ -3,7 +3,13 @@
 // with the reconciler), so the CLI text and the daemon never drift. Edge cases (zero
 // repos, no MR, no logs) render a friendly line, never a crash.
 
-import type { DashboardView, IssueView, LifecycleState, LogLine } from '@maestro/core';
+import type {
+  DashboardView,
+  IssueView,
+  LifecycleState,
+  LogLine,
+  PreflightResult,
+} from '@maestro/core';
 
 // Fixed order so list rows read consistently; ONLY the §0.2 LifecycleState names.
 const STATES: LifecycleState[] = ['new', 'in-progress', 'in-review', 'blocked', 'done'];
@@ -34,4 +40,14 @@ export function renderStatus(view: IssueView): string {
 export function renderLogs(lines: LogLine[]): string {
   if (lines.length === 0) return 'no logs yet';
   return lines.map((l) => `${l.ts} [${l.level}] ${l.msg}`).join('\n');
+}
+
+/** `doctor`: one line per required binary (✓ present / ✗ missing) + a final verdict. */
+export function renderDoctor(result: PreflightResult): string {
+  const ok = result.present.map((bin) => `  ✓ ${bin}`);
+  const bad = result.missing.map((m) => `  ✗ ${m.bin} — not on PATH (needed to ${m.reason})`);
+  const verdict = result.ok
+    ? 'all required tools found'
+    : `missing ${result.missing.length} required tool(s) — install them and re-run`;
+  return [...ok, ...bad, '', verdict].join('\n');
 }

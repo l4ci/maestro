@@ -45,11 +45,13 @@ import {
   WatchedConfig,
   WorkflowStore,
   WorkspaceManager,
+  checkBinaries,
   handoff,
   inferForge,
   parseConfig,
   parseWorkflow,
   proofAndHandoff,
+  requiredBinaries,
   selectAdapter,
   slugifyProject,
   tickDue,
@@ -209,5 +211,38 @@ function safe(fn: () => void, what: string): void {
   }
 }
 
+/** Real CLI boot: preflight the external tools the daemon shells out to (`glab`/`gh`/
+ *  `git`/`claude`, §8/§10) BEFORE looping. A missing binary otherwise hides as an
+ *  endlessly-retried failing tick; here it's one clear error and a nonzero exit.
+ *  startDaemon() stays sync (and preflight-free) so programmatic/test callers are
+ *  unaffected — only this entry path gates on the check. */
+async function boot(): Promise<void> {
+  const configPath = process.env.MAESTRO_CONFIG ?? './maestro.config.yaml';
+  let config: MaestroConfig;
+  try {
+    const parsed = parseConfig(readFileSync(configPath, 'utf8'));
+    if (!parsed.ok) throw new Error(`config invalid: ${parsed.error}`);
+    config = parsed.value;
+  } catch (err) {
+    log.error('daemon: cannot start — config unreadable', { err: String(err) });
+    process.exitCode = 1;
+    return;
+  }
+
+  const preflight = await checkBinaries(new NodeExec(), requiredBinaries(config));
+  if (!preflight.ok) {
+    for (const m of preflight.missing) {
+      log.error('daemon: required tool missing from PATH', { bin: m.bin, needed_to: m.reason });
+    }
+    log.error('daemon: not starting — install the missing tool(s) (try `maestro doctor`)', {
+      missing: preflight.missing.map((m) => m.bin),
+    });
+    process.exitCode = 1;
+    return;
+  }
+
+  startDaemon({ configPath });
+}
+
 const entry = process.argv[1] ?? '';
-if (entry.endsWith('daemon.js') || entry.endsWith('daemon.ts')) startDaemon();
+if (entry.endsWith('daemon.js') || entry.endsWith('daemon.ts')) void boot();

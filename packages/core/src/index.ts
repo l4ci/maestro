@@ -34,3 +34,4 @@ export * from './bootstrap/onboard.js';
 export * from './security/scan-for-secrets.js';
 export * from './views/assemble.js';
 export * from './logs/file-log-reader.js';
+export * from './preflight/check-binaries.js';
