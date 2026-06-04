@@ -72,9 +72,28 @@ deleted the previous M1–M7 set.
       the plan's JSON `__fixtures__`, which M2 never materialized). Live New→Done E2E
       env-gated (`MAESTRO_GITHUB_IT=1`) — deferred until a scratch GitHub repo + token
       exist (mirrors M2/M3/M5); the reconcile-over-real-getSnapshot smoke is wired.**
-- [ ] **M8 — Bootstrap & self-manage (closeout)** — `maestro-08-bootstrap-and-self-manage.md`
+- [x] **M8 — Bootstrap & self-manage (closeout)** — `maestro-08-bootstrap-and-self-manage.md`
       `maestro add` onboarding dogfoods the lifecycle (§16); maestro watches itself
       (§12); QA pyramid + §13/§13.1 security audit closeout. *Canonical v1 acceptance.*
+      **✓ implemented (47 new tests). Part A `bootstrap/infer-workflow-seed.ts`
+      (default-branch probe + pure proof/framework detection + seed rendered through
+      the M1 loader, always WorkflowSchema-validated incl. a negative case). Part B
+      `bootstrap/onboard.ts` — the ONE onboarding routine (add-repo refactored to call
+      it): ensure labels/board → add-when-missing bot issue with the inferred seed +
+      marker, idempotent (no duplicate). Part C: self-manage proven by composing M1
+      `ConfigStore` + M5 `WatchedConfig` (merged edit picked up; bad merge rejected,
+      daemon survives on last-good — already swallow-and-log). Part D security: prompt-
+      injection body is opaque to the reconciler; `--public` opt-in gate
+      (`onboarding/public-guard.ts`); `security/scan-for-secrets.ts` + a live CI gate
+      over `git ls-files`; bootstrap E2E gated `MAESTRO_E2E=1` (runbook, mirrors M2/M5).
+      THESIS PROVEN: `core/reconciler` + `core/daemon/tick` byte-for-byte unchanged;
+      Slice 6 greps them for `bootstrap`/`onboard` and finds none; the bootstrap issue
+      yields the same `start-new` intent as any issue. ONE in-flight contract amendment
+      (AM-17, §0.8): `ExecOptions.env` widened to `Record<string,string|undefined>` so a
+      key→undefined DELETES the inherited var — the runner scrubs the forge token from
+      the agent env (§13.1 hardening; user-approved over document-only). Live forge/agent
+      E2E env-gated/deferred (no scratch repo+token here). v1 DEFINITION OF DONE met:
+      M0–M8 green, spec §1–§16 delivered, §17 items explicitly deferred.**
 
 ## Dependency edges
 
