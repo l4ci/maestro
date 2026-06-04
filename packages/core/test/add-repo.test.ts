@@ -5,10 +5,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { parseConfig } from '../src/config/load-config.js';
 import type {
   CreateIssueArgs,
+  CreateMRArgs,
   ExecResult,
   ForgeAdapter,
   Issue,
   Label,
+  MergeRequest,
   RepoRef,
 } from '../src/contracts/index.js';
 import { BOOTSTRAP_MARKER, labelNames } from '../src/contracts/index.js';
@@ -217,5 +219,75 @@ describe('B6 — --no-commit makes zero git calls', () => {
     await addRepo({ url: 'gitlab.com/group/new', commit: false }, d);
 
     expect(exec.calls.filter((c) => c.cmd === 'git')).toHaveLength(0);
+  });
+});
+
+describe('bootstrapPr — opens a sample-WORKFLOW PR and links the issue', () => {
+  it('after the issue is opened, opens a draft PR and comments the link on the issue', async () => {
+    const p = tmpConfig();
+    const createdMRs: CreateMRArgs[] = [];
+    const comments: { iid: number; body: string }[] = [];
+    const mr = { iid: 7 } as unknown as MergeRequest;
+    const adapter = {
+      kind: 'github',
+      listAssignedOpenIssues: async (): Promise<Issue[]> => [],
+      ensureLabels: async () => {},
+      createIssue: async (_r: RepoRef, args: CreateIssueArgs): Promise<Issue> => ({
+        iid: 1,
+        id: '1',
+        title: args.title,
+        body: args.body,
+        state: 'open',
+        assignees: [],
+        labels: [],
+        author: { username: 'x', id: 'x' },
+        webUrl: 'u',
+      }),
+      createDraftMR: async (_r: RepoRef, args: CreateMRArgs): Promise<MergeRequest> => {
+        createdMRs.push(args);
+        return mr;
+      },
+      commentIssue: async (_r: RepoRef, iid: number, body: string) =>
+        void comments.push({ iid, body }),
+    } as unknown as ForgeAdapter;
+
+    // Fake workspace: no real clone/push, but a REAL temp dir so the seed's WORKFLOW.md
+    // write (production fs path — addRepo doesn't inject writeFile) lands somewhere valid.
+    const wsDir = mkdtempSync(join(tmpdir(), 'maestro-bootstrap-'));
+    roots.push(wsDir);
+    const ws = {
+      ensureWorkspace: async (r: RepoRef, iid: number) => ({ dir: wsDir, repo: r, iid }),
+      prepareBranch: async () => {},
+      commitAndPush: async () => {},
+    };
+    const exec = new FakeExec().on((c) => c.cmd === 'git' && c.args.includes('symbolic-ref'), {
+      code: 0,
+      stdout: 'origin/main\n',
+      stderr: '',
+    });
+
+    const res = await addRepo(
+      { url: 'github.com/org/fresh', commit: false },
+      {
+        exec,
+        configPath: p,
+        adapterFor: () => adapter,
+        hasWorkflow: () => false,
+        bootstrapPr: {
+          workspace: ws,
+          templateText: readFileSync('templates/WORKFLOW.md', 'utf8'),
+          botUser: 'l4ci',
+        },
+      },
+    );
+
+    expect(res.added).toBe(true);
+    expect(createdMRs).toHaveLength(1);
+    expect(createdMRs[0]).toMatchObject({ draft: true, targetBranch: 'main' });
+    expect(createdMRs[0]?.description).toContain('Closes #1');
+    // the bootstrap issue is pointed at the PR
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toMatchObject({ iid: 1 });
+    expect(comments[0]?.body).toContain('#7');
   });
 });
