@@ -212,3 +212,33 @@ describe('A6 sanity — a fresh done has no pre-existing sentinel', () => {
     expect(snap.recentComments.some((c) => c.body.includes(DONE_SENTINEL))).toBe(false);
   });
 });
+
+// Agent push-back (§13.1): the agent's env has the forge token scrubbed, so the DAEMON
+// must push the agent's commits — otherwise the work never reaches the PR.
+describe('A7 — the daemon pushes the agent commits to the MR branch', () => {
+  it('start-new pushes the newly created branch after the agent runs', async () => {
+    const adapter = recordingAdapter({ snapshot: makeSnapshot() }); // New issue
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    const { ctx, ws } = buildContext({ adapter, runner });
+
+    await tickRepo(repo, ctx);
+
+    const branch = adapter.branches[0]?.name; // the branch start-new created
+    expect(branch).toBeTruthy();
+    expect(ws.pushed).toEqual([{ dir: '/ws/42', branch }]);
+  });
+
+  it('resume re-materializes the workspace on the MR branch and pushes it back', async () => {
+    const snap = makeSnapshot({ issue: { labels: [labels.inProgress] } }); // In-progress
+    const adapter = recordingAdapter({ snapshot: snap });
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    const { ctx, ws } = buildContext({ adapter, runner });
+
+    await tickRepo(repo, ctx);
+
+    // resumed on the MR's OWN branch (not target=main), then pushed back
+    expect(ws.ensured).toContainEqual({ iid: 42, fromRef: 'maestro/issue-42' });
+    expect(adapter.calls).not.toContain('createDraftMR'); // no new PR on resume
+    expect(ws.pushed).toEqual([{ dir: '/ws/42', branch: 'maestro/issue-42' }]);
+  });
+});

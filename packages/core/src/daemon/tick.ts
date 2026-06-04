@@ -241,22 +241,26 @@ async function runStartNew(
   const result = await ctx.runner.run(
     buildRunnerInput(handle.dir, snapshot, mr, snapshot.recentComments, ctx),
   );
+  // Push the agent's commits to the MR branch BEFORE handoff — the agent's env has the
+  // forge token scrubbed (§13.1), so the daemon owns the push; without it the work never
+  // reaches the PR. Pushed even on in_progress/needs_input so partial work persists.
+  await ctx.workspace.pushBranch(handle, intent.branch);
   await applyAgentResult(result, snapshot, mr, handle.dir, ctx);
 }
 
-/** Resume an in-progress issue (no branch/MR creation). */
+/** Resume an in-progress issue (no branch/MR creation). Re-materializes the workspace on
+ *  the MR's OWN branch (not target) so the agent continues its prior commits, then pushes
+ *  the new ones back. With no MR (defensive) it falls back to target and skips the push. */
 async function runAgent(
   snapshot: IssueSnapshot,
   mr: MergeRequest | undefined,
   comments: IssueSnapshot['recentComments'],
   ctx: TickContext,
 ): Promise<void> {
-  const handle = await ctx.workspace.ensureWorkspace(
-    snapshot.repo,
-    snapshot.issue.iid,
-    ctx.settings.git.target,
-  );
+  const fromRef = mr?.sourceBranch ?? ctx.settings.git.target;
+  const handle = await ctx.workspace.ensureWorkspace(snapshot.repo, snapshot.issue.iid, fromRef);
   const result = await ctx.runner.run(buildRunnerInput(handle.dir, snapshot, mr, comments, ctx));
+  if (mr) await ctx.workspace.pushBranch(handle, mr.sourceBranch);
   await applyAgentResult(result, snapshot, mr, handle.dir, ctx);
 }
 
