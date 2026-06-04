@@ -513,8 +513,14 @@ support for them is deliberately opt-in (`--public`):
 - **What a ticket says** is the harder problem. On a public repo, ticket text is
   written by strangers, and the agent acts on it with the bot's credentials. The
   real fix is per-ticket container isolation, which is a planned future step. Until
-  then, treat public-repo support as experimental and lean on constrained
-  permission modes and keeping secrets out of the workspace.
+  then, treat public-repo support as experimental and keep secrets out of the
+  workspace.
+- **Permission mode.** Headless, the agent has no human to approve tool calls, so
+  it ships defaulting to `bypassPermissions` (`--dangerously-skip-permissions`) —
+  otherwise it can't even `git commit` its work or run a proof. That means it runs
+  unsandboxed Bash on the host. Fine for a private repo you trust; for a public one,
+  override `claude.permission_mode` to a constrained mode (`acceptEdits`/`default`)
+  and accept that the agent can't commit or prove until the container sandbox lands.
 
 ---
 

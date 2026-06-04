@@ -23,7 +23,14 @@ environment:
 claude:
   command: "claude" # same binary as interactive; daemon runs it headless (-p)
   max_turns: 40
-  permission_mode: bypassPermissions # headless: no human to approve git/pnpm — see §13.1 isolation
+  # Headless: no human approves tool calls, so the agent needs full Bash (git/pnpm) or it
+  # can't commit its work or run proofs. bypassPermissions → --dangerously-skip-permissions.
+  # SECURITY: v1 runs the agent ON THE HOST (a clone dir with the forge token scrubbed — NOT
+  # a container, §17). Issue bodies are attacker-controlled, so on PUBLIC repos a prompt-
+  # injected agent could run arbitrary host commands. Use bypass only on repos+actors you
+  # trust (gate writers with trigger.allowed_actors); drop to 'acceptEdits'/'default'
+  # otherwise — knowing the agent then can't commit/prove until a real sandbox lands.
+  permission_mode: bypassPermissions
 concurrency:
   max_active: 2
 ---
