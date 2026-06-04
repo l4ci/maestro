@@ -8,8 +8,12 @@ import { readFileSync } from 'node:fs';
 import {
   type AddRepoDeps,
   type AssembleDeps,
+  type Exec,
   FileLogReader,
+  type ForgeAdapter,
+  GithubAdapter,
   GitlabAdapter,
+  type MaestroConfig,
   NodeExec,
   type ReadOnlyForgeAdapter,
   type RepoRef,
@@ -50,6 +54,27 @@ function loadConfig(configPath: string) {
   return parsed.value;
 }
 
+/** Construct the concrete adapter for a repo's forge — the one forge-aware seam. */
+function makeAdapter(repo: RepoRef, config: MaestroConfig, exec: Exec): ForgeAdapter {
+  const botUser = config.defaults.bot_user;
+  if (repo.forge === 'gitlab') {
+    const gl = config.forges.gitlab;
+    if (!gl) throw new Error('no gitlab forge configured');
+    return new GitlabAdapter(exec, {
+      token: process.env[gl.token_env] ?? '',
+      host: gl.host,
+      botUser,
+    });
+  }
+  const gh = config.forges.github;
+  if (!gh) throw new Error('no github forge configured');
+  return new GithubAdapter(exec, {
+    token: process.env[gh.token_env] ?? '',
+    host: gh.host,
+    botUser,
+  });
+}
+
 /** Build the read-only assembly deps (adapter + per-repo settings + logs cache reader). */
 function buildAssembleDeps(env: Env): { repos: RepoRef[]; deps: AssembleDeps } {
   const exec = new NodeExec();
@@ -60,13 +85,7 @@ function buildAssembleDeps(env: Env): { repos: RepoRef[]; deps: AssembleDeps } {
   const adapterFor = (repo: RepoRef): ReadOnlyForgeAdapter => {
     let a = adapters.get(repo.forge);
     if (!a) {
-      const gl = config.forges.gitlab;
-      if (!gl || repo.forge !== 'gitlab') throw new Error(`no adapter for forge ${repo.forge}`);
-      a = new GitlabAdapter(exec, {
-        token: process.env[gl.token_env] ?? '',
-        host: gl.host,
-        botUser: config.defaults.bot_user,
-      });
+      a = makeAdapter(repo, config, exec);
       adapters.set(repo.forge, a);
     }
     return a;
@@ -95,15 +114,7 @@ function buildAddDeps(env: Env): AddRepoDeps {
   return {
     exec,
     configPath: env.configPath,
-    adapterFor: (repo: RepoRef) => {
-      const gl = config.forges.gitlab;
-      if (!gl || repo.forge !== 'gitlab') throw new Error(`no adapter for forge ${repo.forge}`);
-      return new GitlabAdapter(exec, {
-        token: process.env[gl.token_env] ?? '',
-        host: gl.host,
-        botUser: config.defaults.bot_user,
-      });
-    },
+    adapterFor: (repo: RepoRef) => makeAdapter(repo, config, exec),
   };
 }
 
