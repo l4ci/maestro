@@ -8,7 +8,7 @@ import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Exec, RepoRef } from '../contracts/index.js';
 import { MissingTokenError } from './errors.js';
-import { assertInsideRoot, resolveWorkspacePath } from './paths.js';
+import { assertInsideRoot, resolveWorkspacePath, slugifyProject } from './paths.js';
 
 export interface WorkspaceHandle {
   dir: string;
@@ -68,6 +68,24 @@ export class WorkspaceManager {
   async prepareBranch(handle: WorkspaceHandle, branchName: string): Promise<void> {
     await this.#git(['-C', handle.dir, 'checkout', '-B', branchName]);
     this.#touch(handle.dir);
+  }
+
+  /** Does a live (cloned) workspace exist for this issue? Feeds ReconcileInput (§0.5). */
+  workspaceExists(repo: RepoRef, iid: number): boolean {
+    return existsSync(join(resolveWorkspacePath(this.#root, repo, iid), '.git'));
+  }
+
+  /** Per-repo workspace dirs mapped back to issue iids — drives the cleanup sweep (§0.5). */
+  listWorkspaces(repo: RepoRef): { dir: string; iid: number }[] {
+    const repoDir = join(this.#root, slugifyProject(repo.project));
+    if (!existsSync(repoDir)) return [];
+    const out: { dir: string; iid: number }[] = [];
+    for (const name of readdirSync(repoDir)) {
+      const dir = join(repoDir, name);
+      const iid = Number(name);
+      if (Number.isInteger(iid) && iid >= 0 && statSync(dir).isDirectory()) out.push({ dir, iid });
+    }
+    return out;
   }
 
   /** Evict LRU workspaces until total disk ≤ cap, never evicting a dir in `inUse`. */
