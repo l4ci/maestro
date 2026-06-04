@@ -4,7 +4,7 @@ defaults:
   poll_interval_active: 30s # repos with active maestro work
   poll_interval_idle: 5m # repos with nothing in flight (adaptive polling)
   poll_jitter: 5s # spread requests to avoid bursts/rate limits
-  bot_user: maestro-bot
+  bot_user: l4ci
   concurrency:
     global_max: 2 # concurrent ACTIVE workers — size to RAM (§14)
   workspaces:
@@ -20,9 +20,4 @@ forges:
     host: github.com
     token_env: MAESTRO_GITHUB_TOKEN
 
-repos:
-  - url: gitlab.com/group/api # forge inferred from host
-  - url: github.com/org/web
-    overrides:
-      concurrency:
-        max_active: 1
+repos: [ { url: github.com/l4ci/maestro } ]
