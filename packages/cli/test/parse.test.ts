@@ -10,6 +10,7 @@ describe('parse (A1 — verb dispatch)', () => {
       kind: 'add',
       url: 'gitlab.com/g/r',
       commit: true,
+      public: false,
     });
     expect(parse(['status', '42'])).toEqual({ kind: 'status', issue: 42 });
     expect(parse(['list'])).toEqual({ kind: 'list' });
@@ -27,6 +28,8 @@ describe('parse (A2 — flags)', () => {
   it('add defaults commit:true and honors --no-commit', () => {
     expect(parse(['add', 'gitlab.com/g/r'])).toMatchObject({ commit: true });
     expect(parse(['add', 'gitlab.com/g/r', '--no-commit'])).toMatchObject({ commit: false });
+    expect(parse(['add', 'gitlab.com/g/r'])).toMatchObject({ public: false });
+    expect(parse(['add', 'gitlab.com/g/r', '--public'])).toMatchObject({ public: true });
   });
 
   it('run requires --attach (OD-3); bare run is a usage-error', () => {

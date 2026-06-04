@@ -108,7 +108,12 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     exec,
     tokenEnv: config.forges.gitlab?.token_env ?? 'MAESTRO_GITLAB_TOKEN',
   });
-  const runner = new ClaudeRunner(exec);
+  // Scrub the configured forge token(s) from the agent's env (§13.1): the agent acts
+  // with the bot's credentials OUTSIDE the workspace, never finds the token INSIDE it.
+  const secretEnvKeys = [config.forges.gitlab?.token_env, config.forges.github?.token_env].filter(
+    (k): k is string => typeof k === 'string',
+  );
+  const runner = new ClaudeRunner(exec, { secretEnvKeys });
   const slots = new SlotAccountant(config.defaults.concurrency.global_max);
   const scheduler = new Scheduler(
     {

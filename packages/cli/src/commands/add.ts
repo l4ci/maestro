@@ -15,7 +15,10 @@ export interface RunAddDeps {
 }
 
 export async function runAdd(cmd: AddCommand, deps: RunAddDeps): Promise<string> {
-  const result = await deps.addRepo({ url: cmd.url, commit: cmd.commit }, deps.addDeps);
+  const result = await deps.addRepo(
+    { url: cmd.url, commit: cmd.commit, public: cmd.public },
+    deps.addDeps,
+  );
   if (result.added) return `Watching ${result.repo.project}`;
   return `Not added: ${result.reason}`;
 }

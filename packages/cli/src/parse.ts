@@ -3,7 +3,7 @@
 // in main) rather than a thrown stacktrace — the CLI must never crash on user typos (A1-A3).
 
 export type ParsedCommand =
-  | { kind: 'add'; url: string; commit: boolean }
+  | { kind: 'add'; url: string; commit: boolean; public: boolean }
   | { kind: 'status'; issue: number }
   | { kind: 'list' }
   | { kind: 'logs'; issue: number }
@@ -29,7 +29,13 @@ export function parse(argv: string[]): ParsedCommand {
     case 'add': {
       const url = rest.find((a) => !a.startsWith('--'));
       if (url === undefined) return usage('add requires a repo url: maestro add <url>');
-      return { kind: 'add', url, commit: !rest.includes('--no-commit') };
+      // --public: conscious opt-in to onboard a PUBLIC repo (§13.1, OD-3).
+      return {
+        kind: 'add',
+        url,
+        commit: !rest.includes('--no-commit'),
+        public: rest.includes('--public'),
+      };
     }
     case 'list':
       return { kind: 'list' };

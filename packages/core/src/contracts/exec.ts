@@ -10,7 +10,10 @@ export interface ExecResult {
 
 export interface ExecOptions {
   cwd?: string;
-  env?: Record<string, string>;
+  /** Overlaid on the inherited process env. A key mapped to `undefined` is REMOVED from
+   *  the child env — how the runner scrubs the forge token from the agent (M8 §13.1,
+   *  additive amendment to §0.8). Concrete strings add/override as before. */
+  env?: Record<string, string | undefined>;
   timeoutMs?: number;
   input?: string; // stdin — how prompt+context reach `claude` (AM-7); keeps issue text off argv
   signal?: AbortSignal; // cooperative cancel — backs the runner stall-kill (AM-4)
