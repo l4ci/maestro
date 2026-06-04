@@ -19,7 +19,7 @@ environment: {}
 claude:
   command: claude
   max_turns: 40
-  permission_mode: acceptEdits
+  permission_mode: bypassPermissions
 concurrency:
   max_active: 2
 ---

@@ -23,7 +23,7 @@ environment:
 claude:
   command: "claude" # same binary as interactive; daemon runs it headless (-p)
   max_turns: 40
-  permission_mode: acceptEdits
+  permission_mode: bypassPermissions # headless: no human to approve git/pnpm — see §13.1 isolation
 concurrency:
   max_active: 2
 ---
