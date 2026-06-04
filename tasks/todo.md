@@ -45,9 +45,18 @@ deleted the previous M1–M7 set.
       Clock+Rng); `cli/daemon.ts` is the thin composition root. Live E2E smoke (I1)
       env-gated/skipped — deferred until a scratch GitLab project + token exist
       (mirrors M2/M3); the New→Done slice is proven at unit level by A–H.**
-- [ ] **M6 — CLI & Web** — `maestro-06-cli-and-web.md`
+- [x] **M6 — CLI & Web** — `maestro-06-cli-and-web.md`
       `add|status|list|logs` + daemon entry + `run --attach`; read-only dashboard
-      + add-repo form. Thin over core.
+      + add-repo form. Thin over core. **✓ implemented (44 new tests). Shared core
+      foundation: `addRepo` (one routine for CLI + web POST), pure view-assembly
+      (`assembleDashboard`/`assembleIssue` over `ReadOnlyForgeAdapter` + `deriveState`),
+      `FileLogReader`. CLI = parser + thin marshallers + pure formatters + `run
+      --attach` (interactive `Exec.attach`, proven NOT to use `-p`/stream-json/
+      ClaudeRunner). Web = `node:http` server, GET read-only by type, POST `/repos`
+      → same `addRepo`. All ODs resolved (M0/M1/M5). `dist/daemon.js` is the M5
+      composition root. NOTE: the logs-cache WRITER is still absent — M5 ships a
+      console logger, so `FileLogReader` returns [] until a writer lands (deferred
+      M5 obligation; reader + format are ready).**
 - [ ] **M7 — GitHub adapter** — `maestro-07-github-adapter.md`
       `gh`; flat `maestro:*` labels w/ adapter-enforced mutual exclusion; Projects
       V2 deferred. *Proof the abstraction held: reconciler + daemon unchanged.*
