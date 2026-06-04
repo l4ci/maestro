@@ -203,6 +203,67 @@ flowchart TD
 
 ---
 
+## Prerequisites
+
+Maestro is an orchestrator — it drives a handful of command-line tools rather than
+reimplementing them. These need to be installed and on your `PATH` before the
+daemon will run:
+
+| Tool | Why | Install |
+|---|---|---|
+| **Node.js ≥ 20** + **pnpm** | runs Maestro itself | [nodejs.org](https://nodejs.org) · [pnpm.io](https://pnpm.io/installation) |
+| **git** | clone and branch each ticket's workspace | your package manager |
+| **claude** | the coding agent, run headless | [Claude Code](https://claude.com/claude-code) |
+| **glab** | talk to the GitLab API — *only if you watch GitLab repos* | [gitlab.com/gitlab-org/cli](https://gitlab.com/gitlab-org/cli) |
+| **gh** | talk to the GitHub API — *only if you watch GitHub repos* | [cli.github.com](https://cli.github.com) |
+
+You don't need to log into `glab`/`gh` — Maestro injects the token itself (from
+your `.env`). It only needs the binaries present. Run **`maestro doctor`** at any
+time to check what's missing; the daemon also runs this check on startup and
+refuses to boot (with a clear message) if a required tool is absent.
+
+---
+
+## Getting started
+
+The fast path from a fresh clone to a running daemon and dashboard.
+
+```sh
+# 1. Clone and set up (installs deps, builds, scaffolds .env, checks your tools)
+git clone https://github.com/l4ci/maestro.git
+cd maestro
+./scripts/setup.sh
+
+# 2. Add your secrets — paste the bot account's token(s)
+$EDITOR .env                 # MAESTRO_GITLAB_TOKEN / MAESTRO_GITHUB_TOKEN
+
+# 3. Point Maestro at your forge(s) — host + which env var holds each token
+$EDITOR maestro.config.yaml  # (see "Setting it up" below for the full schema)
+
+# 4. Confirm every required tool is on PATH
+node packages/cli/dist/cli.js doctor
+
+# 5. Connect your first repo (creates its labels/board, commits the config change)
+node packages/cli/dist/cli.js add gitlab.com/your-group/your-repo
+
+# 6. Start the daemon — it now watches every repo in the config
+node packages/cli/dist/daemon.js
+
+# 7. In another terminal, start the dashboard and open it in a browser
+node packages/web/dist/main.js      # → http://127.0.0.1:4000
+```
+
+That's the whole loop. Assign an issue on your repo to the bot account, and watch
+its state move across the dashboard as Maestro picks it up, works it, and hands it
+back for review.
+
+> **Tip — a shorter `maestro`:** the commands above call the CLI by its built path.
+> To type just `maestro …`, either alias it
+> (`alias maestro='node /path/to/maestro/packages/cli/dist/cli.js'`) or link it
+> globally with `pnpm --filter @maestro/cli link --global`.
+
+---
+
 ## Setting it up
 
 There are two config files. One is global to your Maestro install; the other
@@ -360,12 +421,13 @@ The daemon is one process that watches **all** your repos. You never run one
 daemon per repo.
 
 ```sh
-pnpm install
-pnpm build
-
 # start the daemon (watches everything in maestro.config.yaml)
 node packages/cli/dist/daemon.js
 ```
+
+On startup it preflights your tools (`git`, `claude`, and the forge binaries you
+need) and refuses to boot if any are missing — so a misconfigured host fails fast
+with a clear message instead of silently looping.
 
 Day-to-day you'll mostly use the CLI:
 
@@ -376,9 +438,21 @@ Day-to-day you'll mostly use the CLI:
 | `maestro status <issue>` | Show one ticket's current stage. |
 | `maestro logs <issue>` | Show the agent's logs for a ticket. |
 | `maestro run <issue> --attach` | Open an **interactive** Claude in that ticket's workspace so you can watch or drive it by hand. Local-dev only, not the daemon path. |
+| `maestro doctor` | Check that every required tool (`git`, `claude`, `glab`/`gh`) is on your `PATH`. Exits non-zero if anything's missing. |
 
-There's also a small read-only **web dashboard** that shows the same information
-in a browser, plus an "add a repo" form.
+### The dashboard
+
+A small read-only **web dashboard** shows the same information in your browser —
+a live status table of every watched repo and its tickets, plus an "add a repo"
+form — and auto-refreshes every few seconds.
+
+```sh
+node packages/web/dist/main.js      # → http://127.0.0.1:4000
+```
+
+Override the bind address with `MAESTRO_WEB_HOST` / `MAESTRO_WEB_PORT`. The same
+endpoint also serves the raw read-model as JSON to any non-browser client (handy
+for scripting), so `curl localhost:4000` gives you the data the page renders.
 
 ---
 
@@ -444,10 +518,11 @@ It's a pnpm + TypeScript monorepo.
 
 ```
 packages/core   the brain: reconciler, forge adapters, Claude runner, proof,
-                config + workflow loaders, daemon loop
-packages/cli    maestro add | status | list | logs + the daemon entry point
-packages/web    read-only dashboard + add-repo form
+                config + workflow loaders, daemon loop, tool preflight
+packages/cli    maestro add | status | list | logs | run | doctor + daemon entry
+packages/web    read-only dashboard (HTML page + JSON API) + add-repo form
 templates/      the default WORKFLOW.md used when onboarding a repo
+scripts/        setup.sh — one-shot install + build + tool check
 ```
 
 The CLI and web packages are intentionally thin — almost all real logic lives in
