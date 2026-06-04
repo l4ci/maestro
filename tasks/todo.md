@@ -34,9 +34,17 @@ deleted the previous M1–M7 set.
       Pluggable proof strategies; transient Handoff with the proof-before-assign
       ordering guarantee (call-order test). **✓ merged to main (139 tests). First
       in-flight contract amendment: AM-16 (ProofInput.git.target).**
-- [ ] **M5 — Daemon loop (first full E2E)** — `maestro-05-daemon-loop.md`
+- [x] **M5 — Daemon loop (first full E2E)** — `maestro-05-daemon-loop.md`
       Two-pass tick (lifecycle + cleanup sweep), concurrency accounting, adaptive
       poll + jitter, hot-reload. *Headline: one GitLab repo driven New→Done.*
+      **✓ implemented (45 new tests: slots/scheduler/reload/run + 25 tick
+      orchestration slices A–H). Zero frozen-contract changes — consumed AM-1
+      `workComplete`, AM-3 `settings.concurrency`, `DONE_SENTINEL`, `HandoffFn`.
+      Small additive M3 reads (`WorkspaceManager.workspaceExists`/`listWorkspaces`)
+      for the cleanup sweep. `core/daemon` is real-time/randomness-free (injected
+      Clock+Rng); `cli/daemon.ts` is the thin composition root. Live E2E smoke (I1)
+      env-gated/skipped — deferred until a scratch GitLab project + token exist
+      (mirrors M2/M3); the New→Done slice is proven at unit level by A–H.**
 - [ ] **M6 — CLI & Web** — `maestro-06-cli-and-web.md`
       `add|status|list|logs` + daemon entry + `run --attach`; read-only dashboard
       + add-repo form. Thin over core.
