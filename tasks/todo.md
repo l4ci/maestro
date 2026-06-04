@@ -26,9 +26,10 @@ deleted the previous M1–M7 set.
       `glab`+REST; issues/MR/labels/approval/comments + board automation (§11).
       **✓ merged to main (88 unit tests + NodeExec/FakeExec). Live integration tier
       env-gated/skipped — deferred until a scratch GitLab project + token exist.**
-- [ ] **M3 — Workspace manager & Claude runner** — `maestro-03-workspace-and-runner.md`
+- [x] **M3 — Workspace manager & Claude runner** — `maestro-03-workspace-and-runner.md`
       Clone/branch/cleanup + path guard + LRU; `claude -p` stream-json → contract,
-      stall-kill.
+      stall-kill. **✓ merged to main (111 tests). Zero contract changes. Live
+      stream-json envelope verification deferred (no `claude` capture here).**
 - [ ] **M4 — Proof & Handoff** — `maestro-04-proof-and-handoff.md`
       Pluggable proof strategies; transient Handoff with the proof-before-assign
       ordering guarantee (call-order test).
