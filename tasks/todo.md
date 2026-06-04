@@ -19,8 +19,9 @@ deleted the previous M1–M7 set.
       Monorepo + toolchain + frozen contracts (forge model, reconciler, schemas,
       exec seam, runner, + §0.12 reconciled modules). *Gate: build/typecheck/test/lint
       green; schemas round-trip the sample config + WORKFLOW.* **✓ merged to main.**
-- [ ] **M1 — Reconciler & Loaders** — `maestro-01-reconciler-and-loaders.md`
-      Pure FSM (TDD vs §7); config + WORKFLOW load/validate/hot-reload.
+- [x] **M1 — Reconciler & Loaders** — `maestro-01-reconciler-and-loaders.md`
+      Pure FSM (TDD vs §7); config + WORKFLOW load/validate/hot-reload. **✓ merged
+      to main (55 tests). All 6 plan open-deps were pre-resolved in M0.**
 - [ ] **M2 — GitLab adapter (reference)** — `maestro-02-gitlab-adapter.md`
       `glab`+REST; issues/MR/labels/approval/comments + board automation (§11).
 - [ ] **M3 — Workspace manager & Claude runner** — `maestro-03-workspace-and-runner.md`
