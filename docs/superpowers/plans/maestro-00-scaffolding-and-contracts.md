@@ -536,6 +536,7 @@ plan is invalidated. Type bodies are in §0.12.
 | AM-13 | M8 | `contracts/bootstrap.ts` (`BOOTSTRAP_MARKER`) | Re-`add` must be idempotent; need a greppable marker on the "define my workflow" issue. |
 | AM-14 | M1, M6 | export `deriveState(snapshot, settings): LifecycleState` | CLI/web need the display state without re-implementing the FSM; promote M1's internal helper. |
 | AM-15 | M6 | `ReadOnlyForgeAdapter = Pick<ForgeAdapter, …reads>` | Compile-time guarantee the web dashboard can't mutate forge state. |
+| AM-16 | M4 | `ProofInput.git: { target: string }` | `diff-summary` needs the diff base; the frozen ProofInput had no slot. First *in-flight* amendment (M1–M3 needed none) — surfaced during M4 build, reconciled here. |
 
 **Non-contract decisions recorded (no type impact, but binding on impl):**
 
@@ -590,6 +591,7 @@ export interface ProofInput {
   workspaceDir: string;
   workflowProof: { type: ProofStrategyKind; command?: string };
   environment: WorkflowEnvironment;   // = z.infer of WorkflowSchema.environment (base_url/start_command/…)
+  git: { target: string };            // diff base for diff-summary (AM-16); from RepoSettings.git.target
   exec: Exec;
 }
 export interface ProofResult {

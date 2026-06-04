@@ -10,6 +10,7 @@ export interface ProofInput {
   workspaceDir: string;
   workflowProof: { type: ProofStrategyKind; command?: string };
   environment: WorkflowEnvironment; // base_url / start_command / seed_command / health_check
+  git: { target: string }; // diff base for diff-summary (AM-16); from RepoSettings.git.target
   exec: Exec;
 }
 
