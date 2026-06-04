@@ -325,15 +325,113 @@ describe('In-review row (§7)', () => {
 // --- A14 Blocked ----------------------------------------------------------
 
 describe('Blocked row (§7)', () => {
-  it('A14 blocked issue waits for human regardless of slot', () => {
+  const blockedIssue = () => issue({ labels: [labels.blocked] });
+  const botComment = (createdAt: string): Comment => ({
+    id: `bot-${createdAt}`,
+    author: user(BOT),
+    body: '🚧 Blocked — agent needs input:\n\nwhich database?',
+    createdAt,
+  });
+  const humanComment = (createdAt: string, body = 'use postgres'): Comment => ({
+    id: `h-${createdAt}`,
+    author: user('reporter'),
+    body,
+    createdAt,
+  });
+
+  it('A14 blocked with no maintainer reply waits regardless of slot', () => {
     for (const slotAvailable of [true, false]) {
       const out = reconcile(
         buildInput({
-          snapshot: snapshot({ issue: issue({ labels: [labels.blocked] }) }),
+          snapshot: snapshot({
+            issue: blockedIssue(),
+            recentComments: [botComment('2026-06-04T10:00:00Z')],
+          }),
           slotAvailable,
         }),
       );
       expect(out.kind).toBe('blocked-wait');
+    }
+  });
+
+  it('A14 blocked with no comments at all stays parked (no block marker)', () => {
+    const out = reconcile(
+      buildInput({ snapshot: snapshot({ issue: blockedIssue(), recentComments: [] }) }),
+    );
+    expect(out.kind).toBe('blocked-wait');
+  });
+
+  it('A14b a non-bot reply post-dating the block resumes with that reply as feedback', () => {
+    const reply = humanComment('2026-06-04T12:00:00Z');
+    const out = reconcile(
+      buildInput({
+        snapshot: snapshot({
+          issue: blockedIssue(),
+          recentComments: [reply, botComment('2026-06-04T10:00:00Z')], // newest-first
+        }),
+      }),
+    );
+    expect(out.kind).toBe('apply-unblock');
+    if (out.kind === 'apply-unblock') {
+      expect(out.feedback.reviewComments).toEqual([reply]);
+    }
+  });
+
+  it('A14b unblock fires even without a slot — the daemon gates (mirror of changes-requested)', () => {
+    const reply = humanComment('2026-06-04T12:00:00Z');
+    const out = reconcile(
+      buildInput({
+        snapshot: snapshot({
+          issue: blockedIssue(),
+          recentComments: [reply, botComment('2026-06-04T10:00:00Z')],
+        }),
+        slotAvailable: false,
+      }),
+    );
+    expect(out.kind).toBe('apply-unblock');
+  });
+
+  it('A14c a reply that PRE-dates the block does not resume (edge-triggered, not level)', () => {
+    const out = reconcile(
+      buildInput({
+        snapshot: snapshot({
+          issue: blockedIssue(),
+          recentComments: [
+            botComment('2026-06-04T10:00:00Z'),
+            humanComment('2026-06-04T09:00:00Z'),
+          ],
+        }),
+      }),
+    );
+    expect(out.kind).toBe('blocked-wait');
+  });
+
+  it('A14d bot comments alone never self-unblock', () => {
+    const out = reconcile(
+      buildInput({
+        snapshot: snapshot({
+          issue: blockedIssue(),
+          recentComments: [botComment('2026-06-04T11:00:00Z'), botComment('2026-06-04T10:00:00Z')],
+        }),
+      }),
+    );
+    expect(out.kind).toBe('blocked-wait');
+  });
+
+  it('A14e threads every reply since the block, newest-first', () => {
+    const newer = humanComment('2026-06-04T13:00:00Z', 'and squash-merge');
+    const older = humanComment('2026-06-04T12:00:00Z', 'use postgres');
+    const out = reconcile(
+      buildInput({
+        snapshot: snapshot({
+          issue: blockedIssue(),
+          recentComments: [newer, older, botComment('2026-06-04T10:00:00Z')],
+        }),
+      }),
+    );
+    expect(out.kind).toBe('apply-unblock');
+    if (out.kind === 'apply-unblock') {
+      expect(out.feedback.reviewComments).toEqual([newer, older]);
     }
   });
 });
