@@ -1,0 +1,82 @@
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import { ConfigStore, inferForge, parseConfig } from '../src/config/load-config.js';
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+const sample = readFileSync(resolve(repoRoot, 'maestro.config.yaml'), 'utf8');
+
+describe('B0 — parse + validate', () => {
+  it('parses the sample config and resolves durations→ms and sizes→bytes', () => {
+    const r = parseConfig(sample);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.defaults.poll_interval_active).toBe(30_000);
+      expect(r.value.defaults.workspaces.disk_cap).toBe(20 * 1024 ** 3);
+      expect(r.value.repos).toHaveLength(2);
+    }
+  });
+});
+
+describe('B1 — invalid config rejected with a useful error', () => {
+  it('rejects config missing required bot_user and carries the issue path', () => {
+    const bad = 'defaults:\n  poll_interval_active: 30s\nforges: {}\nrepos: []\n';
+    const r = parseConfig(bad);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/bot_user/);
+  });
+
+  it('rejects non-YAML text', () => {
+    const r = parseConfig(':::not yaml:::\n  - [');
+    expect(r.ok).toBe(false);
+  });
+});
+
+describe('B2 — host → ForgeKind inference', () => {
+  const forges = {
+    gitlab: { host: 'gitlab.com', token_env: 'MAESTRO_GITLAB_TOKEN' },
+    github: { host: 'github.com', token_env: 'MAESTRO_GITHUB_TOKEN' },
+  };
+
+  it('infers gitlab and github from the url host', () => {
+    expect(inferForge('gitlab.com/group/api', forges)).toBe('gitlab');
+    expect(inferForge('github.com/org/web', forges)).toBe('github');
+  });
+
+  it('matches a self-hosted host configured in forges', () => {
+    expect(
+      inferForge('gitlab.acme.internal/team/svc', {
+        gitlab: { host: 'gitlab.acme.internal', token_env: 'X' },
+      }),
+    ).toBe('gitlab');
+  });
+
+  it('throws on an unknown host', () => {
+    expect(() => inferForge('bitbucket.org/x/y', forges)).toThrow();
+  });
+});
+
+describe('B3 — hot-reload with validate-before-reload (§5)', () => {
+  it('keeps the previous good config when the new text is invalid', () => {
+    const store = new ConfigStore(parseConfigOrThrow(sample));
+    const before = store.current;
+    const r = store.reload('not: [valid');
+    expect(r.ok).toBe(false);
+    expect(store.current).toBe(before); // unchanged reference
+  });
+
+  it('swaps atomically on a valid reload', () => {
+    const store = new ConfigStore(parseConfigOrThrow(sample));
+    const next = sample.replace('global_max: 2', 'global_max: 4');
+    const r = store.reload(next);
+    expect(r.ok).toBe(true);
+    expect(store.current.defaults.concurrency.global_max).toBe(4);
+  });
+});
+
+function parseConfigOrThrow(text: string) {
+  const r = parseConfig(text);
+  if (!r.ok) throw new Error(r.error);
+  return r.value;
+}
