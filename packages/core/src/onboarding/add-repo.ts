@@ -6,17 +6,21 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseDocument } from 'yaml';
+import type { WorkflowSeed } from '../bootstrap/infer-workflow-seed.js';
+import { onboard } from '../bootstrap/onboard.js';
 import { parseConfig } from '../config/load-config.js';
-import { BOOTSTRAP_MARKER } from '../contracts/bootstrap.js';
-import type { Exec, ForgeAdapter, Label, RepoRef } from '../contracts/index.js';
-import { labelNames } from '../contracts/labels.js';
+import type { Exec, ForgeAdapter, RepoRef } from '../contracts/index.js';
 import { repoRefFromUrl } from '../daemon/reload.js';
+import { requirePublicOptIn } from './public-guard.js';
 
 export type AddResult = { added: true; repo: RepoRef } | { added: false; reason: string };
 
 export interface AddRepoInput {
   url: string;
   commit?: boolean; // default true
+  /** Conscious opt-in to onboard a PUBLIC repo (§13.1, OD-3). Declares public-ness in
+   *  v1 (no auto-detection) AND opts in. Omitted → treated as private. */
+  public?: boolean;
 }
 
 export interface AddRepoDeps {
@@ -27,10 +31,10 @@ export interface AddRepoDeps {
   hasWorkflow?: (repo: RepoRef) => boolean;
   /** Default true; mirrors WORKFLOW.manage_board for a fresh repo (§11). */
   manageBoard?: boolean;
+  /** Optional inferred WORKFLOW seed for the bootstrap issue (the CLI wires this after
+   *  cloning; absent → marker-only body). */
+  seed?: () => Promise<WorkflowSeed>;
 }
-
-/** The §16 onboarding issue body — greppable marker keeps a repeated add idempotent (M8). */
-const BOOTSTRAP_BODY = `Maestro is now watching this repo. Define how it should work by committing a \`WORKFLOW.md\`, then assign issues to the bot.\n\n${BOOTSTRAP_MARKER}`;
 
 export async function addRepo(input: AddRepoInput, deps: AddRepoDeps): Promise<AddResult> {
   const text = readFileSync(deps.configPath, 'utf8');
@@ -50,27 +54,29 @@ export async function addRepo(input: AddRepoInput, deps: AddRepoDeps): Promise<A
     return { added: false, reason: 'already-watched' };
   }
 
+  // 2b. Public-repo opt-in gate (§13.1, OD-3): refuse to silently onboard a public repo
+  //     with no protection. In v1 `--public` both declares public-ness and opts in; the
+  //     runtime trigger guard (reconciler A3) is the other half of this defense.
+  const gate = requirePublicOptIn({
+    visibility: input.public ? 'public' : 'private',
+    allowedActors: [],
+    optIn: input.public ?? false,
+  });
+  if (!gate.ok) return { added: false, reason: gate.reason };
+
   // 3. Append the entry, preserving comments/formatting (B1).
   const doc = parseDocument(text);
   doc.addIn(['repos'], doc.createNode({ url: input.url }));
   writeFileSync(deps.configPath, doc.toString());
 
-  // 4. §11 setup through the adapter — reuses M2 verbatim, no M6-special path (B4).
-  const adapter = deps.adapterFor(repo);
-  const labels: Label[] = labelNames(repo.forge)
-    .all()
-    .map((name) => ({ name }));
-  await adapter.ensureLabels(repo, labels);
-  if (repo.forge === 'gitlab' && (deps.manageBoard ?? true) && adapter.ensureBoard) {
-    await adapter.ensureBoard(repo, labels);
-  }
-  if (!(deps.hasWorkflow?.(repo) ?? false)) {
-    await adapter.createIssue(repo, {
-      title: "Let's define my workflow",
-      body: BOOTSTRAP_BODY,
-      assignToBot: true,
-    });
-  }
+  // 4. §11 setup + add-when-missing bootstrap trigger — the ONE onboarding routine,
+  //    shared with any direct caller. No M6-special path (B4).
+  await onboard(repo, {
+    adapter: deps.adapterFor(repo),
+    hasWorkflow: deps.hasWorkflow?.(repo) ?? false,
+    ...(deps.manageBoard !== undefined ? { manageBoard: deps.manageBoard } : {}),
+    ...(deps.seed ? { seed: deps.seed } : {}),
+  });
 
   // 5. Commit by default, staging the config path EXPLICITLY (B5/B7).
   if (input.commit !== false) {

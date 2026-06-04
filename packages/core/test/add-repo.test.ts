@@ -58,6 +58,7 @@ function onboardAdapter(opts: { withBoard?: boolean } = {}): OnboardRecorder {
   };
   const base: Partial<ForgeAdapter> = {
     kind: 'gitlab',
+    listAssignedOpenIssues: async (): Promise<Issue[]> => [], // onboard idempotency probe
     ensureLabels: async (_repo, labels) => void r.ensureLabelsArgs.push(labels),
     createIssue: async (_repo, args): Promise<Issue> => {
       r.createdIssues.push(args);

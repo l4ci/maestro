@@ -19,12 +19,12 @@ describe('runAdd (B — marshaller)', () => {
       Promise.resolve({ added: true, repo }),
     );
     const out = await runAdd(
-      { kind: 'add', url: 'gitlab.com/g/r', commit: false },
+      { kind: 'add', url: 'gitlab.com/g/r', commit: false, public: false },
       // deps the marshaller forwards to addRepo, plus the injected addRepo itself
       { addRepo: spy, addDeps: {} as AddRepoDeps },
     );
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0]![0]).toEqual({ url: 'gitlab.com/g/r', commit: false });
+    expect(spy.mock.calls[0]![0]).toEqual({ url: 'gitlab.com/g/r', commit: false, public: false });
     expect(out).toMatch(/g\/r/);
   });
 
@@ -33,7 +33,7 @@ describe('runAdd (B — marshaller)', () => {
       Promise.resolve({ added: false, reason: 'already-watched' }),
     );
     const out = await runAdd(
-      { kind: 'add', url: 'gitlab.com/g/r', commit: true },
+      { kind: 'add', url: 'gitlab.com/g/r', commit: true, public: true },
       { addRepo: spy, addDeps: {} as AddRepoDeps },
     );
     expect(out).toMatch(/already-watched/);

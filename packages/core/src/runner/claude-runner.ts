@@ -15,17 +15,29 @@ import type { AgentResult, AgentStatus, Exec, Runner, RunnerInput } from '../con
 export interface ClaudeRunnerConfig {
   stallTimeoutMs?: number; // no agent events past this → kill (default 120s)
   maxStallRetries?: number; // extra cold attempts after a stall (default 1)
+  /** Env var NAMES scrubbed from the agent's environment — the forge token_env(s).
+   *  §13.1: the agent must find no forge secret in its workspace env (blast-radius
+   *  reduction). The daemon passes the configured token_env names here. */
+  secretEnvKeys?: string[];
 }
 
 export class ClaudeRunner implements Runner {
   readonly #exec: Exec;
   readonly #stallTimeoutMs: number;
   readonly #maxStallRetries: number;
+  readonly #secretEnvKeys: string[];
 
   constructor(exec: Exec, cfg: ClaudeRunnerConfig = {}) {
     this.#exec = exec;
     this.#stallTimeoutMs = cfg.stallTimeoutMs ?? 120_000;
     this.#maxStallRetries = cfg.maxStallRetries ?? 1;
+    this.#secretEnvKeys = cfg.secretEnvKeys ?? [];
+  }
+
+  /** The env handed to the agent: inherit the daemon env MINUS the forge secret(s).
+   *  Each secret key maps to `undefined`, which NodeExec deletes from the child env. */
+  #agentEnv(): Record<string, string | undefined> {
+    return Object.fromEntries(this.#secretEnvKeys.map((k) => [k, undefined]));
   }
 
   async run(input: RunnerInput): Promise<AgentResult> {
@@ -61,6 +73,7 @@ export class ClaudeRunner implements Runner {
       res = await this.#exec.stream(input.claude.command, buildClaudeArgs(input), {
         cwd: input.workspaceDir,
         input: assemblePrompt(input),
+        env: this.#agentEnv(), // scrub the forge token from the agent (§13.1)
         signal: controller.signal,
         onLine: (line) => {
           lines.push(line);

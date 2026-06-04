@@ -8,8 +8,16 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import type { Exec, ExecOptions, ExecResult, SpawnHandle } from '../contracts/index.js';
 
 function baseEnv(opts?: ExecOptions): NodeJS.ProcessEnv {
-  // Start from the daemon env, overlay caller-provided (token, GITLAB_HOST, …).
-  return opts?.env ? { ...process.env, ...opts.env } : process.env;
+  // Start from the daemon env, overlay caller-provided (token, GITLAB_HOST, …). A key
+  // mapped to `undefined` is DELETED from the child env — the runner scrubs the forge
+  // token from the agent this way (merge alone can't remove an inherited key).
+  if (!opts?.env) return process.env;
+  const merged: NodeJS.ProcessEnv = { ...process.env };
+  for (const [k, v] of Object.entries(opts.env)) {
+    if (v === undefined) delete merged[k];
+    else merged[k] = v;
+  }
+  return merged;
 }
 
 function launch(
