@@ -30,9 +30,10 @@ deleted the previous M1–M7 set.
       Clone/branch/cleanup + path guard + LRU; `claude -p` stream-json → contract,
       stall-kill. **✓ merged to main (111 tests). Zero contract changes. Live
       stream-json envelope verification deferred (no `claude` capture here).**
-- [ ] **M4 — Proof & Handoff** — `maestro-04-proof-and-handoff.md`
+- [x] **M4 — Proof & Handoff** — `maestro-04-proof-and-handoff.md`
       Pluggable proof strategies; transient Handoff with the proof-before-assign
-      ordering guarantee (call-order test).
+      ordering guarantee (call-order test). **✓ merged to main (139 tests). First
+      in-flight contract amendment: AM-16 (ProofInput.git.target).**
 - [ ] **M5 — Daemon loop (first full E2E)** — `maestro-05-daemon-loop.md`
       Two-pass tick (lifecycle + cleanup sweep), concurrency accounting, adaptive
       poll + jitter, hot-reload. *Headline: one GitLab repo driven New→Done.*
