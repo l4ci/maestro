@@ -16,8 +16,8 @@ import type {
   MergeStrategy,
   RepoRef,
 } from '../../contracts/index.js';
-import { GitlabClient, type GitlabClientConfig, encodeProject } from './client.js';
-import { ForgeError } from './errors.js';
+import { ForgeCli } from '../cli.js';
+import { ForgeError } from '../errors.js';
 import {
   type RawApprovals,
   type RawIssue,
@@ -32,6 +32,19 @@ import {
 } from './normalize.js';
 
 const DEFAULT_LABEL_COLOR = '#6699cc';
+
+/** Adapter construction config (M0 §0.10). Kept as a named type for the public barrel. */
+export interface GitlabClientConfig {
+  token: string;
+  host: string; // e.g. gitlab.com
+  botUser: string; // used for edge-trigger / lastActor
+  commentCap?: number; // recentComments bound (default 50)
+}
+
+/** URL-encode a GitLab project path for the `:id` segment: group/repo → group%2Frepo. */
+export function encodeProject(project: string): string {
+  return encodeURIComponent(project);
+}
 
 interface RawLabel {
   id: number | string;
@@ -69,10 +82,16 @@ interface RawLabelEvent {
 
 export class GitlabAdapter implements ForgeAdapter {
   readonly kind = 'gitlab' as const;
-  readonly #c: GitlabClient;
+  readonly #c: ForgeCli;
 
   constructor(exec: Exec, cfg: GitlabClientConfig) {
-    this.#c = new GitlabClient(exec, cfg);
+    this.#c = new ForgeCli(exec, {
+      bin: 'glab',
+      forge: 'gitlab',
+      env: { GITLAB_TOKEN: cfg.token, GITLAB_HOST: cfg.host }, // glab reads these
+      botUser: cfg.botUser,
+      ...(cfg.commentCap !== undefined ? { commentCap: cfg.commentCap } : {}),
+    });
   }
 
   #pid(repo: RepoRef): string {
@@ -296,7 +315,8 @@ export class GitlabAdapter implements ForgeAdapter {
   async #resolveUserId(username: string): Promise<string> {
     const users = await this.#c.apiRequired<RawUser[]>('GET', '/users', { query: { username } });
     const u = users[0];
-    if (!u) throw new ForgeError('GET', `/users?username=${username}`, 404, 'user not found');
+    if (!u)
+      throw new ForgeError('gitlab', 'GET', `/users?username=${username}`, 404, 'user not found');
     return String(u.id);
   }
 

@@ -7,13 +7,13 @@ export * from './config/load-config.js';
 export * from './config/resolve-settings.js';
 export * from './workflow/load-workflow.js';
 export * from './exec/node-exec.js';
+export { ForgeCli, buildPath } from './forge/cli.js';
+export type { ForgeCliConfig, HttpMethod, ApiOptions } from './forge/cli.js';
+export { ForgeError } from './forge/errors.js';
+// gitlab-adapter / github-adapter re-export their own encodeProject / repoSegments
+// and the *ClientConfig types alongside the adapter classes.
 export * from './forge/gitlab/gitlab-adapter.js';
-export { GitlabClient, encodeProject } from './forge/gitlab/client.js';
-export type { GitlabClientConfig } from './forge/gitlab/client.js';
-export { ForgeError } from './forge/gitlab/errors.js';
 export * from './forge/github/github-adapter.js';
-export { GithubClient, repoSegments } from './forge/github/client.js';
-export type { GithubClientConfig } from './forge/github/client.js';
 export * from './workspace/workspace-manager.js';
 export { resolveWorkspacePath, assertInsideRoot, slugifyProject } from './workspace/paths.js';
 export { WorkspacePathError, MissingTokenError } from './workspace/errors.js';

@@ -23,8 +23,8 @@ import type {
   RepoRef,
 } from '../../contracts/index.js';
 import { labelNames } from '../../contracts/labels.js';
-import { GithubClient, type GithubClientConfig, repoSegments } from './client.js';
-import { ForgeError } from './errors.js';
+import { ForgeCli } from '../cli.js';
+import { ForgeError } from '../errors.js';
 import {
   type RawComment,
   type RawCommit,
@@ -42,6 +42,24 @@ import {
 
 const DEFAULT_LABEL_COLOR = '6699cc'; // GitHub label colors are hex WITHOUT the leading '#'
 
+/** Adapter construction config (M0 §0.10). Kept as a named type for the public barrel. */
+export interface GithubClientConfig {
+  token: string;
+  host: string; // github.com or a self-hosted GHE host
+  botUser: string; // edge-trigger / bot assignment
+  commentCap?: number; // recentComments bound (default 50)
+}
+
+/** Split 'org/repo' into URL-encoded path segments for /repos/:owner/:repo. */
+export function repoSegments(project: string): { owner: string; repo: string } {
+  const i = project.indexOf('/');
+  if (i === -1) throw new ForgeError('github', 'GET', project, 0, `invalid repo path '${project}'`);
+  return {
+    owner: encodeURIComponent(project.slice(0, i)),
+    repo: encodeURIComponent(project.slice(i + 1)),
+  };
+}
+
 interface RawLabelObj {
   name: string;
 }
@@ -54,10 +72,16 @@ const MAESTRO_PREFIX = (() => {
 
 export class GithubAdapter implements ForgeAdapter {
   readonly kind = 'github' as const;
-  readonly #c: GithubClient;
+  readonly #c: ForgeCli;
 
   constructor(exec: Exec, cfg: GithubClientConfig) {
-    this.#c = new GithubClient(exec, cfg);
+    this.#c = new ForgeCli(exec, {
+      bin: 'gh',
+      forge: 'github',
+      env: { GH_TOKEN: cfg.token, GH_HOST: cfg.host }, // gh reads these; GH_HOST targets GHE
+      botUser: cfg.botUser,
+      ...(cfg.commentCap !== undefined ? { commentCap: cfg.commentCap } : {}),
+    });
   }
 
   #base(repo: RepoRef): string {
