@@ -632,6 +632,148 @@ describe('unified last-activity line (#39)', () => {
   });
 });
 
+describe('blocked visibility — sort, title, favicon (#43)', () => {
+  const titleOf = (w: PageWindow) => w.document.title;
+  const faviconHref = (w: PageWindow) =>
+    (w.document.getElementById('favicon') as HTMLLinkElement).getAttribute('href');
+  // jsdom has no canvas 2d backend, so getContext('2d') is null and dotFavicon falls back to
+  // 'data:,'. Stub a context whose toDataURL returns a marker so the swap is observable.
+  const stubCanvas = (w: PageWindow) => {
+    w.HTMLCanvasElement.prototype.getContext = (() => ({
+      beginPath() {},
+      arc() {},
+      fill() {},
+      fillStyle: '',
+    })) as unknown as HTMLCanvasElement['getContext'];
+    w.HTMLCanvasElement.prototype.toDataURL = (() => 'data:image/png;base64,DOT') as never;
+  };
+
+  it('plain "maestro" title and empty favicon when nothing is blocked', () => {
+    const w = loadPage();
+    stubCanvas(w);
+    w.render(view()); // fixture has no blocked issues
+    expect(titleOf(w)).toBe('maestro');
+    expect(faviconHref(w)).toBe('data:,');
+  });
+
+  it('title shows the blocked count and the favicon turns into a dot when blocked', () => {
+    const w = loadPage();
+    stubCanvas(w);
+    const v = view();
+    const i0 = v.repos[0]?.issues[0];
+    const i1 = v.repos[1]?.issues[0];
+    if (!i0 || !i1 || !v.repos[0] || !v.repos[1]) throw new Error('fixture shape');
+    i0.state = 'blocked';
+    v.repos[0].counts = { ...zero, blocked: 1 };
+    i1.state = 'blocked';
+    v.repos[1].counts = { ...zero, blocked: 1 };
+    w.render(v);
+    expect(titleOf(w)).toBe('maestro · 2 blocked');
+    expect(faviconHref(w)).toBe('data:image/png;base64,DOT');
+  });
+
+  it('an unreachable repo counts toward the title badge like a blocked one', () => {
+    const w = loadPage();
+    stubCanvas(w);
+    const v = view();
+    const repo = v.repos[1];
+    if (!repo) throw new Error('fixture shape');
+    repo.error = 'auth failed (401)';
+    repo.issues = [];
+    w.render(v);
+    expect(titleOf(w)).toBe('maestro · 1 blocked');
+    expect(faviconHref(w)).toBe('data:image/png;base64,DOT');
+  });
+
+  it('title and favicon clear within one poll when the blocked issue resolves', () => {
+    const w = loadPage();
+    stubCanvas(w);
+    const v = view();
+    const issue = v.repos[0]?.issues[0];
+    if (!issue || !v.repos[0]) throw new Error('fixture shape');
+    issue.state = 'blocked';
+    v.repos[0].counts = { ...zero, blocked: 1 };
+    w.render(v);
+    expect(titleOf(w)).toBe('maestro · 1 blocked');
+    w.render(view()); // next poll: nothing blocked
+    expect(titleOf(w)).toBe('maestro');
+    expect(faviconHref(w)).toBe('data:,');
+  });
+
+  it('sorts repos with blocked issues to the top, others stay in order', () => {
+    const w = loadPage();
+    const v = view(); // [gitlab.com/g/api, github.com/o/web], neither blocked
+    const second = v.repos[1];
+    if (!second?.issues[0]) throw new Error('fixture shape');
+    second.issues[0].state = 'blocked';
+    second.counts = { ...zero, blocked: 1 };
+    w.render(v);
+    const order = repoCards(w).map((c) => (c as HTMLElement).dataset.key);
+    expect(order).toEqual(['github.com/o/web', 'gitlab.com/g/api']);
+  });
+
+  it('sorts an unreachable repo to the top alongside blocked ones', () => {
+    const w = loadPage();
+    const v = view();
+    const second = v.repos[1];
+    if (!second) throw new Error('fixture shape');
+    second.error = 'auth failed (401)';
+    second.issues = [];
+    w.render(v);
+    expect(repoCards(w)[0]?.getAttribute('data-key')).toBe('github.com/o/web');
+  });
+
+  it('sorting repos moves existing card nodes instead of recreating them (#42)', () => {
+    const w = loadPage();
+    w.render(view());
+    const [cardA, cardB] = repoCards(w);
+    const v = view();
+    const second = v.repos[1];
+    if (!second?.issues[0]) throw new Error('fixture shape');
+    second.issues[0].state = 'blocked'; // now sorts to the top
+    second.counts = { ...zero, blocked: 1 };
+    w.render(v);
+    const after = repoCards(w);
+    expect(after[0]).toBe(cardB); // same node, moved up
+    expect(after[1]).toBe(cardA);
+  });
+
+  it('within a repo, blocked rows render above the rest, others keep their order', () => {
+    const w = loadPage();
+    const v = view();
+    const repo = v.repos[0];
+    if (!repo) throw new Error('fixture shape');
+    // issues incoming as [#1 in-progress, #2 new]; make #2 blocked → it must lead.
+    repo.issues = [
+      { iid: 1, title: 'first', state: 'in-progress' },
+      { iid: 2, title: 'second', state: 'blocked' },
+      { iid: 3, title: 'third', state: 'new' },
+    ];
+    repo.counts = { ...zero, 'in-progress': 1, blocked: 1, new: 1 };
+    w.render(v);
+    const keys = [...(repoCards(w)[0]?.querySelectorAll('tr[data-key]') ?? [])].map((r) =>
+      (r as HTMLElement).getAttribute('data-key'),
+    );
+    expect(keys).toEqual(['gitlab.com/g/api#2', 'gitlab.com/g/api#1', 'gitlab.com/g/api#3']);
+  });
+
+  it('reordering rows to put blocked first keeps row node identity (#42)', () => {
+    const w = loadPage();
+    w.render(view());
+    const keepRow = rowByKey(w, 'gitlab.com/g/api#2');
+    const v = view();
+    const issue = v.repos[0]?.issues[1];
+    if (!issue || !v.repos[0]) throw new Error('fixture shape');
+    issue.state = 'blocked'; // #2 jumps above #1
+    v.repos[0].counts = { ...zero, 'in-progress': 1, blocked: 1 };
+    w.render(v);
+    expect(rowByKey(w, 'gitlab.com/g/api#2')).toBe(keepRow); // moved, not recreated
+    const card = repoCards(w).find((c) => (c as HTMLElement).dataset.key === 'gitlab.com/g/api');
+    const firstRow = card?.querySelector('tr[data-key]');
+    expect(firstRow?.getAttribute('data-key')).toBe('gitlab.com/g/api#2');
+  });
+});
+
 describe('collapsible repo cards (#34)', () => {
   const header = (w: PageWindow, url: string) =>
     w.document.querySelector(`[data-key="${url}"] h2`) as HTMLElement;

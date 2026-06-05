@@ -9,7 +9,7 @@ export const DASHBOARD_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="icon" href="data:," />
+<link rel="icon" id="favicon" href="data:," />
 <title>maestro</title>
 <style>
   :root { color-scheme: light dark; }
@@ -279,8 +279,63 @@ function renderDaemon(d) {
   }
 }
 
+// Blocked visibility (#43). 'blocked' is the only state needing a human; an unreachable
+// repo (error marker) is the same "needs a human" class. Make the count ambient so a
+// background tab still surfaces it: a tab-title suffix and a red favicon dot, both derived
+// from the already-polled counts — no API change. setFavicon paints a 16×16 dot on a
+// canvas and assigns the data-URI to the <link rel=icon>, so it stays dependency-free; we
+// only touch the DOM when the icon actually changes to avoid needless re-decodes per poll.
+function attentionCount(repos) {
+  let n = 0;
+  for (const r of repos) n += r.error ? 1 : r.counts.blocked || 0;
+  return n;
+}
+
+let faviconHref = null;
+function setFavicon(href) {
+  if (href === faviconHref) return;
+  faviconHref = href;
+  el('favicon').href = href;
+}
+
+function dotFavicon(color) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 16;
+  canvas.height = 16;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return 'data:,'; // no 2d context (e.g. jsdom) → leave the icon empty
+  ctx.beginPath();
+  ctx.arc(8, 8, 6, 0, 2 * Math.PI);
+  ctx.fillStyle = color;
+  ctx.fill();
+  return canvas.toDataURL('image/png');
+}
+
+function renderAttention(repos) {
+  const blocked = attentionCount(repos);
+  // Tab title: 'maestro · 2 blocked' when any repo needs a human, plain 'maestro' otherwise.
+  document.title = blocked > 0 ? 'maestro · ' + blocked + ' blocked' : 'maestro';
+  // Favicon: a red dot while anything is blocked/unreachable, otherwise the empty default.
+  setFavicon(blocked > 0 ? dotFavicon('#f47067') : 'data:,');
+}
+
+// Sort repos that need a human to the top (blocked rows or an unreachable error), keeping
+// the rest in stable input order. Returns a new array — never mutates the polled view, so
+// the keyed reconcile still moves (never rebuilds) the existing card nodes on reorder.
+function sortReposByAttention(repos) {
+  return [...repos]
+    .map((r, i) => [r, i])
+    .sort((a, b) => attentionRank(b[0]) - attentionRank(a[0]) || a[1] - b[1])
+    .map((pair) => pair[0]);
+}
+function attentionRank(r) {
+  if (r.error) return 1;
+  return (r.counts && r.counts.blocked) > 0 ? 1 : 0;
+}
+
 function render(view) {
   renderDaemon(view.daemon);
+  renderAttention(view.repos || []);
   const root = el('repos');
   if (!view.repos || view.repos.length === 0) {
     const none = document.createElement('div');
@@ -289,7 +344,7 @@ function render(view) {
     root.replaceChildren(none); // nothing keyed to preserve on an empty board
     return;
   }
-  reconcile(root, view.repos, (r) => r.repo.url, createRepoCard, updateRepoCard);
+  reconcile(root, sortReposByAttention(view.repos), (r) => r.repo.url, createRepoCard, updateRepoCard);
 }
 
 function createRepoCard(r) {
@@ -323,12 +378,24 @@ function updateRepoCard(card, r) {
   }
   // Error and empty placeholders ride the same keyed path, so the CARD node (and any
   // UI state on it) survives a repo flipping between healthy and unreachable.
+  // Blocked rows first (#43): a stable partition pulls blocked issues to the top of the card
+  // while leaving every other row in its incoming LifecycleState order (§11). Stable so the
+  // keyed reconcile moves (never rebuilds) rows on the rare reorder.
+  const ordered = sortIssuesByBlocked(r.issues || []);
   const rows = r.error
     ? [{ key: '~error', error: r.error }]
-    : ((r.issues || []).length
-        ? r.issues.map((i) => ({ key: r.repo.url + '#' + i.iid, issue: i, forge: r.repo.forge }))
+    : (ordered.length
+        ? ordered.map((i) => ({ key: r.repo.url + '#' + i.iid, issue: i, forge: r.repo.forge }))
         : [{ key: '~empty' }]);
   reconcile(card.querySelector('tbody'), rows, (x) => x.key, createRow, updateRow);
+}
+
+// Stable partition: blocked issues first, the rest left in incoming order (#43).
+function sortIssuesByBlocked(issues) {
+  const blocked = [];
+  const rest = [];
+  for (const i of issues) (i.state === 'blocked' ? blocked : rest).push(i);
+  return blocked.concat(rest);
 }
 
 function createRow(x) {
