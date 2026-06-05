@@ -90,6 +90,7 @@ export interface AdapterRecorder {
   labelOps: { iid: number; set: string[]; unset: string[] }[];
   merges: { mrIid: number; strategy: string; deleteSource: boolean }[];
   issueComments: { iid: number; body: string }[];
+  mrDescriptions: { mrIid: number; body: string }[];
   branches: { name: string; fromRef: string }[];
   createdMRs: CreateMRArgs[];
   assigned: { mrIid: number; username: string }[];
@@ -111,6 +112,7 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
     labelOps: [],
     merges: [],
     issueComments: [],
+    mrDescriptions: [],
     branches: [],
     createdMRs: [],
     assigned: [],
@@ -148,7 +150,10 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
       r.createdMRs.push(args);
       return cfg.createdMR ?? makeMR({ sourceBranch: args.sourceBranch, title: args.title });
     },
-    updateMRDescription: async () => void r.calls.push('updateMRDescription'),
+    updateMRDescription: async (_repo, mrIid, body) => {
+      r.calls.push('updateMRDescription');
+      r.mrDescriptions.push({ mrIid, body });
+    },
     setDraft: async () => void r.calls.push('setDraft'),
     assignMR: async (_repo, mrIid, username) => {
       r.calls.push('assignMR');

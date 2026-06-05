@@ -18,10 +18,12 @@
 //    so a restart loses nothing). Disk is bounded by the M3 WorkspaceManager LRU.
 
 import {
+  type AgentResult,
   DONE_SENTINEL,
   type Intent,
   type IssueSnapshot,
   type MergeRequest,
+  PLAN_COMMENT_SENTINEL,
   type ProofResult,
   type RepoRef,
   type RunnerInput,
@@ -329,13 +331,18 @@ async function runApplyUnblock(
 
 /** §0.9 runner-result → lifecycle mapping — the mapping the daemon OWNS. */
 async function applyAgentResult(
-  result: { status: string; summary: string },
+  result: AgentResult,
   snapshot: IssueSnapshot,
   mr: MergeRequest | undefined,
   workspaceDir: string,
   ctx: TickContext,
 ): Promise<void> {
   const { repo, issue } = snapshot;
+  // #48: the agent can't touch the forge (§13.1), so the daemon writes the plan it
+  // returned — regardless of status — BEFORE the status switch, so an in_progress run
+  // still records its plan and a done run lands the fully-ticked todo. The MR
+  // description is the durable detailed plan/todo; the issue gets a one-time summary.
+  await recordPlan(result, snapshot, mr, ctx);
   switch (result.status) {
     case 'done': {
       if (!mr) {
@@ -375,6 +382,51 @@ async function applyAgentResult(
       // in_progress → leave the labels untouched; the next tick resumes (§0.9).
       return;
   }
+}
+
+/**
+ * Write the agent's plan to the forge (#48). `mrDescription` (the durable detailed
+ * plan + checkbox todo) is set via the idempotent `updateMRDescription`, with the
+ * `Closes #N` auto-close trailer preserved. `planComment` is posted once as an issue
+ * comment, guarded by a sentinel read from this tick's snapshot so a later tick (which
+ * re-reads the snapshot, now carrying the comment) never double-posts.
+ */
+async function recordPlan(
+  result: AgentResult,
+  snapshot: IssueSnapshot,
+  mr: MergeRequest | undefined,
+  ctx: TickContext,
+): Promise<void> {
+  const { repo, issue } = snapshot;
+  if (mr && result.mrDescription) {
+    await ctx.adapter.updateMRDescription(
+      repo,
+      mr.iid,
+      withClosesTrailer(result.mrDescription, issue.iid),
+    );
+  }
+  if (result.planComment) {
+    const alreadyPosted = snapshot.recentComments.some((c) =>
+      c.body.includes(PLAN_COMMENT_SENTINEL),
+    );
+    if (!alreadyPosted) {
+      await ctx.adapter.commentIssue(
+        repo,
+        issue.iid,
+        `### 🎼 Plan\n\n${result.planComment}\n\n${PLAN_COMMENT_SENTINEL}`,
+      );
+    }
+  }
+}
+
+/** Keep the `Closes #N` keyword so merging the MR still auto-closes the issue, even if
+ *  the agent's rewritten description dropped it. No-op when an issue-closing reference
+ *  to this iid is already present (any of closes/fixes/resolves). */
+export function withClosesTrailer(body: string, iid: number): string {
+  if (new RegExp(`\\b(clos(e|es|ed)|fix(e[sd])?|resolv(e|es|ed))\\s+#${iid}\\b`, 'i').test(body)) {
+    return body;
+  }
+  return `${body.trimEnd()}\n\nCloses #${iid}`;
 }
 
 /** Crash-recovery resume: handoff started (proof posted) but didn't finish. Re-run the

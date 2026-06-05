@@ -41,22 +41,26 @@ You are working a single issue end-to-end in a cold session. Reconstruct all
 context from the issue, the MR description (your durable plan/todo), recent
 commits + diff, and the repo conventions below.
 
+You cannot touch the forge yourself (no token, no network). You speak to the daemon
+ONLY through the final JSON object described under **HOW TO REPORT** below — the
+daemon writes your plan, comments, and MR to the forge on your behalf.
+
 1. **Orient** — read the issue, the MR description (your plan, if present), recent
    commits + diff, and the conventions in this file.
-2. **First session only** — gather context. If the task is ambiguous: post a
-   comment with specific questions, set `maestro::blocked`, stop. Otherwise: write
-   a plan + checkbox todo list into the **MR description**.
+2. **First session only** — gather context. If the task is ambiguous: emit
+   `needs_input` with your questions (you'll be marked blocked). Otherwise: emit a
+   `planComment` (a short summary for the issue) and an `mrDescription` (the detailed
+   plan + a `- [ ]` checkbox todo list) in your final JSON.
 3. **Work the next unchecked item** — one atomic commit per meaningful step.
-4. **After each step** — tick the box in the MR description; post a short progress
-   comment if notable.
+4. **After each step** — re-emit `mrDescription` with the finished boxes ticked
+   (`- [x]`). Keep the `Closes #<issue>` line so merge auto-closes the issue.
 5. **Done** — all boxes checked + definition-of-done met → emit `done`.
-6. **Blocked anytime** — need a human decision → comment the question, label
-   `maestro::blocked`, stop.
+6. **Blocked anytime** — need a human decision → emit `needs_input` with the question.
 
 ## Repo-specific conventions
 
 <!-- Repo authors extend below: test commands, lint rules, architecture notes,
-     definition of done. The read-first / plan-in-MR / atomic-commits /
+     definition of done. The read-first / plan-via-mrDescription / atomic-commits /
      ask-when-unsure spine above is the shared default. -->
 
 - **Test:** `npm test`

@@ -5,6 +5,7 @@ import {
   STATUS_CONTRACT,
   assemblePrompt,
   buildClaudeArgs,
+  topLevelJsonObjects,
 } from '../src/runner/claude-runner.js';
 import {
   FakeStreamExec,
@@ -79,6 +80,57 @@ describe('RUN-1/2 — parse done / needs_input / in_progress', () => {
   });
 });
 
+// --- RUN-1c: #48 plan channel (planComment / mrDescription) ----------------
+
+describe('RUN-1c — agent plan fields ride the final JSON to the daemon (#48)', () => {
+  it('carries planComment and mrDescription alongside the status', async () => {
+    const mrDescription =
+      '## Plan\n\nFix it.\n\n## Todo\n- [x] step one\n- [ ] step two\n\nCloses #42';
+    const { result } = run({
+      lines: [
+        SYSTEM,
+        resultLine({
+          status: 'in_progress',
+          summary: 'planned',
+          planComment: 'I will fix it',
+          mrDescription,
+        }),
+      ],
+    });
+    expect(await result).toEqual({
+      status: 'in_progress',
+      summary: 'planned',
+      planComment: 'I will fix it',
+      mrDescription,
+    });
+  });
+
+  it('survives a multi-line mrDescription containing braces (a code fence)', async () => {
+    const mrDescription = '## Plan\n```ts\nconst x = { a: 1 };\n```\n- [ ] do it';
+    const { result } = run({
+      lines: [SYSTEM, resultLine({ status: 'done', summary: 'ok', mrDescription })],
+    });
+    const r = await result;
+    expect(r.status).toBe('done');
+    expect(r.mrDescription).toBe(mrDescription);
+  });
+
+  it('omits the optional fields when the agent does not send them', async () => {
+    const { result } = run({ lines: [SYSTEM, resultLine({ status: 'done', summary: 'ok' })] });
+    const r = await result;
+    expect(r.planComment).toBeUndefined();
+    expect(r.mrDescription).toBeUndefined();
+  });
+
+  it('topLevelJsonObjects ignores braces inside JSON strings and captures nested objects whole', () => {
+    const text = 'prose {"a":"has } and { inside"} more {"status":"done","summary":"s"}';
+    expect(topLevelJsonObjects(text)).toEqual([
+      '{"a":"has } and { inside"}',
+      '{"status":"done","summary":"s"}',
+    ]);
+  });
+});
+
 // --- RUN-3: argv + cold session -------------------------------------------
 
 describe('RUN-3 — claude argv + cold session', () => {
@@ -137,6 +189,10 @@ describe('RUN-3 — claude argv + cold session', () => {
     expect(p).toContain('"status":"needs_input"');
     expect(p).toContain('"status":"done"');
     expect(p).toMatch(/never push|daemon pushes/i); // agent commits; daemon pushes
+    // #48: the contract teaches the agent the plan-channel fields the daemon writes for it
+    expect(p).toContain('mrDescription');
+    expect(p).toContain('planComment');
+    expect(p).toMatch(/checkbox|\[ \]/); // the MR todo is a checkbox list
   });
 });
 
