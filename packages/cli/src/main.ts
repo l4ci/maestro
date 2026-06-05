@@ -57,23 +57,23 @@ function loadConfig(configPath: string) {
   return parsed.value;
 }
 
-/** Construct the concrete adapter for a repo's forge — the one forge-aware seam. */
+/** Construct the concrete adapter for a repo's forge+host — the one forge-aware seam. */
 function makeAdapter(repo: RepoRef, config: MaestroConfig, exec: Exec): ForgeAdapter {
   const botUser = config.defaults.bot_user;
   if (repo.forge === 'gitlab') {
-    const gl = config.forges.gitlab;
-    if (!gl) throw new Error('no gitlab forge configured');
+    const entry = config.forges.gitlab?.find((e) => e.host === repo.host);
+    if (!entry) throw new Error(`no gitlab forge configured for host '${repo.host}'`);
     return new GitlabAdapter(exec, {
-      token: process.env[gl.token_env] ?? '',
-      host: gl.host,
+      token: process.env[entry.token_env] ?? '',
+      host: entry.host,
       botUser,
     });
   }
-  const gh = config.forges.github;
-  if (!gh) throw new Error('no github forge configured');
+  const entry = config.forges.github?.find((e) => e.host === repo.host);
+  if (!entry) throw new Error(`no github forge configured for host '${repo.host}'`);
   return new GithubAdapter(exec, {
-    token: process.env[gh.token_env] ?? '',
-    host: gh.host,
+    token: process.env[entry.token_env] ?? '',
+    host: entry.host,
     botUser,
   });
 }
@@ -126,8 +126,8 @@ function buildAddDeps(env: Env, url: string): AddRepoDeps {
   // forge token env AND read the template. Any gap → fall back to issue-only onboarding.
   try {
     const repo = repoRefFromUrl(url, config.forges);
-    const tokenEnv =
-      repo.forge === 'github' ? config.forges.github?.token_env : config.forges.gitlab?.token_env;
+    const entries = repo.forge === 'github' ? config.forges.github : config.forges.gitlab;
+    const tokenEnv = entries?.find((e) => e.host === repo.host)?.token_env;
     const templatePath = process.env.MAESTRO_TEMPLATE ?? './templates/WORKFLOW.md';
     if (tokenEnv) {
       const workspace = new WorkspaceManager({
@@ -205,7 +205,7 @@ async function dispatch(cmd: ParsedCommand, env: Env): Promise<number> {
         root: config.defaults.workspaces.root,
         diskCap: config.defaults.workspaces.disk_cap,
         exec,
-        tokenEnv: config.forges.gitlab?.token_env ?? 'MAESTRO_GITLAB_TOKEN',
+        tokenEnv: config.forges.gitlab?.find((e) => e.host === repo.host)?.token_env ?? 'MAESTRO_GITLAB_TOKEN',
       });
       const resolveWorkspace = (iid: number): string | undefined =>
         workspace.workspaceExists(repo, iid)

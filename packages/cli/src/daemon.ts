@@ -69,17 +69,15 @@ const log: Logger = {
 const systemClock: Clock = { now: () => Date.now() };
 const systemRng: Rng = { next: () => Math.random() };
 
-/** One forge adapter per configured forge; selectAdapter() picks per repo.forge. */
+/** One forge adapter per unique (kind, host); selectAdapter() picks per repo. */
 function buildAdapters(config: MaestroConfig, exec: Exec): ForgeAdapter[] {
   const out: ForgeAdapter[] = [];
   const botUser = config.defaults.bot_user;
-  if (config.forges.gitlab) {
-    const { host, token_env } = config.forges.gitlab;
-    out.push(new GitlabAdapter(exec, { token: process.env[token_env] ?? '', host, botUser }));
+  for (const entry of config.forges.gitlab ?? []) {
+    out.push(new GitlabAdapter(exec, { token: process.env[entry.token_env] ?? '', host: entry.host, botUser }));
   }
-  if (config.forges.github) {
-    const { host, token_env } = config.forges.github;
-    out.push(new GithubAdapter(exec, { token: process.env[token_env] ?? '', host, botUser }));
+  for (const entry of config.forges.github ?? []) {
+    out.push(new GithubAdapter(exec, { token: process.env[entry.token_env] ?? '', host: entry.host, botUser }));
   }
   return out;
 }
@@ -126,16 +124,18 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     // Resolve the clone token from the repo's OWN forge — one daemon serves repos on
     // different forges (gh/glab), each with its own token_env (#15).
     tokenEnv: (repo) => {
-      const env = config.forges[repo.forge]?.token_env;
-      if (!env) throw new Error(`no '${repo.forge}' forge configured for ${repo.project}`);
-      return env;
+      const entries = config.forges[repo.forge];
+      const entry = entries?.find((e) => e.host === repo.host);
+      if (!entry) throw new Error(`no '${repo.forge}' forge configured for host '${repo.host}'`);
+      return entry.token_env;
     },
   });
   // Scrub the configured forge token(s) from the agent's env (§13.1): the agent acts
   // with the bot's credentials OUTSIDE the workspace, never finds the token INSIDE it.
-  const secretEnvKeys = [config.forges.gitlab?.token_env, config.forges.github?.token_env].filter(
-    (k): k is string => typeof k === 'string',
-  );
+  const secretEnvKeys = [
+    ...(config.forges.gitlab ?? []).map((e) => e.token_env),
+    ...(config.forges.github ?? []).map((e) => e.token_env),
+  ];
   const runner = new ClaudeRunner(exec, { secretEnvKeys });
   const slots = new SlotAccountant(config.defaults.concurrency.global_max);
   const inFlight = new InFlightSet(); // per-issue dedup across overlapping passes (#18)

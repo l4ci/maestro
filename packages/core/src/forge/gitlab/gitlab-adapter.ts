@@ -84,10 +84,12 @@ interface RawLabelEvent {
 }
 
 export class GitlabAdapter implements ForgeAdapter {
-  readonly kind = 'gitlab' as const;
+  readonly kind = "gitlab" as const;
+  readonly host: string;
   readonly #c: ForgeCli;
 
   constructor(exec: Exec, cfg: GitlabClientConfig) {
+    this.host = cfg.host;
     this.#c = new ForgeCli(exec, {
       bin: 'glab',
       forge: 'gitlab',

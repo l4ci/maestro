@@ -14,6 +14,8 @@ defaults:
     disk_cap: 20GB # evict above this
     cleanup: lru # lru | on_terminal
 
+# Forge configs: single-object shorthand (one host per kind) or array
+# (multiple hosts per kind — e.g. gitlab.com + self-hosted).
 forges:
   gitlab:
     host: gitlab.com
@@ -25,6 +27,8 @@ forges:
 repos:
   - url: gitlab.com/group/api # forge inferred from host
   - url: github.com/org/web
+  # Self-hosted GitLab example (needs a second entry in forges.gitlab array):
+  # - url: git.digital-masters.de/digitalmasters/internal-tools/dm-docu-gen
     overrides:
       concurrency:
         max_active: 1

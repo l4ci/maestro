@@ -77,11 +77,13 @@ const MAESTRO_PREFIX = (() => {
 
 export class GithubAdapter implements ForgeAdapter {
   readonly kind = 'github' as const;
+  readonly host: string;
   readonly #c: ForgeCli;
   readonly #snapMemo = new TtlMemoizer<string, IssueSnapshot>(5_000);
   readonly #stateMemo = new TtlMemoizer<string, 'open' | 'closed' | 'missing'>(5_000);
 
   constructor(exec: Exec, cfg: GithubClientConfig) {
+    this.host = cfg.host;
     this.#c = new ForgeCli(exec, {
       bin: 'gh',
       forge: 'github',

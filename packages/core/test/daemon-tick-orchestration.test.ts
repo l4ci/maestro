@@ -372,12 +372,19 @@ describe('H1 — a full tick runs lifecycle then cleanup', () => {
   });
 });
 
-describe('H2 — adapter selected by RepoRef.forge', () => {
-  it('picks the adapter whose kind matches the repo forge', () => {
-    const gitlab = { kind: 'gitlab' } as never;
-    const github = { kind: 'github' } as never;
+describe('H2 — adapter selected by RepoRef.forge + host', () => {
+  it('picks the adapter whose kind AND host match the repo', () => {
+    const gitlab = { kind: 'gitlab', host: 'gitlab.com' } as never;
+    const github = { kind: 'github', host: 'github.com' } as never;
     expect(selectAdapter(repo, [gitlab, github])).toBe(gitlab);
-    expect(selectAdapter({ ...repo, forge: 'github' }, [gitlab, github])).toBe(github);
-    expect(() => selectAdapter({ ...repo, forge: 'github' }, [gitlab])).toThrow(/no adapter/);
+    expect(selectAdapter({ ...repo, forge: 'github', host: 'github.com' }, [gitlab, github])).toBe(github);
+    expect(() => selectAdapter({ ...repo, forge: 'github', host: 'github.com' }, [gitlab])).toThrow(/no adapter/);
+  });
+
+  it('disambiguates multiple adapters of the same kind by host', () => {
+    const gitlabCom = { kind: 'gitlab', host: 'gitlab.com' } as never;
+    const gitlabSelf = { kind: 'gitlab', host: 'git.digital-masters.de' } as never;
+    expect(selectAdapter({ ...repo, host: 'gitlab.com' }, [gitlabCom, gitlabSelf])).toBe(gitlabCom);
+    expect(selectAdapter({ ...repo, host: 'git.digital-masters.de' }, [gitlabCom, gitlabSelf])).toBe(gitlabSelf);
   });
 });
