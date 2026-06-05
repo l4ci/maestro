@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { RunnerInput } from '../src/contracts/index.js';
-import { ClaudeRunner, assemblePrompt, buildClaudeArgs } from '../src/runner/claude-runner.js';
+import {
+  ClaudeRunner,
+  STATUS_CONTRACT,
+  assemblePrompt,
+  buildClaudeArgs,
+} from '../src/runner/claude-runner.js';
 import {
   FakeStreamExec,
   type StreamScript,
@@ -208,6 +213,21 @@ describe('RUN-4b — recover status from the transcript when the final message o
     const r = await result;
     expect(r.status).toBe('in_progress');
     expect(r.summary).toMatch(/no parseable/);
+  });
+
+  it('an agent that ECHOES the contract never recovers a false done (safety invariant #4)', async () => {
+    // The §10 contract text literally contains {"status":"done",...}. If the agent quotes
+    // it mid-reasoning and then omits the real block, recovery must NOT hand off as done.
+    // It degrades to in_progress because the contract lists in_progress last and extractStatus
+    // prefers the last block — the daemon re-runs rather than reviewing incomplete work.
+    const { result } = run({
+      lines: [
+        SYSTEM,
+        assistantLine(`Here is the format I must use:\n${STATUS_CONTRACT}`),
+        resultText('let me get to work'),
+      ],
+    });
+    expect((await result).status).toBe('in_progress');
   });
 });
 
