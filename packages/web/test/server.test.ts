@@ -14,13 +14,25 @@ const cannedDashboard: DashboardView = {
   repos: [
     {
       repo,
-      issues: [{ iid: 42, title: 'Do the thing', state: 'in-review' }],
+      issues: [
+        {
+          iid: 42,
+          title: 'Do the thing',
+          state: 'in-review',
+          issueUrl: 'gitlab.com/g/r/-/issues/42',
+        },
+      ],
       counts: { new: 0, 'in-progress': 0, 'in-review': 1, blocked: 0, done: 0 },
     },
   ],
 };
 
-const cannedIssue: IssueView = { iid: 42, title: 'Do the thing', state: 'in-review' };
+const cannedIssue: IssueView = {
+  iid: 42,
+  title: 'Do the thing',
+  state: 'in-review',
+  issueUrl: 'gitlab.com/g/r/-/issues/42',
+};
 
 function fakeDeps(over: Partial<ServerDeps> = {}): ServerDeps {
   return {

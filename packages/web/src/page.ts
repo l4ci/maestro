@@ -61,6 +61,14 @@ export const DASHBOARD_HTML = `<!doctype html>
   .s-in-review { background:#12283a; color:#58a6ff; }
   .s-blocked { background:#3a1216; color:#f47067; }
   .s-done { background:#12331c; color:#57ab5a; }
+  td.iid a { color: inherit; text-decoration: none; }
+  td.iid a:hover { color: #58a6ff; text-decoration: underline; }
+  a.mr {
+    margin-left: 8px; font-size: 12px; color: #58a6ff; text-decoration: none;
+    border: 1px solid #21333f; border-radius: 999px; padding: 1px 7px;
+  }
+  a.mr:hover { text-decoration: underline; }
+  a.mr.draft { color: #768390; border-color: #2a2f37; } /* draft MR/PR reads as muted */
   .empty { color: #768390; padding: 16px; }
   .err { color: #f47067; padding: 12px 16px; font-size: 13px; word-break: break-word; }
   #msg { min-height: 20px; color: #f47067; font-size: 13px; margin-bottom: 12px; }
@@ -96,6 +104,31 @@ function span(className, text) {
 
 function badge(state) {
   return span('badge s-' + state, state);
+}
+
+// Allowlist a forge-controlled URL to http(s) so a hostile webUrl can't smuggle a
+// javascript: URI into an anchor. Unparsable or off-scheme → inert '#'.
+function safeUrl(href) {
+  try {
+    const u = new URL(href, window.location.href);
+    if (u.protocol === 'https:' || u.protocol === 'http:') return u.href;
+  } catch {
+    // unparsable URL → fall through to '#'
+  }
+  return '#';
+}
+
+// An external forge link (#35). href is set as a property, not via innerHTML, so the
+// forge-controlled URL can never break out into markup — same inert-text guarantee
+// as titles (§13.1). Opens in a new tab; rel guards against tab-nabbing.
+function link(className, text, href) {
+  const a = document.createElement('a');
+  a.className = className;
+  a.textContent = text;
+  a.href = safeUrl(href);
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  return a;
 }
 
 // Keyed child reconciliation (#42): reuse nodes by data-key, create missing ones,
@@ -169,7 +202,7 @@ function updateRepoCard(card, r) {
   const rows = r.error
     ? [{ key: '~error', error: r.error }]
     : ((r.issues || []).length
-        ? r.issues.map((i) => ({ key: r.repo.url + '#' + i.iid, issue: i }))
+        ? r.issues.map((i) => ({ key: r.repo.url + '#' + i.iid, issue: i, forge: r.repo.forge }))
         : [{ key: '~empty' }]);
   reconcile(card.querySelector('tbody'), rows, (x) => x.key, createRow, updateRow);
 }
@@ -187,9 +220,11 @@ function createRow(x) {
     if (x.key === '~empty') cell.textContent = 'no open issues assigned to the bot';
     tr.append(cell);
   } else {
+    const iid = td('iid');
+    iid.append(link('', '', '')); // forge issue link; text + href filled in updateRow
     const state = td('state');
     state.append(badge(x.issue.state));
-    tr.append(td('iid'), state, td(''));
+    tr.append(iid, state, td(''));
   }
   return tr;
 }
@@ -201,11 +236,20 @@ function updateRow(tr, x) {
     return;
   }
   const [iid, state, title] = tr.children;
-  iid.textContent = '#' + x.issue.iid;
+  const issueLink = iid.firstElementChild;
+  issueLink.textContent = '#' + x.issue.iid;
+  issueLink.href = safeUrl(x.issue.issueUrl);
   const b = state.firstElementChild;
   b.className = 'badge s-' + x.issue.state;
   b.textContent = x.issue.state;
-  title.textContent = x.issue.title;
+  // Title cell holds the title text node plus an optional MR/PR link; rebuild both so a
+  // newly-opened (or vanished) MR is reflected across polls without recreating the row.
+  const noun = x.forge === 'github' ? 'PR' : 'MR';
+  const children = [x.issue.title];
+  if (x.issue.mrUrl) {
+    children.push(link('mr' + (x.issue.isDraft ? ' draft' : ''), noun + ' ↗', x.issue.mrUrl));
+  }
+  title.replaceChildren(...children);
 }
 
 async function refresh() {
