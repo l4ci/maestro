@@ -56,17 +56,34 @@ export function deriveState(snapshot: IssueSnapshot, settings: RepoSettings): Li
 }
 
 /**
+ * A comment provably written by a human. A different author is the normal proof. The
+ * same-account escape hatch (bot account == operator account): a body STARTING with
+ * `/maestro` — the agent cannot touch the forge (no token, §13.1) and every daemon
+ * comment template leads with a heading, so a body-start command can only come from a
+ * keyboard. Deliberately NOT multiline: agent-returned text rides mid-body inside daemon
+ * comments, so a smuggled `/maestro` line must never count.
+ */
+function isHumanComment(c: Comment, botUser: string): boolean {
+  return c.author.username !== botUser || /^\/maestro\b/.test(c.body);
+}
+
+/**
  * Edge-triggered unblock — the issue-thread mirror of `computeChangesRequested` (§0.3).
  * The bot's blocking comment (posted alongside the maestro:blocked label, §0.9) is the
- * block marker; the maintainer's answer is any non-bot comment that post-dates it. Returns
- * the answering comments in `recentComments` order (newest-first), or [] if the block still
- * stands. No bot comment ⇒ no marker ⇒ stay parked: never self-unblock on stale or absent
- * signal (fail-safe, like the changes-requested edge's `blockingAt === undefined → false`).
+ * block marker; the maintainer's answer is any HUMAN comment (isHumanComment — covers
+ * same-account `/maestro` replies) that post-dates it. Returns the answering comments in
+ * `recentComments` order (newest-first), or [] if the block still stands. No bot comment
+ * ⇒ no marker ⇒ stay parked: never self-unblock on stale or absent signal (fail-safe,
+ * like the changes-requested edge's `blockingAt === undefined → false`).
  */
 function repliesSinceBlock(recentComments: Comment[], botUser: string): Comment[] {
-  const blockedAt = recentComments.find((c) => c.author.username === botUser)?.createdAt;
+  // The marker is the newest DAEMON comment — same-account human replies are excluded
+  // by the human predicate so they cannot shadow the block marker.
+  const blockedAt = recentComments.find(
+    (c) => c.author.username === botUser && !isHumanComment(c, botUser),
+  )?.createdAt;
   if (blockedAt === undefined) return [];
-  return recentComments.filter((c) => c.author.username !== botUser && c.createdAt > blockedAt);
+  return recentComments.filter((c) => isHumanComment(c, botUser) && c.createdAt > blockedAt);
 }
 
 /** Idempotent capacity marker (#53/#29): one label write, then a stable no-op. */
@@ -97,7 +114,8 @@ export function deriveStage(snapshot: IssueSnapshot, settings: RepoSettings): St
 
 /** The definition gate (#29): a human applied the todo label (possibly at creation —
  *  the explicit skip-define escape hatch), or replied `/maestro approve` after the
- *  define agent's AC draft. Bot comments can never approve. */
+ *  define agent's AC draft. Agent/daemon comments can never approve (isHumanComment:
+ *  a same-account approve must carry the command at body start). */
 function acApproved(snapshot: IssueSnapshot, settings: RepoSettings): boolean {
   if (snapshot.issue.labels.includes(settings.labels.todo)) return true;
   const draftAt = snapshot.recentComments.find((c) =>
@@ -106,7 +124,7 @@ function acApproved(snapshot: IssueSnapshot, settings: RepoSettings): boolean {
   if (draftAt === undefined) return false;
   return snapshot.recentComments.some(
     (c) =>
-      c.author.username !== settings.botUser &&
+      isHumanComment(c, settings.botUser) &&
       c.createdAt > draftAt &&
       /^\/maestro approve\b/m.test(c.body),
   );
@@ -132,7 +150,7 @@ export function analyzeReview(
   settings: RepoSettings,
 ): { phase: 'implementing' | 'review-due' | 'passed'; rounds: number } {
   const comments = snapshot.recentComments; // newest-first
-  const lastHumanAt = comments.find((c) => c.author.username !== settings.botUser)?.createdAt ?? '';
+  const lastHumanAt = comments.find((c) => isHumanComment(c, settings.botUser))?.createdAt ?? '';
   const rounds = comments.filter(
     (c) => REVIEW_FAIL_RE.test(c.body) && c.createdAt > lastHumanAt,
   ).length;

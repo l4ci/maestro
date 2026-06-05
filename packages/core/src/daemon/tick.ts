@@ -337,7 +337,7 @@ function blockedComment(summary: string): string {
     '',
     summary,
     '',
-    '_Reply in this thread to answer; maestro resumes this issue on its next pass._',
+    '_Reply in this thread to answer; maestro resumes this issue on its next pass. If you write from the bot’s own account, start the reply with `/maestro`._',
   ].join('\n');
 }
 
@@ -621,7 +621,7 @@ async function runReview(
     await ctx.adapter.commentIssue(
       repo,
       issue.iid,
-      `### 🚧 Blocked — review bounce cap reached (${maxRounds} rounds)\n\nThe internal review keeps finding blocking issues. Outstanding findings are in the round comments above.\n\n_Reply in this thread to reset the count and resume; any human comment clears it._`,
+      `### 🚧 Blocked — review bounce cap reached (${maxRounds} rounds)\n\nThe internal review keeps finding blocking issues. Outstanding findings are in the round comments above.\n\n_Reply in this thread to reset the count and resume; any human comment clears it (from the bot’s own account, start with \`/maestro\`)._`,
     );
     ctx.log.warn('review bounce cap hit — escalated to blocked (#29)', {
       repo: repoKey(repo),
