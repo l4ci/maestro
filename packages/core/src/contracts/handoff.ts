@@ -13,7 +13,7 @@ export interface HandoffInput {
   ticketCreator: string; // issue.author.username — the reviewer to assign
   settings: RepoSettings;
   adapter: ForgeAdapter;
-  proof: ProofResult;
+  proof: ProofResult[]; // one entry per configured strategy; all-must-pass at handoff
 }
 
 export type HandoffFn = (input: HandoffInput) => Promise<void>;

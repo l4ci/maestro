@@ -9,7 +9,13 @@
 // CAPACITY (§14): only `playwright` touches a browser (~300–700MB); it must tear
 // down anything it started so the daemon doesn't leak processes.
 
-import type { Exec, ProofInput, ProofResult, ProofStrategyKind } from '../contracts/index.js';
+import type {
+  Exec,
+  ProofInput,
+  ProofResult,
+  ProofStrategyKind,
+  ProofStrategySpec,
+} from '../contracts/index.js';
 
 const OUTPUT_CAP = 4000; // bound captured output so a chatty command can't bloat a comment
 
@@ -196,7 +202,7 @@ export function generateProof(input: ProofInput, tuning?: PlaywrightTuning): Pro
  */
 export async function generateProofs(
   base: Omit<ProofInput, 'workflowProof'>,
-  strategies: { type: ProofStrategyKind; command?: string }[],
+  strategies: ProofStrategySpec[],
   tuning?: PlaywrightTuning,
 ): Promise<ProofResult[]> {
   const results: ProofResult[] = [];

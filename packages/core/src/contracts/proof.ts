@@ -6,9 +6,17 @@ import type { WorkflowEnvironment } from './workflow-schema.js';
 
 export type ProofStrategyKind = 'playwright' | 'test-output' | 'diff-summary' | 'none';
 
+/** One configured proof strategy from WORKFLOW.md `proof` (one of a possible list).
+ *  `command` is `| undefined` to match the WorkflowSchema-inferred type verbatim
+ *  (zod `.optional()` under exactOptionalPropertyTypes). */
+export interface ProofStrategySpec {
+  type: ProofStrategyKind;
+  command?: string | undefined;
+}
+
 export interface ProofInput {
   workspaceDir: string;
-  workflowProof: { type: ProofStrategyKind; command?: string };
+  workflowProof: ProofStrategySpec;
   environment: WorkflowEnvironment; // base_url / start_command / seed_command / health_check
   git: { target: string }; // diff base for diff-summary (AM-16); from RepoSettings.git.target
   exec: Exec;
