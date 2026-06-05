@@ -72,6 +72,7 @@ describe('E1 — assembleDashboard projects forge + logs, read-only', () => {
 
     expect(view.repos).toHaveLength(1);
     expect(view.repos[0]?.issues[0]?.iid).toBe(42);
+    expect(view.repos[0]?.issues[0]?.author).toEqual({ username: 'reporter', id: 'id-reporter' });
     expect(view.repos[0]?.issues[0]?.lastLog).toBe('cloned workspace');
     // only read methods exist on a ReadOnlyForgeAdapter; assert none beyond reads ran
     expect(new Set(rec.calls)).toEqual(new Set(['listAssignedOpenIssues', 'getSnapshot']));
@@ -142,5 +143,35 @@ describe('assembleIssue — single issue view for status', () => {
     expect(view.mrUrl).toBe('https://mr/7');
     expect(view.isDraft).toBe(false);
     expect(view.approved).toBe(true);
+  });
+
+  it('exposes the issue author and, once the MR is assigned, the reviewer (#37)', async () => {
+    const snaps = new Map([
+      [
+        7,
+        makeSnapshot({
+          issue: {
+            iid: 7,
+            author: { username: 'reporter', id: '2', avatarUrl: 'https://f/a.png' },
+          },
+          mr: { assignees: [{ username: 'reporter', id: '2', avatarUrl: 'https://f/a.png' }] },
+        }),
+      ],
+    ]);
+    const rec = roAdapter(snaps);
+
+    const view = await assembleIssue(repo, 7, deps(new Map([[repo.url, rec.adapter]])));
+
+    expect(view.author).toEqual({ username: 'reporter', id: '2', avatarUrl: 'https://f/a.png' });
+    expect(view.reviewer).toEqual({ username: 'reporter', id: '2', avatarUrl: 'https://f/a.png' });
+  });
+
+  it('omits the reviewer when the MR has no assignee yet (pre-handoff)', async () => {
+    const snaps = new Map([[8, makeSnapshot({ issue: { iid: 8 }, mr: { assignees: [] } })]]);
+    const rec = roAdapter(snaps);
+
+    const view = await assembleIssue(repo, 8, deps(new Map([[repo.url, rec.adapter]])));
+
+    expect(view.reviewer).toBeUndefined();
   });
 });

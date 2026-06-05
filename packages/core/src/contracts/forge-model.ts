@@ -15,6 +15,7 @@ export type LifecycleState =
 export interface ForgeUser {
   username: string; // canonical handle, no '@'
   id: string; // forge-native id as string
+  avatarUrl?: string; // forge-hosted profile image, when the raw payload carries one (#37)
 }
 
 export interface Label {

@@ -12,6 +12,7 @@ import type {
 export interface RawUser {
   id: number | string;
   username: string;
+  avatar_url?: string;
 }
 export interface RawIssue {
   iid: number;
@@ -59,7 +60,11 @@ export const EMPTY_APPROVALS: ApprovalState = {
 };
 
 export function normalizeUser(u: RawUser): ForgeUser {
-  return { username: u.username, id: String(u.id) };
+  return {
+    username: u.username,
+    id: String(u.id),
+    ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
+  };
 }
 
 export function normalizeIssue(raw: RawIssue): Issue {
