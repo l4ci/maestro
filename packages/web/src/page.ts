@@ -69,6 +69,14 @@ export const DASHBOARD_HTML = `<!doctype html>
   }
   a.mr:hover { text-decoration: underline; }
   a.mr.draft { color: #768390; border-color: #2a2f37; } /* draft MR/PR reads as muted */
+  td.people { width: 96px; white-space: nowrap; }
+  .avatar {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; border-radius: 50%; vertical-align: middle;
+    font-size: 10px; font-weight: 600; color: #d8dee4; overflow: hidden;
+    border: 1px solid #30363d; object-fit: cover; background: #1f2630;
+  }
+  .avatar.reviewer { margin-left: 4px; outline: 1px solid #2f81f7; }
   .empty { color: #768390; padding: 16px; }
   .err { color: #f47067; padding: 12px 16px; font-size: 13px; word-break: break-word; }
   #msg { min-height: 20px; color: #f47067; font-size: 13px; margin-bottom: 12px; }
@@ -130,6 +138,35 @@ function link(className, text, href) {
   a.target = '_blank';
   a.rel = 'noopener noreferrer';
   return a;
+}
+
+// A small round person avatar (#37). When the forge gives an avatar_url we render an
+// <img> — but its src is forge-controlled, so it goes through the SAME http(s) allowlist
+// as every other URL that lands in the DOM (#35); a javascript:/data: payload degrades to
+// the initials fallback rather than being assigned raw. Without a usable URL we draw the
+// username's initial in a circle whose hue is derived from the name — no external avatar
+// service is guessed. The title carries a role-prefixed username for hover.
+function initialBg(username) {
+  let h = 0;
+  for (let i = 0; i < username.length; i++) h = (h * 31 + username.charCodeAt(i)) % 360;
+  return 'hsl(' + h + ' 45% 32%)';
+}
+function avatar(role, person) {
+  const title = role + ': ' + person.username;
+  const safe = person.avatarUrl ? safeUrl(person.avatarUrl) : '#';
+  if (safe !== '#') {
+    const img = document.createElement('img');
+    img.className = 'avatar ' + role;
+    img.src = safe;
+    img.alt = person.username;
+    img.title = title;
+    return img;
+  }
+  const initial = (person.username.trim()[0] || '?').toUpperCase();
+  const s = span('avatar ' + role, initial);
+  s.title = title;
+  s.style.background = initialBg(person.username);
+  return s;
 }
 
 // Keyed child reconciliation (#42): reuse nodes by data-key, create missing ones,
@@ -217,7 +254,7 @@ function createRow(x) {
   };
   if (x.key === '~error' || x.key === '~empty') {
     const cell = td(x.key === '~error' ? 'err' : 'empty');
-    cell.colSpan = 3;
+    cell.colSpan = 4;
     if (x.key === '~empty') cell.textContent = 'no open issues assigned to the bot';
     tr.append(cell);
   } else {
@@ -225,7 +262,8 @@ function createRow(x) {
     iid.append(link('', '', '')); // forge issue link; text + href filled in updateRow
     const state = td('state');
     state.append(badge(x.issue.state));
-    tr.append(iid, state, td(''));
+    // People cell: author (+ reviewer once handed off) as round avatars, filled in updateRow.
+    tr.append(iid, state, td(''), td('people'));
   }
   return tr;
 }
@@ -236,7 +274,7 @@ function updateRow(tr, x) {
     tr.firstElementChild.textContent = '⚠ ' + x.error;
     return;
   }
-  const [iid, state, title] = tr.children;
+  const [iid, state, title, people] = tr.children;
   const issueLink = iid.firstElementChild;
   issueLink.textContent = '#' + x.issue.iid;
   issueLink.href = safeUrl(x.issue.issueUrl);
@@ -251,6 +289,12 @@ function updateRow(tr, x) {
     children.push(link('mr' + (x.issue.isDraft ? ' draft' : ''), noun + ' ↗', x.issue.mrUrl));
   }
   title.replaceChildren(...children);
+  // Rebuild avatars every poll so a reviewer assigned (or unassigned) at handoff is
+  // reflected without recreating the row — same update-path discipline the MR link uses.
+  const avatars = [];
+  if (x.issue.author) avatars.push(avatar('author', x.issue.author));
+  if (x.issue.reviewer) avatars.push(avatar('reviewer', x.issue.reviewer));
+  people.replaceChildren(...avatars);
 }
 
 async function refresh() {

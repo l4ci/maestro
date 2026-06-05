@@ -5,6 +5,7 @@
 // never re-derived here, so the dashboard and the daemon always agree.
 
 import type {
+  ForgeUser,
   LifecycleState,
   LogReader,
   ReadOnlyForgeAdapter,
@@ -22,6 +23,8 @@ export interface IssueView {
   isDraft?: boolean;
   approved?: boolean;
   lastLog?: string;
+  author: ForgeUser; // the issue reporter (#37)
+  reviewer?: ForgeUser; // MR assignee — the ticket creator assigned at handoff; absent before (#37)
 }
 
 export interface RepoView {
@@ -51,12 +54,17 @@ async function issueView(repo: RepoRef, iid: number, deps: AssembleDeps): Promis
   const state = deriveState(snapshot, deps.settingsFor(repo));
   const lastLog = (await deps.logs.readIssueLog(repo, iid, 1)).at(-1)?.msg;
   const mr = snapshot.mr;
+  // The reviewer is whoever the MR is assigned to — handoff assigns the ticket creator
+  // (§7), so before handoff (or on a bare MR) there is simply no assignee to show.
+  const reviewer = mr?.assignees[0];
   return {
     iid,
     title: snapshot.issue.title,
     state,
     issueUrl: snapshot.issue.webUrl,
+    author: snapshot.issue.author,
     ...(mr ? { mrUrl: mr.webUrl, isDraft: mr.isDraft, approved: mr.approvals.approved } : {}),
+    ...(reviewer ? { reviewer } : {}),
     ...(lastLog ? { lastLog } : {}),
   };
 }

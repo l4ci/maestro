@@ -14,6 +14,7 @@ import type {
 export interface RawUser {
   id: number | string;
   login: string;
+  avatar_url?: string;
 }
 /** GitHub labels are objects on issues/PRs; some endpoints return bare strings. */
 export type RawLabel = { name: string; id?: number | string } | string;
@@ -77,7 +78,11 @@ export const EMPTY_APPROVALS: ApprovalState = {
 };
 
 export function normalizeUser(u: RawUser): ForgeUser {
-  return { username: u.login, id: String(u.id) };
+  return {
+    username: u.login,
+    id: String(u.id),
+    ...(u.avatar_url ? { avatarUrl: u.avatar_url } : {}),
+  };
 }
 
 function labelName(l: RawLabel): string {

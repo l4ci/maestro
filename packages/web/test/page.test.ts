@@ -20,6 +20,8 @@ type View = {
       issueUrl?: string;
       mrUrl?: string;
       isDraft?: boolean;
+      author?: { username: string; id: string; avatarUrl?: string };
+      reviewer?: { username: string; id: string; avatarUrl?: string };
     }>;
     counts: Record<string, number>;
     error?: string;
@@ -40,12 +42,15 @@ function view(): View {
             state: 'in-progress',
             issueUrl: 'https://gitlab.com/g/api/-/issues/1',
             mrUrl: 'https://gitlab.com/g/api/-/merge_requests/9',
+            author: { username: 'alice', id: '1', avatarUrl: 'https://gitlab.com/u/alice.png' },
+            reviewer: { username: 'bob', id: '2', avatarUrl: 'https://gitlab.com/u/bob.png' },
           },
           {
             iid: 2,
             title: 'second',
             state: 'new',
             issueUrl: 'https://gitlab.com/g/api/-/issues/2',
+            author: { username: 'carol', id: '3' }, // no avatar URL → initials fallback
           },
         ],
         counts: { ...zero, 'in-progress': 1, new: 1 },
@@ -58,6 +63,7 @@ function view(): View {
             title: 'seventh',
             state: 'in-review',
             issueUrl: 'https://github.com/o/web/issues/7',
+            author: { username: 'dan', id: '4', avatarUrl: 'https://github.com/u/dan.png' },
           },
         ],
         counts: { ...zero, 'in-review': 1 },
@@ -73,7 +79,12 @@ let windows: Array<{ close(): void }> = [];
 
 /** Load the shipped HTML, eval its inline script with fetch stubbed, return window. */
 function loadPage(): PageWindow {
-  const dom = new JSDOM(DASHBOARD_HTML, { runScripts: 'outside-only' });
+  // A non-opaque origin: avatar <img src> point at real https URLs, and jsdom touches
+  // localStorage while resolving them — opaque (about:blank) origins make that throw.
+  const dom = new JSDOM(DASHBOARD_HTML, {
+    runScripts: 'outside-only',
+    url: 'https://maestro.test/',
+  });
   windows.push(dom.window);
   const w = dom.window as unknown as PageWindow;
   // The script's auto-start refresh() must not hit the network; park it forever.
@@ -246,10 +257,11 @@ describe('forge-controlled text stays inert (§13.1)', () => {
     if (!issue) throw new Error('fixture shape');
     issue.title = '<img src=x onerror=alert(1)>';
     w.render(v);
-    expect(w.document.querySelector('#repos img')).toBeNull();
-    expect(rowByKey(w, 'gitlab.com/g/api#1')?.textContent).toContain(
-      '<img src=x onerror=alert(1)>',
-    );
+    // The title text must stay inert: no <img> materializes from it. Scope to the title
+    // cell (3rd <td>) so a legitimate avatar img on the people cell doesn't mask the check.
+    const titleCell = rowByKey(w, 'gitlab.com/g/api#1')?.children[2];
+    expect(titleCell?.querySelector('img')).toBeNull();
+    expect(titleCell?.textContent).toContain('<img src=x onerror=alert(1)>');
   });
 
   it('an HTML-injection error message renders as literal text too', () => {
@@ -357,6 +369,85 @@ describe('issue + MR/PR forge links (#35)', () => {
     w.render(v);
     expect(rowByKey(w, 'gitlab.com/g/api#1')).toBe(row);
     expect(mrAnchor(w, 'gitlab.com/g/api#1')).toBeNull();
+  });
+});
+
+describe('author + reviewer avatars (#37)', () => {
+  const avatars = (w: PageWindow, key: string) =>
+    [...(rowByKey(w, key)?.querySelectorAll('.avatar') ?? [])] as HTMLElement[];
+
+  it('renders an author avatar img from the forge avatar URL, username on hover', () => {
+    const w = loadPage();
+    w.render(view());
+    const [author] = avatars(w, 'gitlab.com/g/api#1');
+    expect(author?.tagName).toBe('IMG');
+    expect((author as HTMLImageElement).getAttribute('src')).toBe('https://gitlab.com/u/alice.png');
+    expect(author?.title).toBe('author: alice');
+    expect(author?.className).toContain('author');
+  });
+
+  it('renders the reviewer avatar only when the MR has an assignee', () => {
+    const w = loadPage();
+    w.render(view());
+    expect(avatars(w, 'gitlab.com/g/api#1')).toHaveLength(2); // author + reviewer
+    const reviewer = avatars(w, 'gitlab.com/g/api#1')[1];
+    expect(reviewer?.title).toBe('reviewer: bob');
+    expect(reviewer?.className).toContain('reviewer');
+    // #2 has an author but no reviewer
+    expect(avatars(w, 'gitlab.com/g/api#2')).toHaveLength(1);
+  });
+
+  it('falls back to an initials circle (no img) when avatarUrl is missing', () => {
+    const w = loadPage();
+    w.render(view());
+    const [author] = avatars(w, 'gitlab.com/g/api#2'); // carol, no avatar URL
+    expect(author?.tagName).toBe('SPAN');
+    expect(author?.textContent).toBe('C');
+    expect(author?.title).toBe('author: carol');
+    expect(author?.style.background).toBeTruthy(); // colored circle
+  });
+
+  it('refuses a non-http(s) avatarUrl: degrades to initials, never an img with a hostile src', () => {
+    const w = loadPage();
+    const v = view();
+    const issue = v.repos[0]?.issues[0];
+    if (!issue?.author) throw new Error('fixture shape');
+    issue.author.avatarUrl = 'javascript:alert(1)'; // hostile forge payload
+    w.render(v);
+    const [author] = avatars(w, 'gitlab.com/g/api#1');
+    expect(author?.tagName).toBe('SPAN'); // no <img> materialized
+    expect(w.document.querySelector('#repos img[src^="javascript:"]')).toBeNull();
+    expect(author?.textContent).toBe('A'); // alice → initials fallback
+  });
+
+  it('a reviewer assigned on a later poll appears without recreating the row', () => {
+    const w = loadPage();
+    w.render(view());
+    const row = rowByKey(w, 'gitlab.com/g/api#2');
+    expect(avatars(w, 'gitlab.com/g/api#2')).toHaveLength(1);
+    const v = view();
+    const issue = v.repos[0]?.issues[1];
+    if (!issue) throw new Error('fixture shape');
+    issue.reviewer = { username: 'eve', id: '5' };
+    w.render(v);
+    expect(rowByKey(w, 'gitlab.com/g/api#2')).toBe(row); // same node, updated in place
+    const after = avatars(w, 'gitlab.com/g/api#2');
+    expect(after).toHaveLength(2);
+    expect(after[1]?.title).toBe('reviewer: eve');
+  });
+
+  it('a reviewer unassigned on a later poll drops their avatar, same row node', () => {
+    const w = loadPage();
+    w.render(view());
+    const row = rowByKey(w, 'gitlab.com/g/api#1');
+    expect(avatars(w, 'gitlab.com/g/api#1')).toHaveLength(2);
+    const v = view();
+    const issue = v.repos[0]?.issues[0];
+    if (!issue) throw new Error('fixture shape');
+    issue.reviewer = undefined;
+    w.render(v);
+    expect(rowByKey(w, 'gitlab.com/g/api#1')).toBe(row);
+    expect(avatars(w, 'gitlab.com/g/api#1')).toHaveLength(1);
   });
 });
 
