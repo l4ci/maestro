@@ -143,13 +143,25 @@ export function assemblePrompt(input: RunnerInput): string {
  *  agent has no forge token, so the daemon (not the agent) acts on it. */
 export const STATUS_CONTRACT =
   'Make your changes as atomic git commits in this working directory — the daemon pushes ' +
-  'them; never push or use the network yourself. You communicate ONLY through your final ' +
-  'message: end it with EXACTLY one JSON object on its own line, with nothing after it:\n' +
+  'them; never push or use the network yourself. You have NO access to the issue or MR ' +
+  'beyond the context above: you cannot post comments or edit the MR yourself. You ' +
+  'communicate ONLY through your final message: end it with EXACTLY one JSON object on its ' +
+  'own line, with nothing after it:\n' +
   '  {"status":"done","summary":"<what you changed>"}          — work complete, hand off for review\n' +
   '  {"status":"needs_input","summary":"<your questions>"}     — you need a human decision; you will be\n' +
   '                                                              marked blocked and the summary is posted to\n' +
   '                                                              them verbatim. Put questions HERE, never in a file.\n' +
-  '  {"status":"in_progress","summary":"<where you are>"}      — you ran out of turns; will resume next tick';
+  '  {"status":"in_progress","summary":"<where you are>"}      — you ran out of turns; will resume next tick\n' +
+  '\n' +
+  'To make your PLAN VISIBLE (the daemon, not you, writes it to the forge), add these ' +
+  'OPTIONAL fields to that same JSON object:\n' +
+  '  "mrDescription": "<full Markdown for the MR description: a detailed plan AND a ' +
+  '`- [ ]` / `- [x]` checkbox todo list>"\n' +
+  '      The MR description is your DURABLE plan/todo — it is fed back to you next session. ' +
+  'Re-emit it each session with the boxes you have finished ticked (`- [x]`). Keep the ' +
+  '`Closes #<issue>` line so the merge auto-closes the issue.\n' +
+  '  "planComment": "<a short plan summary>"\n' +
+  '      Posted ONCE as an issue comment on your first planning session. Omit it afterwards.';
 
 interface StreamLine {
   type?: string;
@@ -182,17 +194,63 @@ export function parseAgentResult(lines: string[], exitCode: number): AgentResult
 
 function extractStatus(result: unknown): AgentResult | null {
   if (typeof result !== 'string') return null;
-  // Try the whole field as JSON, then the last {...} block mentioning "status".
-  const candidates: string[] = [result];
-  const matches = result.match(/\{[^{}]*"status"[^{}]*\}/g);
-  if (matches) candidates.push(...matches.reverse());
-  for (const c of candidates) {
-    const obj = tryParse(c) as { status?: unknown; summary?: unknown } | null;
-    if (obj && isAgentStatus(obj.status)) {
-      return { status: obj.status, summary: typeof obj.summary === 'string' ? obj.summary : '' };
-    }
+  // Scan for balanced top-level {...} objects (string-aware), newest first. A flat regex
+  // can't survive a multi-line `mrDescription` with Markdown braces/newlines (#48); a
+  // brace scanner that ignores braces inside JSON strings can.
+  for (const span of topLevelJsonObjects(result).reverse()) {
+    const obj = tryParse(span) as Record<string, unknown> | null;
+    if (obj && isAgentStatus(obj.status)) return toAgentResult(obj);
   }
   return null;
+}
+
+/** Build the result, carrying the optional #48 plan-channel fields when present. */
+function toAgentResult(obj: Record<string, unknown>): AgentResult {
+  const out: AgentResult = {
+    status: obj.status as AgentStatus,
+    summary: typeof obj.summary === 'string' ? obj.summary : '',
+  };
+  if (typeof obj.mrDescription === 'string' && obj.mrDescription.trim()) {
+    out.mrDescription = obj.mrDescription;
+  }
+  if (typeof obj.planComment === 'string' && obj.planComment.trim()) {
+    out.planComment = obj.planComment;
+  }
+  return out;
+}
+
+/**
+ * Return every balanced top-level `{...}` substring, in document order. String-aware:
+ * braces and escapes inside JSON string literals don't affect nesting, so a markdown
+ * `mrDescription` carrying `{`, `}` or escaped quotes is matched as one object.
+ */
+export function topLevelJsonObjects(text: string): string[] {
+  const spans: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === '}' && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        spans.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return spans;
 }
 
 function isAgentStatus(s: unknown): s is AgentStatus {
