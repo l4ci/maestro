@@ -6,6 +6,7 @@
 export * from './ports.js';
 export * from './rate-limit-gate.js';
 export * from './slots.js';
+export * from './heartbeat.js';
 export * from './clock.js';
 export * from './scheduler.js';
 export * from './tick.js';

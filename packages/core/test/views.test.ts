@@ -79,6 +79,36 @@ describe('E1 — assembleDashboard projects forge + logs, read-only', () => {
   });
 });
 
+describe('daemon heartbeat threads onto the dashboard view (#40)', () => {
+  const snaps = () =>
+    new Map([[1, makeSnapshot({ issue: { iid: 1, labels: [labels.inProgress] } })]]);
+
+  it('carries the heartbeat when the reader returns one', async () => {
+    const rec = roAdapter(snaps());
+    const beat = { lastTickAt: 123, activeWorkers: 1, maxWorkers: 2, tickIntervalMs: 1000 };
+    const view = await assembleDashboard([repo], {
+      ...deps(new Map([[repo.url, rec.adapter]])),
+      heartbeat: () => beat,
+    });
+    expect(view.daemon).toEqual(beat);
+  });
+
+  it('omits daemon entirely when no heartbeat file exists (daemon never ran)', async () => {
+    const rec = roAdapter(snaps());
+    const view = await assembleDashboard([repo], {
+      ...deps(new Map([[repo.url, rec.adapter]])),
+      heartbeat: () => undefined,
+    });
+    expect('daemon' in view).toBe(false);
+  });
+
+  it('is undefined when no heartbeat dep is wired at all', async () => {
+    const rec = roAdapter(snaps());
+    const view = await assembleDashboard([repo], deps(new Map([[repo.url, rec.adapter]])));
+    expect(view.daemon).toBeUndefined();
+  });
+});
+
 describe('E2 — derived state equals core deriveState', () => {
   it('an in-review snapshot renders as in-review', async () => {
     const snaps = new Map([

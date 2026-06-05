@@ -35,6 +35,7 @@ import {
   type ForgeAdapter,
   GithubAdapter,
   GitlabAdapter,
+  HeartbeatWriter,
   InFlightSet,
   type Logger,
   type MaestroConfig,
@@ -123,12 +124,18 @@ export interface DaemonOptions {
   tickIntervalMs?: number;
   /** How often to re-fetch each repo's WORKFLOW.md from its default branch (default 60s). */
   workflowRefreshMs?: number;
+  /** Where the heartbeat status file is written; the web side reads the same root (#40). */
+  logsRoot?: string;
 }
 
 /** Wire core + I/O and run forever. Returns stop() for graceful shutdown. */
 export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
   const configPath = opts.configPath ?? process.env.MAESTRO_CONFIG ?? './maestro.config.yaml';
   const workflowsDir = opts.workflowsDir ?? process.env.MAESTRO_WORKFLOWS_DIR ?? './workspaces';
+  // Same root the web dashboard reads (MAESTRO_LOGS_DIR, default ./logs) — the heartbeat
+  // file lands there so the read-only web process shares one filesystem signal (#40).
+  const logsRoot = opts.logsRoot ?? process.env.MAESTRO_LOGS_DIR ?? './logs';
+  const tickIntervalMs = opts.tickIntervalMs ?? 1_000;
 
   const exec = new NodeExec();
   const parsed = parseConfig(readFileSync(configPath, 'utf8'));
@@ -166,7 +173,9 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     ...(config.forges.github ?? []).map((e) => e.token_env),
   ];
   const runner = new ClaudeRunner(exec, { secretEnvKeys });
-  const slots = new SlotAccountant(config.defaults.concurrency.global_max);
+  const globalMax = config.defaults.concurrency.global_max;
+  const slots = new SlotAccountant(globalMax);
+  const heartbeat = new HeartbeatWriter(logsRoot); // liveness signal for the web dashboard (#40)
   const inFlight = new InFlightSet(); // per-issue dedup across overlapping passes (#18)
   const rateGate = new RateLimitGate(); // global Claude usage-limit backoff (#47)
   const scheduler = new Scheduler(
@@ -284,13 +293,29 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
       return { repo, ctx };
     });
 
+  // One heartbeat write — current active-worker count, the cap, the cadence (#40). Written
+  // every tick (even when a pass throws) so a stuck/failing daemon still ages out as stale
+  // rather than freezing the last good timestamp. A write failure must never kill the loop.
+  const beat = (): void =>
+    safe(
+      () =>
+        heartbeat.write({
+          lastTickAt: systemClock.now(),
+          activeWorkers: slots.globalActive,
+          maxWorkers: globalMax,
+          tickIntervalMs,
+        }),
+      'heartbeat write',
+    );
+
   let running = true;
   const timer = setInterval(() => {
     if (!running) return;
-    void tickDue(buildUnits(), scheduler, systemClock).catch((err) =>
-      log.error('daemon: tick pass failed', { err: String(err) }),
-    );
-  }, opts.tickIntervalMs ?? 1_000);
+    void tickDue(buildUnits(), scheduler, systemClock)
+      .catch((err) => log.error('daemon: tick pass failed', { err: String(err) }))
+      .finally(beat);
+  }, tickIntervalMs);
+  beat(); // stamp once at boot so the dashboard sees the daemon immediately, not a tick later
 
   // Converge to the default-branch WORKFLOW.md: an immediate refresh (so the daemon doesn't
   // wait a full interval to leave a stale local cache behind) then a periodic poll. The poll

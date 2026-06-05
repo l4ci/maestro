@@ -26,6 +26,12 @@ type View = {
     counts: Record<string, number>;
     error?: string;
   }>;
+  daemon?: {
+    lastTickAt: number;
+    activeWorkers: number;
+    maxWorkers: number;
+    tickIntervalMs: number;
+  };
 };
 
 const zero = { new: 0, 'in-progress': 0, 'in-review': 0, blocked: 0, done: 0 };
@@ -214,6 +220,81 @@ describe('degraded states stay on the same card node', () => {
     w.render(view());
     expect(repoCards(w)).toHaveLength(2);
     expect(rows(w).length).toBeGreaterThan(0);
+  });
+});
+
+describe('daemon heartbeat indicator (#40)', () => {
+  const daemon = (w: PageWindow) => w.document.getElementById('daemon') as HTMLElement;
+
+  it('a fresh heartbeat reads "daemon up" in green with the worker count', () => {
+    const w = loadPage();
+    const v = view();
+    v.daemon = { lastTickAt: Date.now(), activeWorkers: 1, maxWorkers: 2, tickIntervalMs: 1000 };
+    w.render(v);
+    expect(daemon(w).textContent).toContain('daemon up');
+    expect(daemon(w).textContent).toContain('1/2 workers');
+    expect(daemon(w).className).toBe('up');
+  });
+
+  it('a stale heartbeat (older than ~3 ticks) reads "not seen" in red', () => {
+    const w = loadPage();
+    const v = view();
+    // 5 minutes old, 1s tick → well past the 3-tick / 10s window.
+    v.daemon = {
+      lastTickAt: Date.now() - 5 * 60_000,
+      activeWorkers: 0,
+      maxWorkers: 2,
+      tickIntervalMs: 1000,
+    };
+    w.render(v);
+    expect(daemon(w).textContent).toContain('not seen for');
+    expect(daemon(w).textContent).toContain('5m');
+    expect(daemon(w).className).toBe('down');
+  });
+
+  it('no heartbeat at all reads "daemon not running" in red', () => {
+    const w = loadPage();
+    w.render(view()); // no daemon field
+    expect(daemon(w).textContent).toBe('○ daemon not running');
+    expect(daemon(w).className).toBe('down');
+  });
+
+  it('the freshness window scales with the daemon-reported tick cadence, not a constant', () => {
+    const w = loadPage();
+    const v = view();
+    // 30s since last tick. A slow 20s daemon → 3×20s = 60s window → still fresh.
+    v.daemon = {
+      lastTickAt: Date.now() - 30_000,
+      activeWorkers: 0,
+      maxWorkers: 1,
+      tickIntervalMs: 20_000,
+    };
+    w.render(v);
+    expect(daemon(w).className).toBe('up');
+  });
+
+  it('the indicator updates in place across polls (daemon dying mid-session)', () => {
+    const w = loadPage();
+    const up = view();
+    up.daemon = { lastTickAt: Date.now(), activeWorkers: 1, maxWorkers: 2, tickIntervalMs: 1000 };
+    w.render(up);
+    expect(daemon(w).className).toBe('up');
+    const dead = view();
+    dead.daemon = {
+      lastTickAt: Date.now() - 60_000,
+      activeWorkers: 1,
+      maxWorkers: 2,
+      tickIntervalMs: 1000,
+    };
+    w.render(dead);
+    expect(daemon(w).className).toBe('down');
+    expect(daemon(w).textContent).toContain('not seen');
+  });
+
+  it('renders the indicator even on an empty board (no repos)', () => {
+    const w = loadPage();
+    w.render({ repos: [] }); // no daemon → not running
+    expect(daemon(w).textContent).toBe('○ daemon not running');
   });
 });
 

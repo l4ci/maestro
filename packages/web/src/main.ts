@@ -21,6 +21,7 @@ import {
   deriveWatchSet,
   parseConfig,
   parseWorkflow,
+  readHeartbeat,
   resolveRepoSettings,
   slugifyProject,
 } from '@maestro/core';
@@ -110,6 +111,9 @@ function buildDeps(env: Env) {
     adapterFor,
     settingsFor,
     logs: new FileLogReader(env.logsRoot),
+    // Liveness from the SAME logs root the daemon writes its heartbeat to (#40). Read per
+    // assembly (a tiny local file); absent → the dashboard shows "daemon not running".
+    heartbeat: () => readHeartbeat(env.logsRoot),
   };
   const add: AddRepoDeps = {
     exec,
