@@ -56,6 +56,57 @@ describe('B2 — host → ForgeKind inference', () => {
   it('throws on an unknown host', () => {
     expect(() => inferForge('bitbucket.org/x/y', forges)).toThrow();
   });
+
+  it('infers from an array of forge entries (multi-host #33)', () => {
+    const multi = {
+      gitlab: [
+        { host: 'gitlab.com', token_env: 'MAESTRO_GITLAB_TOKEN' },
+        { host: 'git.digital-masters.de', token_env: 'MAESTRO_GITLAB_DM_TOKEN' },
+      ],
+      github: [{ host: 'github.com', token_env: 'MAESTRO_GITHUB_TOKEN' }],
+    };
+    expect(inferForge('gitlab.com/group/api', multi)).toBe('gitlab');
+    expect(inferForge('git.digital-masters.de/team/project', multi)).toBe('gitlab');
+    expect(inferForge('github.com/org/web', multi)).toBe('github');
+  });
+});
+
+describe('B2a — config schema accepts single or array forge entries', () => {
+  it('parses a single forge entry (backward compat)', () => {
+    const r = parseConfig(`
+defaults:
+  bot_user: maestro-bot
+forges:
+  gitlab:
+    host: gitlab.com
+    token_env: MAESTRO_GITLAB_TOKEN
+repos: []
+`);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.forges.gitlab).toHaveLength(1);
+      expect(r.value.forges.gitlab?.[0]?.host).toBe('gitlab.com');
+    }
+  });
+
+  it('parses an array of forge entries (multi-host)', () => {
+    const r = parseConfig(`
+defaults:
+  bot_user: maestro-bot
+forges:
+  gitlab:
+    - host: gitlab.com
+      token_env: MAESTRO_GITLAB_TOKEN
+    - host: git.digital-masters.de
+      token_env: MAESTRO_GITLAB_DM_TOKEN
+repos: []
+`);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.forges.gitlab).toHaveLength(2);
+      expect(r.value.forges.gitlab?.[1]?.host).toBe('git.digital-masters.de');
+    }
+  });
 });
 
 describe('B3 — hot-reload with validate-before-reload (§5)', () => {

@@ -18,9 +18,12 @@
 //    to subprocesses via the M2/M3 env/credential-helper seams only — never argv, never
 //    a log line. This file must not log a resolved token.
 //
-// SEAM (finalized in M8 bootstrap, §16): where each repo's WORKFLOW.md text comes from.
-// v1 default reads it from a local dir; M8's `maestro add` formalizes the repo-hosted
-// fetch. It is injected (`loadWorkflowText`) so nothing else changes when M8 lands.
+// WORKFLOW.md SOURCE (§16, #5): each repo's WORKFLOW.md is fetched from its OWN default
+// branch via WorkflowSource, with `<workflows_dir>/<slug>/WORKFLOW.md` as a write-through
+// cache. Startup builds cells from that cache (instant, offline-tolerant); a background
+// refresh then converges to the default-branch copy and re-derives a repo's settings when
+// it changes — so once a bootstrap PR merges, the daemon picks up the real WORKFLOW.md on
+// its own, with nobody hand-placing a local file.
 
 import { readFileSync, watch } from 'node:fs';
 import { join } from 'node:path';
@@ -45,6 +48,7 @@ import {
   type TickContext,
   WatchedConfig,
   type WorkflowParseResult,
+  WorkflowSource,
   WorkflowStore,
   WorkspaceManager,
   buildBootstrapWorkflow,
@@ -69,22 +73,33 @@ const log: Logger = {
 const systemClock: Clock = { now: () => Date.now() };
 const systemRng: Rng = { next: () => Math.random() };
 
-/** One forge adapter per configured forge; selectAdapter() picks per repo.forge. */
+/** One forge adapter per unique (kind, host); selectAdapter() picks per repo. */
 function buildAdapters(config: MaestroConfig, exec: Exec): ForgeAdapter[] {
   const out: ForgeAdapter[] = [];
   const botUser = config.defaults.bot_user;
-  if (config.forges.gitlab) {
-    const { host, token_env } = config.forges.gitlab;
-    out.push(new GitlabAdapter(exec, { token: process.env[token_env] ?? '', host, botUser }));
+  for (const entry of config.forges.gitlab ?? []) {
+    out.push(
+      new GitlabAdapter(exec, {
+        token: process.env[entry.token_env] ?? '',
+        host: entry.host,
+        botUser,
+      }),
+    );
   }
-  if (config.forges.github) {
-    const { host, token_env } = config.forges.github;
-    out.push(new GithubAdapter(exec, { token: process.env[token_env] ?? '', host, botUser }));
+  for (const entry of config.forges.github ?? []) {
+    out.push(
+      new GithubAdapter(exec, {
+        token: process.env[entry.token_env] ?? '',
+        host: entry.host,
+        botUser,
+      }),
+    );
   }
   return out;
 }
 
-/** v1 WORKFLOW source: `<workflows_dir>/<repo-slug>/WORKFLOW.md` (M8 formalizes fetch). */
+/** Local WORKFLOW.md cache path: `<workflows_dir>/<repo-slug>/WORKFLOW.md`. The repo's
+ *  default branch is authoritative (#5); this file is its write-through cache (WorkflowSource). */
 function workflowPath(workflowsDir: string, repo: RepoRef): string {
   return join(workflowsDir, slugifyProject(repo.project), 'WORKFLOW.md');
 }
@@ -105,6 +120,8 @@ export interface DaemonOptions {
   configPath?: string;
   workflowsDir?: string;
   tickIntervalMs?: number;
+  /** How often to re-fetch each repo's WORKFLOW.md from its default branch (default 60s). */
+  workflowRefreshMs?: number;
 }
 
 /** Wire core + I/O and run forever. Returns stop() for graceful shutdown. */
@@ -119,23 +136,33 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
 
   const watched = new WatchedConfig(new ConfigStore(config), log);
   const adapters = buildAdapters(config, exec);
+  // Resolve the git token from the repo's OWN forge entry — one daemon serves repos on
+  // different forges (gh/glab) and hosts (#15, #33), each with its own token_env. Shared
+  // by the clone path and the WORKFLOW.md fetch.
+  const resolveTokenEnv = (repo: RepoRef): string => {
+    const entry = config.forges[repo.forge]?.find((e) => e.host === repo.host);
+    if (!entry) throw new Error(`no '${repo.forge}' forge configured for host '${repo.host}'`);
+    return entry.token_env;
+  };
   const workspace = new WorkspaceManager({
     root: config.defaults.workspaces.root,
     diskCap: config.defaults.workspaces.disk_cap,
     exec,
-    // Resolve the clone token from the repo's OWN forge — one daemon serves repos on
-    // different forges (gh/glab), each with its own token_env (#15).
-    tokenEnv: (repo) => {
-      const env = config.forges[repo.forge]?.token_env;
-      if (!env) throw new Error(`no '${repo.forge}' forge configured for ${repo.project}`);
-      return env;
-    },
+    tokenEnv: resolveTokenEnv,
+  });
+  // Fetches each repo's WORKFLOW.md from its default branch; workflowsDir is the cache (#5).
+  const source = new WorkflowSource({
+    cacheDir: workflowsDir,
+    exec,
+    tokenEnv: resolveTokenEnv,
+    log,
   });
   // Scrub the configured forge token(s) from the agent's env (§13.1): the agent acts
   // with the bot's credentials OUTSIDE the workspace, never finds the token INSIDE it.
-  const secretEnvKeys = [config.forges.gitlab?.token_env, config.forges.github?.token_env].filter(
-    (k): k is string => typeof k === 'string',
-  );
+  const secretEnvKeys = [
+    ...(config.forges.gitlab ?? []).map((e) => e.token_env),
+    ...(config.forges.github ?? []).map((e) => e.token_env),
+  ];
   const runner = new ClaudeRunner(exec, { secretEnvKeys });
   const slots = new SlotAccountant(config.defaults.concurrency.global_max);
   const inFlight = new InFlightSet(); // per-issue dedup across overlapping passes (#18)
@@ -153,40 +180,85 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
 
   // Per-repo settings cell (settings/promptBody/front matter re-derived live on reload).
   const cells = new Map<string, { repo: RepoRef; cell: RepoSettingsCell }>();
-  for (const repo of watched.watchSet) {
-    // A repo with no committed WORKFLOW.md yet runs in BOOTSTRAP mode (iteration 2) so the
-    // daemon can still work its "define my workflow" issue; a present-but-invalid file is a
-    // user error and is skipped (loudly), as before. Missing file → ENOENT → bootstrap.
-    let workflowText: string | undefined;
-    try {
-      workflowText = readFileSync(workflowPath(workflowsDir, repo), 'utf8');
-    } catch {
-      workflowText = undefined;
-    }
-    let parsed: WorkflowParseResult;
-    if (workflowText !== undefined) {
-      parsed = parseWorkflow(workflowText, repo.host);
-    } else {
-      parsed = buildBootstrapWorkflow(repo, templateText, config.defaults.bot_user);
-      if (parsed.ok)
-        log.info('repo has no WORKFLOW.md yet — operating in bootstrap mode', {
-          repo: repo.project,
-        });
-    }
+  // The WORKFLOW text each cell was last derived from — so a refresh re-derives only on a
+  // real change (and so an unchanged remote is a no-op). `undefined` = bootstrap mode.
+  const lastText = new Map<string, string | undefined>();
+
+  /** Build a repo's settings cell from its WORKFLOW text. `undefined` text → BOOTSTRAP mode
+   *  (no committed WORKFLOW.md yet) so the daemon can still work the "define my workflow"
+   *  issue. Returns undefined when the text is invalid — the caller keeps the prior good
+   *  cell (validate-before-swap, §5); a user error is logged, not fatal. */
+  const deriveCell = (
+    repo: RepoRef,
+    workflowText: string | undefined,
+  ): RepoSettingsCell | undefined => {
+    const parsed: WorkflowParseResult =
+      workflowText !== undefined
+        ? parseWorkflow(workflowText, repo.host)
+        : buildBootstrapWorkflow(repo, templateText, config.defaults.bot_user);
     if (!parsed.ok) {
-      log.error('skipping repo: WORKFLOW invalid', { repo: repo.project, error: parsed.error });
-      continue;
+      log.error('WORKFLOW invalid — keeping previous workflow if any', {
+        repo: repo.project,
+        error: parsed.error,
+      });
+      return undefined;
     }
     const override = config.repos.find((r) => r.url === repo.url)?.overrides;
-    const cell = new RepoSettingsCell({
+    return new RepoSettingsCell({
       repo,
       store: new WorkflowStore(parsed.value, repo.host),
       defaults: config.defaults,
       ...(override ? { override } : {}),
       log,
     });
+  };
+
+  // Initial cells from the LOCAL CACHE (instant, offline-tolerant). A missing cache file →
+  // bootstrap; the background refresh below then converges to the default-branch copy.
+  for (const repo of watched.watchSet) {
+    let cached: string | undefined;
+    try {
+      cached = readFileSync(workflowPath(workflowsDir, repo), 'utf8');
+    } catch {
+      cached = undefined;
+    }
+    const cell = deriveCell(repo, cached);
+    if (!cell) continue; // invalid local cache; the remote refresh may yet supply a good one
     cells.set(repo.url, { repo, cell });
+    lastText.set(repo.url, cached);
+    if (cached === undefined)
+      log.info('repo has no WORKFLOW.md yet — operating in bootstrap mode', { repo: repo.project });
   }
+
+  // Fetch a repo's WORKFLOW.md from its default branch and re-derive its cell ON CHANGE.
+  // This is how the bootstrap→merge loop closes (#5): once the bootstrap PR lands, the next
+  // refresh sees the real WORKFLOW.md and swaps the repo out of bootstrap mode by itself.
+  const refreshFromRemote = async (repo: RepoRef): Promise<void> => {
+    const text = await source.load(repo); // load() serves cache on transient failure, never throws here
+    if (cells.has(repo.url) && text === lastText.get(repo.url)) return; // unchanged → no re-derive
+    const cell = deriveCell(repo, text);
+    if (!cell) return; // invalid → keep prior good cell (already logged)
+    const had = cells.has(repo.url);
+    cells.set(repo.url, { repo, cell });
+    lastText.set(repo.url, text);
+    log.info(
+      had ? 'WORKFLOW re-derived from default branch' : 'WORKFLOW loaded from default branch',
+      {
+        repo: repo.project,
+        bootstrap: text === undefined,
+      },
+    );
+  };
+
+  const refreshAll = async (): Promise<void> => {
+    await Promise.all(
+      watched.watchSet.map((repo) =>
+        refreshFromRemote(repo).catch((err) =>
+          log.warn('WORKFLOW refresh failed', { repo: repo.project, err: String(err) }),
+        ),
+      ),
+    );
+  };
 
   /** Fresh units each pass so live settings/promptBody/front matter take effect (§5). */
   const buildUnits = (): RepoUnit[] =>
@@ -216,22 +288,24 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     );
   }, opts.tickIntervalMs ?? 1_000);
 
-  // Hot-reload watchers (§5): re-validate on change; invalid keeps the prior good value.
+  // Converge to the default-branch WORKFLOW.md: an immediate refresh (so the daemon doesn't
+  // wait a full interval to leave a stale local cache behind) then a periodic poll. The poll
+  // REPLACES a local-file watcher — with the repo as the source of truth, only a remote
+  // change matters, and re-deriving lives in refreshFromRemote (§5 validate-before-swap).
+  void refreshAll().catch((err) =>
+    log.error('daemon: initial WORKFLOW refresh failed', { err: String(err) }),
+  );
+  const refreshTimer = setInterval(() => {
+    if (!running) return;
+    void refreshAll();
+  }, opts.workflowRefreshMs ?? 60_000);
+
+  // Hot-reload watcher (§5): re-validate config on change; invalid keeps the prior good value.
   const watchers = [
     watch(configPath, () =>
       safe(() => watched.reload(readFileSync(configPath, 'utf8')), 'config reload'),
     ),
   ];
-  for (const { repo, cell } of cells.values()) {
-    try {
-      const p = workflowPath(workflowsDir, repo);
-      watchers.push(
-        watch(p, () => safe(() => cell.reload(readFileSync(p, 'utf8')), 'WORKFLOW reload')),
-      );
-    } catch {
-      // best-effort: the WORKFLOW file may not be locally present in v1.
-    }
-  }
 
   log.info('maestro daemon started', {
     repos: cells.size,
@@ -242,6 +316,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     stop: () => {
       running = false;
       clearInterval(timer);
+      clearInterval(refreshTimer);
       for (const w of watchers) w.close();
     },
   };

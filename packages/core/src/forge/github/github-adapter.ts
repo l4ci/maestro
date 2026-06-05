@@ -26,6 +26,7 @@ import type {
   RepoRef,
 } from '../../contracts/index.js';
 import { labelNames } from '../../contracts/labels.js';
+import { TtlMemoizer } from '../../utils/ttl-memo.js';
 import { ForgeCli } from '../cli.js';
 import { ForgeError } from '../errors.js';
 import { type ForgePrimitives, assembleSnapshot } from '../snapshot.js';
@@ -76,9 +77,13 @@ const MAESTRO_PREFIX = (() => {
 
 export class GithubAdapter implements ForgeAdapter {
   readonly kind = 'github' as const;
+  readonly host: string;
   readonly #c: ForgeCli;
+  readonly #snapMemo = new TtlMemoizer<string, IssueSnapshot>(5_000);
+  readonly #stateMemo = new TtlMemoizer<string, 'open' | 'closed' | 'missing'>(5_000);
 
   constructor(exec: Exec, cfg: GithubClientConfig) {
+    this.host = cfg.host;
     this.#c = new ForgeCli(exec, {
       bin: 'gh',
       forge: 'github',
@@ -105,13 +110,17 @@ export class GithubAdapter implements ForgeAdapter {
   }
 
   async getSnapshot(repo: RepoRef, issueIid: number): Promise<IssueSnapshot> {
-    return assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap);
+    return this.#snapMemo.get(`${repo.url}-${issueIid}`, () =>
+      assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap),
+    );
   }
 
   async getIssueState(repo: RepoRef, issueIid: number): Promise<'open' | 'closed' | 'missing'> {
-    const raw = await this.#c.api<RawIssue>('GET', `${this.#base(repo)}/issues/${issueIid}`);
-    if (raw === null) return 'missing';
-    return raw.state === 'closed' ? 'closed' : 'open';
+    return this.#stateMemo.get(`${repo.url}-${issueIid}`, async () => {
+      const raw = await this.#c.api<RawIssue>('GET', `${this.#base(repo)}/issues/${issueIid}`);
+      if (raw === null) return 'missing';
+      return raw.state === 'closed' ? 'closed' : 'open';
+    });
   }
 
   // --- mutation -----------------------------------------------------------

@@ -74,3 +74,16 @@ export function resultLine(statusJson: object, prefix = 'Final summary.\n'): str
     result: `${prefix}${JSON.stringify(statusJson)}`,
   });
 }
+
+/** Build a stream-json `result` line with arbitrary text (no status block). */
+export function resultText(text: string): string {
+  return JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: text });
+}
+
+/** Build a stream-json `assistant` message line carrying the given text content. */
+export function assistantLine(text: string): string {
+  return JSON.stringify({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'text', text }] },
+  });
+}

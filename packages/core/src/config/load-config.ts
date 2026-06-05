@@ -3,7 +3,13 @@
 // secrets — token_env holds the NAME of an env var only (§0.8); never resolved here.
 
 import { parse as parseYaml } from 'yaml';
-import { ConfigSchema, type ForgeKind, type MaestroConfig } from '../contracts/index.js';
+import {
+  ConfigSchema,
+  type ForgeEntry,
+  type ForgeKind,
+  type MaestroConfig,
+  normalizeForges,
+} from '../contracts/index.js';
 
 export type ConfigParseResult = { ok: true; value: MaestroConfig } | { ok: false; error: string };
 
@@ -21,7 +27,7 @@ export function parseConfig(text: string): ConfigParseResult {
     const msg = first ? first.message : 'invalid config';
     return { ok: false, error: `config invalid at ${path}: ${msg}` };
   }
-  return { ok: true, value: parsed.data };
+  return { ok: true, value: normalizeForges(parsed.data) };
 }
 
 type ForgesConfig = MaestroConfig['forges'];
@@ -32,6 +38,17 @@ function hostOf(url: string): string {
   return noScheme.split('/')[0] ?? '';
 }
 
+/** Find a configured forge entry whose host matches.
+ *  Accepts an array (normalized) or a single entry (backward-compat for tests). */
+function findForgeEntry(
+  host: string,
+  entries: ForgeEntry[] | ForgeEntry | undefined,
+): ForgeEntry | undefined {
+  if (!entries) return undefined;
+  const arr = Array.isArray(entries) ? entries : [entries];
+  return arr.find((e) => e.host === host);
+}
+
 /**
  * Resolve a repo's forge from its url host (§0.6 "host inferred → ForgeKind").
  * Configured `forges.*.host` entries match first (supports self-hosted); the
@@ -39,8 +56,8 @@ function hostOf(url: string): string {
  */
 export function inferForge(url: string, forges?: ForgesConfig): ForgeKind {
   const host = hostOf(url);
-  if (forges?.gitlab && forges.gitlab.host === host) return 'gitlab';
-  if (forges?.github && forges.github.host === host) return 'github';
+  if (findForgeEntry(host, forges?.gitlab)) return 'gitlab';
+  if (findForgeEntry(host, forges?.github)) return 'github';
   if (host === 'gitlab.com') return 'gitlab';
   if (host === 'github.com') return 'github';
   throw new Error(

@@ -42,7 +42,11 @@ export const DASHBOARD_HTML = `<!doctype html>
   .repo h2 {
     margin: 0; padding: 12px 16px; font-size: 14px; border-bottom: 1px solid #21262d;
     display: flex; align-items: center; gap: 10px;
+    cursor: pointer; user-select: none;
   }
+  .chev { color: #768390; font-size: 12px; }
+  .repo table[hidden] { display: none; }
+  .repo:has(table[hidden]) h2 { border-bottom: none; } /* no double border when collapsed */
   .counts { margin-left: auto; display: flex; gap: 6px; }
   table { width: 100%; border-collapse: collapse; }
   td { padding: 8px 16px; border-top: 1px solid #161b22; }
@@ -80,42 +84,128 @@ export const DASHBOARD_HTML = `<!doctype html>
 const STATES = ['new','in-progress','in-review','blocked','done'];
 const el = (id) => document.getElementById(id);
 
+// Everything below builds DOM via createElement/textContent — forge-controlled text
+// (titles, error messages) never passes through innerHTML, so it stays inert (§13.1).
+
+function span(className, text) {
+  const s = document.createElement('span');
+  s.className = className;
+  s.textContent = text;
+  return s;
+}
+
 function badge(state) {
-  return '<span class="badge s-' + state + '">' + state + '</span>';
+  return span('badge s-' + state, state);
+}
+
+// Keyed child reconciliation (#42): reuse nodes by data-key, create missing ones,
+// move (never rebuild) on reorder, drop leftovers. Node identity survives the 5s
+// poll, so UI state attached to a node (collapse, expansion, selection) survives too.
+function reconcile(container, items, keyOf, create, update) {
+  const byKey = new Map();
+  for (const child of [...container.children]) {
+    if (child.dataset.key === undefined) child.remove(); // placeholder (e.g. loading…)
+    else byKey.set(child.dataset.key, child);
+  }
+  let cursor = container.firstElementChild;
+  for (const item of items) {
+    const key = keyOf(item);
+    let node = byKey.get(key);
+    if (node) byKey.delete(key);
+    else {
+      node = create(item);
+      node.dataset.key = key;
+    }
+    if (node === cursor) cursor = cursor.nextElementSibling;
+    else container.insertBefore(node, cursor);
+    update(node, item);
+  }
+  for (const leftover of byKey.values()) leftover.remove();
 }
 
 function render(view) {
   const root = el('repos');
   if (!view.repos || view.repos.length === 0) {
-    root.innerHTML = '<div class="empty">no repos watched yet — add one above</div>';
+    const none = document.createElement('div');
+    none.className = 'empty';
+    none.textContent = 'no repos watched yet — add one above';
+    root.replaceChildren(none); // nothing keyed to preserve on an empty board
     return;
   }
-  root.innerHTML = view.repos.map((r) => {
-    // A repo whose forge call failed carries an error marker — show it as unreachable
-    // instead of a misleading idle, so broken auth never looks like a healthy empty repo.
-    const counts = r.error
-      ? '<span class="badge s-blocked">unreachable</span>'
-      : (STATES
-          .filter((s) => r.counts[s] > 0)
-          .map((s) => badge(s) + ' ' + r.counts[s])
-          .join('  ') || '<span class="tag">idle</span>');
-    const rows = r.error
-      ? '<tr><td class="err" colspan="3">⚠ ' + escapeHtml(r.error) + '</td></tr>'
-      : ((r.issues || []).length
-          ? r.issues.map((i) =>
-              '<tr><td class="iid">#' + i.iid + '</td>' +
-              '<td class="state">' + badge(i.state) + '</td>' +
-              '<td>' + escapeHtml(i.title) + '</td></tr>').join('')
-          : '<tr><td class="empty" colspan="3">no open issues assigned to the bot</td></tr>');
-    return '<div class="repo"><h2>' + escapeHtml(r.repo.project) +
-      '<span class="counts">' + counts + '</span></h2>' +
-      '<table>' + rows + '</table></div>';
-  }).join('');
+  reconcile(root, view.repos, (r) => r.repo.url, createRepoCard, updateRepoCard);
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+function createRepoCard(r) {
+  const card = document.createElement('div');
+  card.className = 'repo';
+  const h2 = document.createElement('h2');
+  const chev = span('chev', '▾');
+  h2.append(chev, r.repo.project, span('counts', ''));
+  const table = document.createElement('table');
+  table.append(document.createElement('tbody'));
+  // Collapse on header click (#34): plain node state — the keyed renderer never
+  // recreates this card across polls, so the toggle survives every refresh for free.
+  h2.addEventListener('click', () => {
+    table.hidden = !table.hidden;
+    chev.textContent = table.hidden ? '▸' : '▾';
+  });
+  card.append(h2, table);
+  return card;
+}
+
+function updateRepoCard(card, r) {
+  // A repo whose forge call failed carries an error marker — show it as unreachable
+  // instead of a misleading idle, so broken auth never looks like a healthy empty repo.
+  const counts = card.querySelector('.counts');
+  if (r.error) counts.replaceChildren(span('badge s-blocked', 'unreachable'));
+  else {
+    const badges = STATES
+      .filter((s) => r.counts[s] > 0)
+      .flatMap((s) => [badge(s), ' ' + r.counts[s] + '  ']);
+    counts.replaceChildren(...(badges.length ? badges : [span('tag', 'idle')]));
+  }
+  // Error and empty placeholders ride the same keyed path, so the CARD node (and any
+  // UI state on it) survives a repo flipping between healthy and unreachable.
+  const rows = r.error
+    ? [{ key: '~error', error: r.error }]
+    : ((r.issues || []).length
+        ? r.issues.map((i) => ({ key: r.repo.url + '#' + i.iid, issue: i }))
+        : [{ key: '~empty' }]);
+  reconcile(card.querySelector('tbody'), rows, (x) => x.key, createRow, updateRow);
+}
+
+function createRow(x) {
+  const tr = document.createElement('tr');
+  const td = (className) => {
+    const c = document.createElement('td');
+    if (className) c.className = className;
+    return c;
+  };
+  if (x.key === '~error' || x.key === '~empty') {
+    const cell = td(x.key === '~error' ? 'err' : 'empty');
+    cell.colSpan = 3;
+    if (x.key === '~empty') cell.textContent = 'no open issues assigned to the bot';
+    tr.append(cell);
+  } else {
+    const state = td('state');
+    state.append(badge(x.issue.state));
+    tr.append(td('iid'), state, td(''));
+  }
+  return tr;
+}
+
+function updateRow(tr, x) {
+  if (x.key === '~empty') return;
+  if (x.key === '~error') {
+    tr.firstElementChild.textContent = '⚠ ' + x.error;
+    return;
+  }
+  const [iid, state, title] = tr.children;
+  iid.textContent = '#' + x.issue.iid;
+  const b = state.firstElementChild;
+  b.className = 'badge s-' + x.issue.state;
+  b.textContent = x.issue.state;
+  title.textContent = x.issue.title;
 }
 
 async function refresh() {
