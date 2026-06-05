@@ -4,6 +4,7 @@
 // subprocess, socket, or clock); the only real-I/O path is the gated E2E smoke (§15).
 
 export * from './ports.js';
+export * from './rate-limit-gate.js';
 export * from './slots.js';
 export * from './clock.js';
 export * from './scheduler.js';

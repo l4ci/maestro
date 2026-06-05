@@ -168,6 +168,21 @@ function beginIntent(
 ): { active: boolean; promise?: Promise<void> } {
   const { repo, issue } = snapshot;
   const meta = { repo: key, iid: issue.iid, intent: intent.kind };
+
+  // Claude rate-limited (#47): every new spawn is doomed until the window resets, so
+  // agent-spawning intents become no-ops (NOT failures — no lifecycle transition, no
+  // error state; the next tick after the deadline picks the issue up where it was).
+  if (SPAWNING_INTENTS.has(intent.kind)) {
+    const pausedUntil = ctx.rateGate.pausedUntil();
+    if (pausedUntil !== null) {
+      ctx.log.info('agent spawn skipped: claude rate-limited (#47)', {
+        ...meta,
+        resumeAt: new Date(pausedUntil).toISOString(),
+      });
+      return { active: false };
+    }
+  }
+
   switch (intent.kind) {
     case 'start-new': {
       const release = ctx.slots.acquire(key);
@@ -227,6 +242,14 @@ function beginIntent(
       return { active: false };
   }
 }
+
+/** The intents that launch a Claude agent — the ones a rate-limit pause gates (#47). */
+const SPAWNING_INTENTS: ReadonlySet<Intent['kind']> = new Set([
+  'start-new',
+  'run-agent',
+  'apply-changes-requested',
+  'apply-unblock',
+]);
 
 /** Isolate one issue's launched work: a rejection is caught + logged (retried next
  *  tick, §13), and the slot — if any — is released no matter what (no leak, §14). */
@@ -352,6 +375,20 @@ async function applyAgentResult(
   ctx: TickContext,
 ): Promise<void> {
   const { repo, issue } = snapshot;
+  // Rate-limited run (#47): the spawn was doomed, not an agent error. Pause ALL
+  // spawning (CLI-reported reset time when present, else capped exponential backoff)
+  // and apply nothing — no plan write, no lifecycle transition; the issue resumes
+  // untouched once the gate reopens. A healthy run clears the gate's trip streak.
+  if (result.rateLimit) {
+    const until = ctx.rateGate.trip(result.rateLimit.resetAt);
+    ctx.log.warn('claude rate-limited: pausing all agent spawns (#47)', {
+      repo: repoKey(repo),
+      iid: issue.iid,
+      resumeAt: new Date(until).toISOString(),
+    });
+    return;
+  }
+  ctx.rateGate.clear();
   // #48: the agent can't touch the forge (§13.1), so the daemon writes the plan it
   // returned — regardless of status — BEFORE the status switch, so an in_progress run
   // still records its plan and a done run lands the fully-ticked todo. The MR

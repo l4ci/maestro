@@ -5,6 +5,8 @@ import {
   STATUS_CONTRACT,
   assemblePrompt,
   buildClaudeArgs,
+  detectRateLimit,
+  parseAgentResult,
   topLevelJsonObjects,
 } from '../src/runner/claude-runner.js';
 import {
@@ -321,5 +323,38 @@ describe('RUN-6 — secrets never in argv or summary', () => {
     expect(r.status).toBe('in_progress');
     expect(r.summary).not.toContain('glpat-SECRETVALUE123');
     expect(r.summary).toContain('glpat-***');
+  });
+});
+
+// --- RUN-6: usage/rate-limit detection (#47) --------------------------------
+
+describe('RUN-6 — usage-limit runs are marked for the daemon to back off (#47)', () => {
+  it('detectRateLimit parses the CLI reset timestamp (seconds → epoch ms)', () => {
+    expect(detectRateLimit('Claude AI usage limit reached|1764000000')).toEqual({
+      resetAt: 1764000000000,
+    });
+    expect(detectRateLimit('usage limit reached, try later')).toEqual({});
+    expect(detectRateLimit('rate limit exceeded')).toEqual({});
+    expect(detectRateLimit('all good')).toBeNull();
+  });
+
+  it('a transcript with no status but a usage-limit message yields rateLimit', () => {
+    const r = parseAgentResult([resultText('Claude AI usage limit reached|1764000000')], 1);
+    expect(r.status).toBe('in_progress');
+    expect(r.rateLimit).toEqual({ resetAt: 1764000000000 });
+  });
+
+  it('stderr-only limit message is also detected', () => {
+    const r = parseAgentResult([], 1, 'Claude AI usage limit reached|1764000000');
+    expect(r.rateLimit).toEqual({ resetAt: 1764000000000 });
+  });
+
+  it('a valid status block wins — limit wording in prose does not mark the result', () => {
+    const r = parseAgentResult(
+      [resultText('we discussed the rate limit\n{"status":"done","summary":"ok"}')],
+      0,
+    );
+    expect(r.status).toBe('done');
+    expect(r.rateLimit).toBeUndefined();
   });
 });

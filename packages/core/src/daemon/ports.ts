@@ -16,6 +16,7 @@ import type {
   WorkflowFrontMatter,
 } from '../contracts/index.js';
 import type { ProofAndHandoffInput } from '../handoff/handoff.js';
+import type { RateLimitGate } from './rate-limit-gate.js';
 import type { InFlightSet, SlotAccountant } from './slots.js';
 
 /** A live per-issue workspace handle (structurally satisfied by M3 WorkspaceHandle). */
@@ -77,6 +78,7 @@ export interface TickContext {
   promptBody: string; // WORKFLOW body → RunnerInput.promptBody
   slots: SlotAccountant; // process-wide concurrency gate (§14)
   inFlight: InFlightSet; // process-wide per-issue dedup (§14, #18)
+  rateGate: RateLimitGate; // process-wide Claude usage-limit backoff (#47)
   log: Logger;
 }
 

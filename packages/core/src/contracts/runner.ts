@@ -23,6 +23,10 @@ export interface AgentResult {
   /** A short plan summary posted ONCE as an issue comment (first planning session).
    *  The daemon guards re-posting with {@link PLAN_COMMENT_SENTINEL}. */
   planComment?: string;
+  /** Set when the run failed because the Claude account is usage/rate-limited (#47).
+   *  The daemon pauses ALL agent spawning until `resetAt` (epoch ms, when the CLI
+   *  reported one) or its own capped exponential backoff. Additive like the above. */
+  rateLimit?: { resetAt?: number };
 }
 
 /** Idempotency marker the daemon embeds in the one-time plan-summary issue comment,

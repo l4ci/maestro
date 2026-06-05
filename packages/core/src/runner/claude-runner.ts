@@ -82,17 +82,22 @@ export class ClaudeRunner implements Runner {
       });
     } catch (e) {
       if (stalled || controller.signal.aborted) return { kind: 'stall', diagnostic: 'stalled' };
-      // Non-stall stream error: degrade safely (daemon retries next tick).
+      // Non-stall stream error: degrade safely (daemon retries next tick). A spawn that
+      // died on the usage limit is marked so the daemon backs off instead (#47).
+      const msg = scrub((e as Error).message);
+      const limit = detectRateLimit(msg);
       return {
         kind: 'result',
-        result: { status: 'in_progress', summary: `runner error: ${scrub((e as Error).message)}` },
+        result: limit
+          ? { status: 'in_progress', summary: `runner error: ${msg}`, rateLimit: limit }
+          : { status: 'in_progress', summary: `runner error: ${msg}` },
       };
     } finally {
       if (watchdog) clearTimeout(watchdog);
     }
 
     if (stalled) return { kind: 'stall', diagnostic: 'stalled' };
-    return { kind: 'result', result: parseAgentResult(lines, res.code) };
+    return { kind: 'result', result: parseAgentResult(lines, res.code, res.stderr) };
   }
 }
 
@@ -182,7 +187,7 @@ interface StreamLine {
  * recovery); earlier assistant messages are the fallback when the final one lacks it.
  * Any failure to find a valid status → safe `in_progress` (daemon re-runs next tick).
  */
-export function parseAgentResult(lines: string[], exitCode: number): AgentResult {
+export function parseAgentResult(lines: string[], exitCode: number, stderr = ''): AgentResult {
   const objs = lines.map(tryParse).filter((o): o is StreamLine => o !== null);
   const resultLine = [...objs].reverse().find((o) => o.type === 'result');
 
@@ -194,6 +199,17 @@ export function parseAgentResult(lines: string[], exitCode: number): AgentResult
   }
   if (status) return status;
 
+  // No valid status: a usage-limited CLI dies before the agent can emit one (#47).
+  // Mark the result so the daemon backs off globally instead of respawning every tick.
+  const limit = detectRateLimit(`${lines.join('\n')}\n${stderr}`);
+  if (limit) {
+    return {
+      status: 'in_progress',
+      summary: 'claude usage/rate limit reached; daemon backs off (#47)',
+      rateLimit: limit,
+    };
+  }
+
   if (!resultLine) {
     return { status: 'in_progress', summary: `no result line (exit ${exitCode}); will retry` };
   }
@@ -201,6 +217,22 @@ export function parseAgentResult(lines: string[], exitCode: number): AgentResult
     status: 'in_progress',
     summary: 'no parseable {status} block in transcript; will retry',
   };
+}
+
+/**
+ * Recognize the Claude CLI's usage/rate-limit failure in transcript or stderr text
+ * (#47). The CLI emits `Claude AI usage limit reached|<epoch-seconds>` when the
+ * account limit trips; match wording variants defensively and carry the reset time
+ * when one is present (seconds normalized to epoch ms).
+ */
+export function detectRateLimit(text: string): { resetAt?: number } | null {
+  const m = text.match(/usage limit reached\|(\d{9,13})/i);
+  if (m?.[1]) {
+    const n = Number(m[1]);
+    return { resetAt: n < 1e12 ? n * 1000 : n };
+  }
+  if (/usage limit reached|rate[ -]?limit(ed| exceeded)?/i.test(text)) return {};
+  return null;
 }
 
 /** Concatenated text of an assistant message's text content blocks (transcript scan). */

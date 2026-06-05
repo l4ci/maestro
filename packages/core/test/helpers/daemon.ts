@@ -20,6 +20,7 @@ import type {
 } from '../../src/contracts/index.js';
 import { WorkflowSchema, labelNames } from '../../src/contracts/index.js';
 import type { TickContext, Workspace, WorkspaceHandleLike } from '../../src/daemon/ports.js';
+import { RateLimitGate } from '../../src/daemon/rate-limit-gate.js';
 import { InFlightSet, SlotAccountant } from '../../src/daemon/slots.js';
 
 export const repo: RepoRef = {
@@ -305,6 +306,8 @@ export function buildContext(
     inFlight?: InFlightSet;
     handoff?: ReturnType<typeof vi.fn>;
     proofAndHandoff?: ReturnType<typeof vi.fn>;
+    rateGate?: RateLimitGate;
+    log?: TickContext['log'];
   } = {},
 ): BuiltContext {
   const settings = partial.settings ?? defaultSettings();
@@ -327,7 +330,8 @@ export function buildContext(
     promptBody: 'do the work',
     slots,
     inFlight,
-    log: silentLogger(),
+    rateGate: partial.rateGate ?? new RateLimitGate(),
+    log: partial.log ?? silentLogger(),
   };
   return { ctx, adapterRec, runnerSpy, ws, handoffSpy, proofHandoffSpy, slots, inFlight };
 }
