@@ -244,7 +244,20 @@ describe('issue + MR/PR forge links (#35)', () => {
     expect(a?.textContent).toBe('#1');
     expect(a?.getAttribute('href')).toBe('https://gitlab.com/g/api/-/issues/1');
     expect(a?.target).toBe('_blank');
-    expect(a?.rel).toBe('noopener');
+    expect(a?.rel).toBe('noopener noreferrer');
+  });
+
+  it('refuses a non-http(s) issueUrl: a javascript: URI renders as an inert #', () => {
+    const w = loadPage();
+    const v = view();
+    const issue = v.repos[0]?.issues[0];
+    if (issue) {
+      issue.issueUrl = 'javascript:alert(1)'; // hostile forge payload
+      issue.mrUrl = 'javascript:alert(2)';
+    }
+    w.render(v);
+    expect(issueAnchor(w, 'gitlab.com/g/api#1')?.getAttribute('href')).toBe('#');
+    expect(mrAnchor(w, 'gitlab.com/g/api#1')?.getAttribute('href')).toBe('#');
   });
 
   it('renders an MR ↗ link on a GitLab issue that has one', () => {

@@ -106,16 +106,28 @@ function badge(state) {
   return span('badge s-' + state, state);
 }
 
+// Allowlist a forge-controlled URL to http(s) so a hostile webUrl can't smuggle a
+// javascript: URI into an anchor. Unparsable or off-scheme → inert '#'.
+function safeUrl(href) {
+  try {
+    const u = new URL(href, window.location.href);
+    if (u.protocol === 'https:' || u.protocol === 'http:') return u.href;
+  } catch {
+    // unparsable URL → fall through to '#'
+  }
+  return '#';
+}
+
 // An external forge link (#35). href is set as a property, not via innerHTML, so the
 // forge-controlled URL can never break out into markup — same inert-text guarantee
-// as titles (§13.1). Opens in a new tab; rel guards against window.opener tab-nabbing.
+// as titles (§13.1). Opens in a new tab; rel guards against tab-nabbing.
 function link(className, text, href) {
   const a = document.createElement('a');
   a.className = className;
   a.textContent = text;
-  a.href = href;
+  a.href = safeUrl(href);
   a.target = '_blank';
-  a.rel = 'noopener';
+  a.rel = 'noopener noreferrer';
   return a;
 }
 
@@ -226,7 +238,7 @@ function updateRow(tr, x) {
   const [iid, state, title] = tr.children;
   const issueLink = iid.firstElementChild;
   issueLink.textContent = '#' + x.issue.iid;
-  issueLink.href = x.issue.issueUrl;
+  issueLink.href = safeUrl(x.issue.issueUrl);
   const b = state.firstElementChild;
   b.className = 'badge s-' + x.issue.state;
   b.textContent = x.issue.state;
