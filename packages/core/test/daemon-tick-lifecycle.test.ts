@@ -455,3 +455,37 @@ describe('A8 — rate-limited run pauses ALL spawning until the gate reopens (#4
     expect(rateGate.pausedUntil()).toBe(t + 5 * MIN);
   });
 });
+
+describe('A9 — forge comments are structured Markdown (#25)', () => {
+  it('start-of-work comment names the branch, links the MR, and flags the coming plan', async () => {
+    const adapter = recordingAdapter({ snapshot: makeSnapshot() }); // new issue → start-new
+    const runner = scriptedRunner({ status: 'in_progress', summary: 'working' });
+    const { ctx } = buildContext({ adapter, runner });
+
+    await tickRepo(repo, ctx);
+
+    const started = adapter.issueComments.find((c) => c.body.includes('started work'));
+    expect(started).toBeDefined();
+    expect(started?.body).toContain('- Branch: `');
+    expect(started?.body).toContain('Draft MR:');
+    expect(started?.body).toContain('plan summary follows');
+  });
+
+  it('blocked comment is a scannable section: heading + questions + how to unblock', async () => {
+    const adapter = recordingAdapter({
+      snapshot: makeSnapshot({ issue: { labels: [labels.inProgress] } }),
+    });
+    const runner = scriptedRunner({
+      status: 'needs_input',
+      summary: '1. postgres or sqlite?\n2. which node version?',
+    });
+    const { ctx } = buildContext({ adapter, runner });
+
+    await tickRepo(repo, ctx);
+
+    const blocked = adapter.issueComments.find((c) => c.body.includes('🚧'));
+    expect(blocked?.body).toContain('### 🚧 Blocked — input needed');
+    expect(blocked?.body).toContain('1. postgres or sqlite?'); // questions verbatim
+    expect(blocked?.body).toContain('Reply in this thread');
+  });
+});

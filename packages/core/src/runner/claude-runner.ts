@@ -158,6 +158,11 @@ export const STATUS_CONTRACT =
   '                                                              them verbatim. Put questions HERE, never in a file.\n' +
   '  {"status":"in_progress","summary":"<where you are>"}      — you ran out of turns; will resume next tick\n' +
   '\n' +
+  'Summaries are posted to humans on the forge (#25): write readable Markdown — short ' +
+  'paragraphs, bullet lists where they aid scanning, never one wall of text. When ' +
+  'needs_input asks more than one question, NUMBER the questions (1., 2., …) so each ' +
+  'can be answered by number.\n' +
+  '\n' +
   'To make your PLAN VISIBLE (the daemon, not you, writes it to the forge), add these ' +
   'OPTIONAL fields to that same JSON object:\n' +
   '  "mrDescription": "<full Markdown for the MR description: a detailed plan AND a ' +

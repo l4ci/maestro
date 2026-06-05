@@ -358,3 +358,11 @@ describe('RUN-6 — usage-limit runs are marked for the daemon to back off (#47)
     expect(r.rateLimit).toBeUndefined();
   });
 });
+
+describe('RUN-7 — the status contract demands human-readable summaries (#25)', () => {
+  it('every prompt instructs Markdown formatting and numbered questions', () => {
+    const prompt = assemblePrompt(input());
+    expect(prompt).toContain('NUMBER the questions');
+    expect(prompt).toContain('never one wall of text');
+  });
+});
