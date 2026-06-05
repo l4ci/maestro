@@ -12,87 +12,167 @@ export const DASHBOARD_HTML = `<!doctype html>
 <link rel="icon" id="favicon" href="data:," />
 <title>maestro</title>
 <style>
-  :root { color-scheme: light dark; }
+  /* Palette as custom properties (#44): one set of names, themed per scheme. The dark
+     values below are the original hardcoded look, now the dark theme; the light override
+     lives in the prefers-color-scheme:light block. Per-state badges keep distinct hues in
+     both schemes — their light variants are tuned for contrast on a light card. Surfaces
+     reference var(--name) only, so nothing bleeds the wrong scheme (UA controls included,
+     via color-scheme). */
+  :root {
+    color-scheme: light dark;
+    --bg: #0e1116;
+    --fg: #d8dee4;
+    --muted: #768390;
+    --muted-2: #8b98a5;
+    --line: #21262d;
+    --line-soft: #161b22;
+    --surface: #161b22;
+    --surface-2: #1f2630;
+    --border: #30363d;
+    --border-soft: #2a2f37;
+    --accent: #58a6ff;
+    --accent-line: #21333f;
+    --accent-ring: #2f81f7;
+    --up: #57ab5a;
+    --down: #f47067;
+    --btn-bg: #238636;
+    --btn-fg: #fff;
+    --avatar-bg: #1f2630;
+    --avatar-fg: #f0f3f6; /* initials text — light, the circle is always a saturated mid-dark hue */
+    --avatar-lum: 32%; /* initials-circle lightness, recomputed per scheme */
+    /* Per-state badge backgrounds/foregrounds. */
+    --s-new-bg: #1f2630; --s-new-fg: #9db1c5;
+    --s-in-progress-bg: #3a2d12; --s-in-progress-fg: #e3b341;
+    --s-in-review-bg: #12283a; --s-in-review-fg: #58a6ff;
+    --s-blocked-bg: #3a1216; --s-blocked-fg: #f47067;
+    --s-done-bg: #12331c; --s-done-fg: #57ab5a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #ffffff;
+      --fg: #1f2328;
+      --muted: #59636e;
+      --muted-2: #59636e;
+      --line: #d1d9e0;
+      --line-soft: #eaeef2;
+      --surface: #f6f8fa;
+      --surface-2: #eaeef2;
+      --border: #d1d9e0;
+      --border-soft: #d1d9e0;
+      --accent: #0969da;
+      --accent-line: #b6d4f5;
+      --accent-ring: #0969da;
+      --up: #1a7f37;
+      --down: #cf222e;
+      --btn-bg: #1f883d;
+      --btn-fg: #ffffff;
+      --avatar-bg: #eaeef2;
+      --avatar-fg: #f0f3f6; /* still light: initials sit on a saturated circle, not the card */
+      --avatar-lum: 38%; /* slightly lighter circle in light mode, white initials still read */
+      --s-new-bg: #eaeef2; --s-new-fg: #344150;
+      --s-in-progress-bg: #fff3d4; --s-in-progress-fg: #7d4e00;
+      --s-in-review-bg: #ddf4ff; --s-in-review-fg: #0550ae;
+      --s-blocked-bg: #ffebe9; --s-blocked-fg: #a40e26;
+      --s-done-bg: #dafbe1; --s-done-fg: #0a6628;
+    }
+  }
   * { box-sizing: border-box; }
   body {
     margin: 0; font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: #0e1116; color: #d8dee4;
+    background: var(--bg); color: var(--fg);
   }
   header {
     display: flex; align-items: baseline; gap: 12px;
-    padding: 18px 24px; border-bottom: 1px solid #21262d;
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
   }
   header h1 { margin: 0; font-size: 18px; letter-spacing: .5px; }
-  header .tag { color: #768390; font-size: 12px; }
+  header .tag { color: var(--muted); font-size: 12px; }
   #daemon { margin-left: auto; font-size: 12px; }
-  #daemon.up { color: #57ab5a; }
-  #daemon.down { color: #f47067; }
-  #updated { color: #768390; font-size: 12px; }
+  #daemon.up { color: var(--up); }
+  #daemon.down { color: var(--down); }
+  #updated { color: var(--muted); font-size: 12px; }
   main { padding: 24px; max-width: 1000px; margin: 0 auto; }
   form.add {
     display: flex; gap: 8px; margin-bottom: 24px;
   }
   form.add input {
-    flex: 1; padding: 8px 12px; border-radius: 6px;
-    border: 1px solid #30363d; background: #161b22; color: #d8dee4; font: inherit;
+    flex: 1; min-width: 0; padding: 8px 12px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--fg); font: inherit;
   }
   form.add button {
-    padding: 8px 16px; border-radius: 6px; border: 1px solid #30363d;
-    background: #238636; color: #fff; font: inherit; cursor: pointer;
+    padding: 8px 16px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--btn-bg); color: var(--btn-fg); font: inherit; cursor: pointer;
   }
   form.add button:disabled { opacity: .5; cursor: default; }
-  .repo { border: 1px solid #21262d; border-radius: 8px; margin-bottom: 16px; }
+  .repo { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 16px; }
   .repo h2 {
-    margin: 0; padding: 12px 16px; font-size: 14px; border-bottom: 1px solid #21262d;
+    margin: 0; padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--line);
     display: flex; align-items: center; gap: 10px;
     cursor: pointer; user-select: none;
   }
-  .chev { color: #768390; font-size: 12px; }
+  .chev { color: var(--muted); font-size: 12px; }
   .repo table[hidden] { display: none; }
   .repo:has(table[hidden]) h2 { border-bottom: none; } /* no double border when collapsed */
-  .counts { margin-left: auto; display: flex; gap: 6px; }
+  .counts { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
   table { width: 100%; border-collapse: collapse; }
-  td { padding: 8px 16px; border-top: 1px solid #161b22; }
-  td.iid { color: #768390; width: 64px; }
+  td { padding: 8px 16px; border-top: 1px solid var(--line-soft); }
+  td.iid { color: var(--muted); width: 64px; }
   td.state { width: 130px; }
   .badge {
     display: inline-block; padding: 2px 8px; border-radius: 999px;
     font-size: 12px; border: 1px solid transparent;
   }
-  .s-new { background:#1f2630; color:#9db1c5; }
-  .s-in-progress { background:#3a2d12; color:#e3b341; }
-  .s-in-review { background:#12283a; color:#58a6ff; }
-  .s-blocked { background:#3a1216; color:#f47067; }
-  .s-done { background:#12331c; color:#57ab5a; }
+  .s-new { background: var(--s-new-bg); color: var(--s-new-fg); }
+  .s-in-progress { background: var(--s-in-progress-bg); color: var(--s-in-progress-fg); }
+  .s-in-review { background: var(--s-in-review-bg); color: var(--s-in-review-fg); }
+  .s-blocked { background: var(--s-blocked-bg); color: var(--s-blocked-fg); }
+  .s-done { background: var(--s-done-bg); color: var(--s-done-fg); }
   td.iid a { color: inherit; text-decoration: none; }
-  td.iid a:hover { color: #58a6ff; text-decoration: underline; }
+  td.iid a:hover { color: var(--accent); text-decoration: underline; }
   /* Unified last-activity line (#39): a muted secondary row under the title. */
   .activity {
-    display: block; margin-top: 3px; color: #768390; font-size: 12px;
+    display: block; margin-top: 3px; color: var(--muted); font-size: 12px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 520px;
   }
   .activity .src {
     text-transform: uppercase; font-size: 10px; letter-spacing: .4px;
-    border: 1px solid #2a2f37; border-radius: 4px; padding: 0 4px; margin: 0 6px;
+    border: 1px solid var(--border-soft); border-radius: 4px; padding: 0 4px; margin: 0 6px;
   }
-  .activity .when { color: #8b98a5; }
+  .activity .when { color: var(--muted-2); }
   a.mr {
-    margin-left: 8px; font-size: 12px; color: #58a6ff; text-decoration: none;
-    border: 1px solid #21333f; border-radius: 999px; padding: 1px 7px;
+    margin-left: 8px; font-size: 12px; color: var(--accent); text-decoration: none;
+    border: 1px solid var(--accent-line); border-radius: 999px; padding: 1px 7px;
   }
   a.mr:hover { text-decoration: underline; }
-  a.mr.draft { color: #768390; border-color: #2a2f37; } /* draft MR/PR reads as muted */
+  a.mr.draft { color: var(--muted); border-color: var(--border-soft); } /* draft MR/PR reads as muted */
   td.people { width: 96px; white-space: nowrap; }
   .avatar {
     display: inline-flex; align-items: center; justify-content: center;
     width: 20px; height: 20px; border-radius: 50%; vertical-align: middle;
-    font-size: 10px; font-weight: 600; color: #d8dee4; overflow: hidden;
-    border: 1px solid #30363d; object-fit: cover; background: #1f2630;
+    font-size: 10px; font-weight: 600; color: var(--avatar-fg); overflow: hidden;
+    border: 1px solid var(--border); object-fit: cover; background: var(--avatar-bg);
   }
-  .avatar.reviewer { margin-left: 4px; outline: 1px solid #2f81f7; }
-  .empty { color: #768390; padding: 16px; }
-  .err { color: #f47067; padding: 12px 16px; font-size: 13px; word-break: break-word; }
-  #msg { min-height: 20px; color: #f47067; font-size: 13px; margin-bottom: 12px; }
+  .avatar.reviewer { margin-left: 4px; outline: 1px solid var(--accent-ring); }
+  .empty { color: var(--muted); padding: 16px; }
+  .err { color: var(--down); padding: 12px 16px; font-size: 13px; word-break: break-word; }
+  #msg { min-height: 20px; color: var(--down); font-size: 13px; margin-bottom: 12px; }
+  /* Narrow screens (#44): a 390px phone must not scroll sideways. Cut paddings, let the
+     header wrap, drop the fixed iid/state/people column widths so the title cell takes the
+     slack, and keep the add form usable by stacking the token/url inputs above the button. */
+  @media (max-width: 600px) {
+    header { padding: 14px 16px; flex-wrap: wrap; gap: 6px 10px; }
+    #daemon { flex-basis: 100%; margin-left: 0; }
+    main { padding: 16px; }
+    form.add { flex-wrap: wrap; }
+    form.add input { flex: 1 1 100%; }
+    form.add button { flex: 1 1 100%; }
+    .repo h2 { padding: 10px 12px; }
+    td { padding: 8px 12px; }
+    td.iid { width: auto; }
+    td.state { width: auto; }
+    td.people { width: auto; }
+    .activity { max-width: 60vw; }
+  }
 </style>
 </head>
 <body>
@@ -160,10 +240,20 @@ function link(className, text, href) {
 // the initials fallback rather than being assigned raw. Without a usable URL we draw the
 // username's initial in a circle whose hue is derived from the name — no external avatar
 // service is guessed. The title carries a role-prefixed username for hover.
+// Read a themed CSS custom property off :root, falling back to a literal when the
+// computed value is empty (e.g. jsdom, which doesn't resolve cascaded vars). This is how
+// the canvas favicon and the initials circle pick up the active scheme's palette without
+// duplicating the hexes here (#44).
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
 function initialBg(username) {
   let h = 0;
   for (let i = 0; i < username.length; i++) h = (h * 31 + username.charCodeAt(i)) % 360;
-  return 'hsl(' + h + ' 45% 32%)';
+  // Lightness comes from --avatar-lum so the same hue stays legible: deeper in dark mode,
+  // lighter (but still readable against white text) in light mode.
+  return 'hsl(' + h + ' 45% ' + cssVar('--avatar-lum', '32%') + ')';
 }
 function avatar(role, person) {
   const title = role + ': ' + person.username;
@@ -316,7 +406,9 @@ function renderAttention(repos) {
   // Tab title: 'maestro · 2 blocked' when any repo needs a human, plain 'maestro' otherwise.
   document.title = blocked > 0 ? 'maestro · ' + blocked + ' blocked' : 'maestro';
   // Favicon: a red dot while anything is blocked/unreachable, otherwise the empty default.
-  setFavicon(blocked > 0 ? dotFavicon('#f47067') : 'data:,');
+  // The dot reads the themed --down so it stays a legible red against either OS scheme's
+  // tab strip rather than a single hardcoded hex (#44).
+  setFavicon(blocked > 0 ? dotFavicon(cssVar('--down', '#f47067')) : 'data:,');
 }
 
 // Sort repos that need a human to the top (blocked rows or an unreachable error), keeping
@@ -477,7 +569,7 @@ el('addForm').addEventListener('submit', async (e) => {
   const token = el('token').value.trim();
   if (!url) return;
   btn.disabled = true;
-  el('msg').style.color = '#f47067';
+  el('msg').style.color = cssVar('--down', '#f47067');
   try {
     // The token never leaves the browser except as the Bearer header on this write call;
     // the server compares it in constant time and never echoes it back.
@@ -497,7 +589,7 @@ el('addForm').addEventListener('submit', async (e) => {
     const data = await res.json();
     if (data.added) {
       el('url').value = '';
-      el('msg').style.color = '#57ab5a';
+      el('msg').style.color = cssVar('--up', '#57ab5a');
       el('msg').textContent = 'added ' + (data.repo?.project ?? url);
       await refresh();
     } else {

@@ -774,6 +774,82 @@ describe('blocked visibility — sort, title, favicon (#43)', () => {
   });
 });
 
+describe('themed palette + responsive layout (#44)', () => {
+  // The dashboard ships as one static HTML string with inline CSS, so the palette and the
+  // media queries are asserted at the string level on DASHBOARD_HTML — there is no separate
+  // stylesheet to parse and jsdom does not resolve cascaded custom properties.
+  const css = DASHBOARD_HTML;
+
+  it('declares the palette as :root custom properties (dark defaults)', () => {
+    for (const v of [
+      '--bg:',
+      '--fg:',
+      '--muted:',
+      '--line:',
+      '--surface:',
+      '--border:',
+      '--accent:',
+      '--up:',
+      '--down:',
+      '--btn-bg:',
+      '--avatar-bg:',
+      '--avatar-fg:',
+      '--avatar-lum:',
+    ]) {
+      expect(css).toContain(v);
+    }
+  });
+
+  it('declares a per-state badge variable pair for every lifecycle state', () => {
+    for (const s of ['new', 'in-progress', 'in-review', 'blocked', 'done']) {
+      expect(css).toContain(`--s-${s}-bg:`);
+      expect(css).toContain(`--s-${s}-fg:`);
+    }
+  });
+
+  it('paints the page off the palette variables, not hardcoded hexes', () => {
+    // Core surfaces must reference the vars so a scheme switch actually repaints them.
+    expect(css).toContain('background: var(--bg); color: var(--fg)');
+    expect(css).toContain(
+      '.s-blocked { background: var(--s-blocked-bg); color: var(--s-blocked-fg); }',
+    );
+    expect(css).toContain('color: var(--avatar-fg)');
+    expect(css).toContain('background: var(--avatar-bg)');
+    // No literal dark-palette hex should survive on the body/badge surfaces.
+    expect(css).not.toContain('background: #0e1116');
+    expect(css).not.toContain('background:#3a1216');
+  });
+
+  it('provides a real light-mode palette override via prefers-color-scheme', () => {
+    expect(css).toContain('@media (prefers-color-scheme: light)');
+    // The light block must redefine the surface vars (a readable light theme, not just
+    // color-scheme:light with dark hexes bleeding through).
+    const light = css.slice(css.indexOf('@media (prefers-color-scheme: light)'));
+    expect(light).toContain('--bg: #ffffff');
+    expect(light).toContain('--fg: #1f2328');
+    expect(light).toContain('--s-blocked-bg: #ffebe9');
+  });
+
+  it('adds a narrow-screen layout below 600px that drops fixed column widths', () => {
+    expect(css).toContain('@media (max-width: 600px)');
+    const narrow = css.slice(css.indexOf('@media (max-width: 600px)'));
+    // Fixed iid/state column widths collapse so the title cell takes the slack — no overflow.
+    expect(narrow).toContain('td.iid { width: auto; }');
+    expect(narrow).toContain('td.state { width: auto; }');
+    // The add form stacks so token/url/button stay usable on a phone.
+    expect(narrow).toContain('form.add input { flex: 1 1 100%; }');
+    expect(narrow).toContain('form.add button { flex: 1 1 100%; }');
+  });
+
+  it('keeps the favicon dot and message colors themable (read from --down/--up)', () => {
+    expect(css).toContain("dotFavicon(cssVar('--down'");
+    expect(css).toContain("el('msg').style.color = cssVar('--down'");
+    expect(css).toContain("el('msg').style.color = cssVar('--up'");
+    // The initials circle lightness comes from the themed --avatar-lum, not a fixed 32%.
+    expect(css).toContain("cssVar('--avatar-lum'");
+  });
+});
+
 describe('collapsible repo cards (#34)', () => {
   const header = (w: PageWindow, url: string) =>
     w.document.querySelector(`[data-key="${url}"] h2`) as HTMLElement;
