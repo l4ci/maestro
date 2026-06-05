@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { RunnerInput } from '../src/contracts/index.js';
 import { ClaudeRunner, assemblePrompt, buildClaudeArgs } from '../src/runner/claude-runner.js';
-import { FakeStreamExec, type StreamScript, resultLine } from './helpers/fake-stream-exec.js';
+import {
+  FakeStreamExec,
+  type StreamScript,
+  assistantLine,
+  resultLine,
+  resultText,
+} from './helpers/fake-stream-exec.js';
 
 function input(over: Partial<RunnerInput> = {}): RunnerInput {
   return {
@@ -154,6 +160,54 @@ describe('RUN-4 — malformed / truncated degrade safely', () => {
   it('malformed tail line (not JSON) → still in_progress, never throws', async () => {
     const { result } = run({ lines: [SYSTEM, 'not json {{{'], code: 0 });
     expect((await result).status).toBe('in_progress');
+  });
+});
+
+// --- RUN-4b: transcript fallback (#4) --------------------------------------
+
+describe('RUN-4b — recover status from the transcript when the final message omits it', () => {
+  it('recovers a status the agent emitted in an assistant message, not the result line', async () => {
+    // Real-Claude failure mode (#4): the contract lands mid-turn, the final result has none.
+    const { result } = run({
+      lines: [
+        SYSTEM,
+        assistantLine('Working on it.\n{"status":"needs_input","summary":"Which DB?"}'),
+        resultText('All done here, thanks!'),
+      ],
+    });
+    expect(await result).toEqual({ status: 'needs_input', summary: 'Which DB?' });
+  });
+
+  it('the result-line status wins over an earlier assistant status (done-safe precedence)', async () => {
+    const { result } = run({
+      lines: [
+        SYSTEM,
+        assistantLine('{"status":"in_progress","summary":"midway"}'),
+        resultLine({ status: 'done', summary: 'finished' }),
+      ],
+    });
+    expect(await result).toEqual({ status: 'done', summary: 'finished' });
+  });
+
+  it('takes the LAST status block when several assistant messages carry one', async () => {
+    const { result } = run({
+      lines: [
+        SYSTEM,
+        assistantLine('{"status":"in_progress","summary":"early"}'),
+        assistantLine('{"status":"done","summary":"final answer"}'),
+        resultText('wrapping up'),
+      ],
+    });
+    expect(await result).toEqual({ status: 'done', summary: 'final answer' });
+  });
+
+  it('no status anywhere in the transcript → safe in_progress', async () => {
+    const { result } = run({
+      lines: [SYSTEM, assistantLine('just thinking out loud'), resultText('no status here')],
+    });
+    const r = await result;
+    expect(r.status).toBe('in_progress');
+    expect(r.summary).toMatch(/no parseable/);
   });
 });
 
