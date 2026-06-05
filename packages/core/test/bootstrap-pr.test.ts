@@ -83,15 +83,15 @@ describe('openBootstrapWorkflowPr', () => {
     expect(wf?.contents).toContain('test-output'); // detected from the package.json test script
 
     // branch + EXPLICIT-path push (never `git add .`)
-    expect(calls.prepare[0]?.branch).toBe('maestro/42-define-workflow');
+    expect(calls.prepare[0]?.branch).toBe('maestro/issue-42-define-workflow');
     expect(calls.commitPush[0]).toMatchObject({
       paths: ['WORKFLOW.md'],
-      branch: 'maestro/42-define-workflow',
+      branch: 'maestro/issue-42-define-workflow',
     });
 
     // draft PR, base = inferred default branch, links + marks the bootstrap issue
     expect(created[0]).toMatchObject({
-      sourceBranch: 'maestro/42-define-workflow',
+      sourceBranch: 'maestro/issue-42-define-workflow',
       targetBranch: 'main',
       draft: true,
     });
