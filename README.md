@@ -621,6 +621,12 @@ Three things the unit handles that a bare `nohup` doesn't:
 A user service (not a system one) is deliberate: the daemon runs Claude with
 *your* login and settings, so it should run as your user, not root.
 
+The dashboard has a matching unit,
+[`templates/maestro-web.service`](templates/maestro-web.service) — same install
+steps with `maestro-web` as the unit name. It carries commented `Environment=`
+lines for the bind address and the optional `MAESTRO_DASHBOARD_TOKEN` write
+gate, so the on-by-default state stays read-only.
+
 ---
 
 ## How the daemon decides what to work on

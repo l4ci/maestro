@@ -1,0 +1,43 @@
+# Maestro web dashboard as a systemd USER service — the read-only companion to
+# maestro.service. Same install dance:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp templates/maestro-web.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now maestro-web
+#
+# Watch it:
+#   systemctl --user status maestro-web
+#   journalctl --user -u maestro-web -f
+
+[Unit]
+Description=Maestro web dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# EDIT: absolute path to your maestro clone (config/workspaces resolve from here).
+WorkingDirectory=/home/you/maestro
+
+# EDIT: absolute node path (`which node`). This is the web package's own entry —
+# `maestro dashboard` spawns exactly the same file.
+ExecStart=/usr/bin/node packages/web/dist/main.js
+
+# Forge tokens — the dashboard reads the same forges to assemble its status table.
+EnvironmentFile=/home/you/maestro/.env
+
+# The read model shells out to glab/gh like the daemon does.
+Environment="PATH=%h/.local/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Bind address/port if the defaults (127.0.0.1:4000) don't suit:
+#Environment="MAESTRO_WEB_HOST=0.0.0.0"
+#Environment="MAESTRO_WEB_PORT=4000"
+# Opt into the add-repo write path (POST /repos) by setting a bearer secret —
+# leave unset for a read-only dashboard (see the README's security notes):
+#Environment="MAESTRO_DASHBOARD_TOKEN=change-me"
+
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
