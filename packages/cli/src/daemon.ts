@@ -39,6 +39,7 @@ import {
   type Logger,
   type MaestroConfig,
   NodeExec,
+  RateLimitGate,
   type RepoRef,
   RepoSettingsCell,
   type RepoUnit,
@@ -166,6 +167,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
   const runner = new ClaudeRunner(exec, { secretEnvKeys });
   const slots = new SlotAccountant(config.defaults.concurrency.global_max);
   const inFlight = new InFlightSet(); // per-issue dedup across overlapping passes (#18)
+  const rateGate = new RateLimitGate(); // global Claude usage-limit backoff (#47)
   const scheduler = new Scheduler(
     {
       active: config.defaults.poll_interval_active,
@@ -275,6 +277,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
         promptBody: cell.promptBody,
         slots,
         inFlight,
+        rateGate,
         log,
       };
       return { repo, ctx };

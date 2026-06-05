@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DONE_SENTINEL, PLAN_COMMENT_SENTINEL } from '../src/contracts/index.js';
+import { RateLimitGate } from '../src/daemon/rate-limit-gate.js';
 import { tickRepo, withClosesTrailer } from '../src/daemon/tick.js';
 import {
   buildContext,
@@ -388,5 +389,69 @@ describe('A7 — the daemon pushes the agent commits to the MR branch', () => {
     expect(ws.ensured).toContainEqual({ iid: 42, fromRef: 'maestro/issue-42' });
     expect(adapter.calls).not.toContain('createDraftMR'); // no new PR on resume
     expect(ws.pushed).toEqual([{ dir: '/ws/42', branch: 'maestro/issue-42' }]);
+  });
+});
+
+describe('A8 — rate-limited run pauses ALL spawning until the gate reopens (#47)', () => {
+  const inProgress = () => makeSnapshot({ issue: { labels: [labels.inProgress] } });
+  const MIN = 60_000;
+
+  it('trips the gate, mutates nothing, skips spawns, resumes after the deadline', async () => {
+    let t = 1_000_000;
+    const rateGate = new RateLimitGate({ now: () => t });
+    const adapter = recordingAdapter({ snapshot: inProgress() });
+    const runner = scriptedRunner([
+      { status: 'in_progress', summary: 'claude usage/rate limit reached', rateLimit: {} },
+      { status: 'in_progress', summary: 'resumed fine' },
+    ]);
+    const { ctx, runnerSpy, proofHandoffSpy } = buildContext({ adapter, runner, rateGate });
+
+    await tickRepo(repo, ctx); // run happens, comes back rate-limited
+    expect(runnerSpy.inputs).toHaveLength(1);
+    expect(rateGate.pausedUntil()).toBe(t + 5 * MIN); // base backoff
+    // doomed spawn, not an agent error: no lifecycle transition of any kind
+    expect(adapter.labelOps).toEqual([]);
+    expect(proofHandoffSpy).not.toHaveBeenCalled();
+
+    await tickRepo(repo, ctx); // paused → spawn skipped as a no-op
+    expect(runnerSpy.inputs).toHaveLength(1);
+
+    t += 6 * MIN; // clock passes the deadline → gate reopens by itself
+    await tickRepo(repo, ctx);
+    expect(runnerSpy.inputs).toHaveLength(2);
+  });
+
+  it('the CLI-reported reset time wins over the default backoff', async () => {
+    const t = 1_000_000;
+    const rateGate = new RateLimitGate({ now: () => t, marginMs: 30_000 });
+    const adapter = recordingAdapter({ snapshot: inProgress() });
+    const runner = scriptedRunner({
+      status: 'in_progress',
+      summary: 'limit',
+      rateLimit: { resetAt: t + 42 * MIN },
+    });
+    const { ctx } = buildContext({ adapter, runner, rateGate });
+
+    await tickRepo(repo, ctx);
+    expect(rateGate.pausedUntil()).toBe(t + 42 * MIN + 30_000);
+  });
+
+  it('a healthy run clears the trip streak', async () => {
+    let t = 1_000_000;
+    const rateGate = new RateLimitGate({ now: () => t });
+    const adapter = recordingAdapter({ snapshot: inProgress() });
+    const runner = scriptedRunner([
+      { status: 'in_progress', summary: 'limit', rateLimit: {} },
+      { status: 'in_progress', summary: 'working' },
+      { status: 'in_progress', summary: 'limit again', rateLimit: {} },
+    ]);
+    const { ctx } = buildContext({ adapter, runner, rateGate });
+
+    await tickRepo(repo, ctx); // trip #1 → 5 min
+    t += 6 * MIN;
+    await tickRepo(repo, ctx); // healthy → clear()
+    expect(rateGate.pausedUntil()).toBeNull();
+    await tickRepo(repo, ctx); // trip again → back at BASE, not doubled
+    expect(rateGate.pausedUntil()).toBe(t + 5 * MIN);
   });
 });
