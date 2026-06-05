@@ -312,6 +312,32 @@ generated for you from a template.
 
 ---
 
+### Per-role prompts and the stage pipeline (#29)
+
+A `WORKFLOW.md` body may declare role sections:
+
+```markdown
+Shared conventions every agent gets.
+
+## role: define
+Refine the request into acceptance criteria. Ask, don't assume.
+
+## role: plan
+Produce the implementation plan and the checkbox todo.
+
+## role: implement
+Execute the plan, one atomic commit per step.
+```
+
+Declaring roles opts the repo into the staged pipeline: new issues enter **backlog**,
+where the define agent drafts acceptance criteria as an issue comment. A human approves
+by applying the `maestro:todo` label (or replying `/maestro approve`) — applying the
+label at creation skips definition entirely. The plan agent then produces the plan, and
+only after that does maestro create the branch and draft MR (which carries the plan from
+birth). Implementation proceeds as before. A repo **without** role sections keeps the
+original single-agent flow unchanged. The `maestro:queued` label marks any issue waiting
+for a free concurrency slot.
+
 ## A walkthrough of the default `WORKFLOW.md`
 
 A `WORKFLOW.md` has two parts: a **front-matter block** (the settings, in YAML

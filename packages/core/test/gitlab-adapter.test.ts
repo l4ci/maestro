@@ -332,7 +332,13 @@ describe('Slice 10 — ensureLabels', () => {
     const created = fake
       .callsTo('POST', '/labels')
       .map((c) => JSON.parse(c.opts?.input ?? '{}').name);
-    expect(created).toEqual(['maestro::todo', 'maestro::in-review', 'maestro::blocked']); // todo added by #53
+    expect(created).toEqual([
+      'maestro::backlog',
+      'maestro::todo',
+      'maestro::in-review',
+      'maestro::blocked',
+      'maestro::queued',
+    ]); // #53/#29 label set
   });
 
   it('is fully idempotent when all present', async () => {
@@ -363,42 +369,42 @@ describe('Slice 11 — ensureBoard (§11)', () => {
     fake.onApi(
       'GET',
       '/labels',
-      l.all().map((name, i) => ({ id: i + 10, name })),
+      l.board().map((name, i) => ({ id: i + 10, name })),
     );
     fake.onApi('GET', '/boards', []);
     fake.onApi('POST', '/boards', { id: 99 });
     await a.ensureBoard(
       repo,
-      l.all().map((name) => ({ name })),
+      l.board().map((name) => ({ name })),
     );
 
     expect(fake.callsMatching('POST', /\/boards$/)).toHaveLength(1); // board create, not lists
     const listLabelIds = fake
       .callsTo('POST', '/boards/99/lists')
       .map((c) => JSON.parse(c.opts?.input ?? '{}').label_id);
-    expect(listLabelIds).toEqual([10, 11, 12, 13]); // todo, inProgress, inReview, blocked — lifecycle order (#53)
+    expect(listLabelIds).toEqual([10, 11, 12, 13, 14]); // board(): backlog…blocked (#29)
   });
 
   it('reuses the single existing Free-tier board and skips existing lists', async () => {
     const { a, fake } = mk();
     const l = labelNames('gitlab');
-    fake.onApi('GET', '/boards/5/lists', [{ id: 1, label: { id: 11, name: l.inProgress } }]);
+    fake.onApi('GET', '/boards/5/lists', [{ id: 1, label: { id: 12, name: l.inProgress } }]);
     fake.onApi('POST', '/boards/5/lists', { id: 2 });
     fake.onApi(
       'GET',
       '/labels',
-      l.all().map((name, i) => ({ id: i + 10, name })),
+      l.board().map((name, i) => ({ id: i + 10, name })),
     );
     fake.onApi('GET', '/boards', [{ id: 5 }]);
     await a.ensureBoard(
       repo,
-      l.all().map((name) => ({ name })),
+      l.board().map((name) => ({ name })),
     );
     expect(fake.callsMatching('POST', /\/boards$/)).toHaveLength(0); // reused, no board create
     const listLabelIds = fake
       .callsTo('POST', '/boards/5/lists')
       .map((c) => JSON.parse(c.opts?.input ?? '{}').label_id);
-    expect(listLabelIds).toEqual([10, 12, 13]); // in-progress list already existed (#53 adds todo)
+    expect(listLabelIds).toEqual([10, 11, 13, 14]); // in-progress list already existed (#29 board)
   });
 });
 

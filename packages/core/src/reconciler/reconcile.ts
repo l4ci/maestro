@@ -15,6 +15,7 @@ import type {
   RepoSettings,
   TriggerGuard,
 } from '../contracts/index.js';
+import { AC_DRAFT_SENTINEL } from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
 
 function assertNever(x: never): never {
@@ -63,6 +64,117 @@ function repliesSinceBlock(recentComments: Comment[], botUser: string): Comment[
   return recentComments.filter((c) => c.author.username !== botUser && c.createdAt > blockedAt);
 }
 
+/** Idempotent capacity marker (#53/#29): one label write, then a stable no-op. */
+function markQueuedOnce(snapshot: IssueSnapshot, settings: RepoSettings, why: string): Intent {
+  return snapshot.issue.labels.includes(settings.labels.queued)
+    ? { kind: 'none', reason: `${why} (queued marked)` }
+    : { kind: 'mark-queued' };
+}
+
+/** The #29 pipeline stages, P2 cut (review:internal arrives with P3). */
+export type Stage = 'backlog' | 'todo' | 'in-progress' | 'review:human' | 'done';
+
+/**
+ * Stage derivation from ARTIFACTS alone (#29 "blocked is a modifier" decision): the
+ * world state IS the origin, so resuming from blocked needs no stored state. Label
+ * writes are projections for humans/boards; they are never read back here — except
+ * `todo`, which is HUMAN-set by design (the daemon never applies it) and so is itself
+ * an artifact: its presence is the definition-gate approval.
+ */
+export function deriveStage(snapshot: IssueSnapshot, settings: RepoSettings): Stage {
+  const { issue, mr } = snapshot;
+  if (issue.state === 'closed') return 'done';
+  if (mr && !mr.isDraft) return 'review:human'; // handoff completed → human gate
+  if (mr) return 'in-progress'; // draft MR = plan landed, implementation underway
+  if (acApproved(snapshot, settings)) return 'todo'; // defined, awaiting planning
+  return 'backlog'; // not yet defined
+}
+
+/** The definition gate (#29): a human applied the todo label (possibly at creation —
+ *  the explicit skip-define escape hatch), or replied `/maestro approve` after the
+ *  define agent's AC draft. Bot comments can never approve. */
+function acApproved(snapshot: IssueSnapshot, settings: RepoSettings): boolean {
+  if (snapshot.issue.labels.includes(settings.labels.todo)) return true;
+  const draftAt = snapshot.recentComments.find((c) =>
+    c.body.includes(AC_DRAFT_SENTINEL),
+  )?.createdAt;
+  if (draftAt === undefined) return false;
+  return snapshot.recentComments.some(
+    (c) =>
+      c.author.username !== settings.botUser &&
+      c.createdAt > draftAt &&
+      /^\/maestro approve\b/m.test(c.body),
+  );
+}
+
+/** Blocked as a modifier (#29): the label is the bit; clearing it re-derives the stage
+ *  from artifacts, so work resumes exactly where it left off. */
+function isBlocked(snapshot: IssueSnapshot, settings: RepoSettings): boolean {
+  return snapshot.issue.labels.includes(settings.labels.blocked);
+}
+
+/** Stage → agent role (#29). review:human/done run no agent. */
+const STAGE_ROLE = { backlog: 'define', todo: 'plan', 'in-progress': 'implement' } as const;
+
+/**
+ * The per-stage pipeline (#29 P2), entered only when the repo's WORKFLOW declares
+ * role sections (`rolesDeclared`) — legacy generalist repos keep the original FSM
+ * below, byte-for-byte.
+ */
+function reconcilePipeline(input: ReconcileInput): Intent {
+  const { snapshot, settings, slotAvailable, workspaceExists, workComplete } = input;
+  const { issue, mr } = snapshot;
+
+  // Blocked modifier first: wait, or surface the human's answer to the stage's agent.
+  if (isBlocked(snapshot, settings)) {
+    const replies = repliesSinceBlock(snapshot.recentComments, settings.botUser);
+    if (replies.length === 0) return { kind: 'blocked-wait' };
+    const stage = deriveStage(snapshot, settings);
+    const role = stage in STAGE_ROLE ? STAGE_ROLE[stage as keyof typeof STAGE_ROLE] : 'implement';
+    return { kind: 'apply-unblock', feedback: { reviewComments: replies }, role };
+  }
+
+  const stage = deriveStage(snapshot, settings);
+  switch (stage) {
+    case 'backlog':
+      if (!slotAvailable) return markQueuedOnce(snapshot, settings, 'backlog queued: no slot');
+      return { kind: 'run-define' };
+
+    case 'todo':
+      if (!slotAvailable) return markQueuedOnce(snapshot, settings, 'todo queued: no slot');
+      return { kind: 'run-plan', branch: branchName(issue), mrTitle: mrTitle(issue) };
+
+    case 'in-progress':
+      if (workComplete) return { kind: 'handoff' }; // crash-recovery (AM-1)
+      if (!slotAvailable) return markQueuedOnce(snapshot, settings, 'in-progress queued: no slot');
+      return { kind: 'run-agent', resume: true, role: 'implement' };
+
+    case 'review:human': {
+      const ap = mr?.approvals;
+      if (ap?.approved) {
+        return {
+          kind: 'merge',
+          strategy: settings.git.mergeStrategy,
+          deleteSource: settings.git.deleteSourceBranch,
+        };
+      }
+      if (ap?.changesRequested) {
+        return {
+          kind: 'apply-changes-requested',
+          feedback: { reviewComments: snapshot.recentComments },
+        };
+      }
+      return { kind: 'poll-review' };
+    }
+
+    case 'done':
+      return workspaceExists ? { kind: 'cleanup' } : { kind: 'none', reason: 'done' };
+
+    default:
+      return assertNever(stage);
+  }
+}
+
 export function reconcile(input: ReconcileInput): Intent {
   const { snapshot, settings, slotAvailable, workspaceExists, workComplete } = input;
   const { issue, mr } = snapshot;
@@ -79,6 +191,9 @@ export function reconcile(input: ReconcileInput): Intent {
     return { kind: 'skip-untrusted', reason: 'trigger guard rejected (assignee/label/actor)' };
   }
 
+  // 2b. Role pipeline (#29): only when the repo's WORKFLOW opts in via role sections.
+  if (input.rolesDeclared) return reconcilePipeline(input);
+
   // 3. Derive state, compute at most one intent.
   const state = deriveState(snapshot, settings);
   switch (state) {
@@ -86,12 +201,10 @@ export function reconcile(input: ReconcileInput): Intent {
       if (slotAvailable) {
         return { kind: 'start-new', branch: branchName(issue), mrTitle: mrTitle(issue) };
       }
-      // Queued with no slot: make the queue visible on the forge (#53). `todo` is a
+      // Queued with no slot: make the queue visible on the forge (#53). `queued` is a
       // marker, not a lifecycle state — deriveState still reads this issue as `new`,
       // so a freed slot starts it exactly as before. Idempotent: marked once.
-      return issue.labels.includes(settings.labels.todo)
-        ? { kind: 'none', reason: 'new issue queued: no concurrency slot (todo marked)' }
-        : { kind: 'mark-todo' };
+      return markQueuedOnce(snapshot, settings, 'new issue queued: no concurrency slot');
 
     case 'in-progress':
       if (workComplete) return { kind: 'handoff' }; // crash-recovery (AM-1); no slot consumed

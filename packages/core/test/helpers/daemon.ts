@@ -313,6 +313,7 @@ export function buildContext(
     proofAndHandoff?: ReturnType<typeof vi.fn>;
     rateGate?: RateLimitGate;
     log?: TickContext['log'];
+    promptBody?: string;
   } = {},
 ): BuiltContext {
   const settings = partial.settings ?? defaultSettings();
@@ -332,7 +333,7 @@ export function buildContext(
     exec: { run: async () => ({ code: 0, stdout: '', stderr: '' }) } as never,
     settings,
     workflow: partial.workflow ?? defaultWorkflow(),
-    promptBody: 'do the work',
+    promptBody: partial.promptBody ?? 'do the work',
     slots,
     inFlight,
     rateGate: partial.rateGate ?? new RateLimitGate(),

@@ -7,6 +7,11 @@ import type { Comment, Issue, MergeRequest } from './forge-model.js';
 
 export type AgentStatus = 'done' | 'needs_input' | 'in_progress';
 
+/** The role a dispatch runs as (#29): one purpose-built prompt per lifecycle stage.
+ *  Prompt sections live in WORKFLOW.md (`## role: <name>`, workflow/roles.ts). */
+export const AGENT_ROLES = ['define', 'plan', 'implement', 'review'] as const;
+export type AgentRole = (typeof AGENT_ROLES)[number];
+
 export interface AgentResult {
   status: AgentStatus;
   summary: string;
@@ -32,6 +37,10 @@ export interface AgentResult {
 /** Idempotency marker the daemon embeds in the one-time plan-summary issue comment,
  *  so a resumed/re-run tick never double-posts it (#48). */
 export const PLAN_COMMENT_SENTINEL = '<!-- maestro:plan -->';
+
+/** Marker on the define agent's acceptance-criteria draft comment (#29). Its presence
+ *  is what the human definition gate approves (todo label or /maestro approve). */
+export const AC_DRAFT_SENTINEL = '<!-- maestro:ac-draft -->';
 
 export interface RunnerInput {
   workspaceDir: string;

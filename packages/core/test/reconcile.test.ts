@@ -221,19 +221,19 @@ describe('New row (§7)', () => {
 
   it('A6 new issue without slot queues — marked todo on the forge (#53)', () => {
     const out = reconcile(buildInput({ slotAvailable: false }));
-    expect(out.kind).toBe('mark-todo');
+    expect(out.kind).toBe('mark-queued');
   });
 
   it('A6b an already-marked queued issue is a stable no-op (#53)', () => {
     const input = buildInput({ slotAvailable: false });
-    input.snapshot.issue.labels.push(input.settings.labels.todo);
+    input.snapshot.issue.labels.push(input.settings.labels.queued);
     const out = reconcile(input);
     expect(out.kind).toBe('none');
   });
 
   it('A6c the todo marker does not change state: a freed slot still starts it (#53)', () => {
     const input = buildInput({ slotAvailable: true });
-    input.snapshot.issue.labels.push(input.settings.labels.todo);
+    input.snapshot.issue.labels.push(input.settings.labels.queued);
     expect(reconcile(input).kind).toBe('start-new');
   });
 });
@@ -496,7 +496,7 @@ describe('A16 — determinism, idempotency, purity', () => {
   it('every canonical §7 row yields exactly one expected kind', () => {
     const rows: Array<[ReconcileInput, string]> = [
       [buildInput(), 'start-new'],
-      [buildInput({ slotAvailable: false }), 'mark-todo'], // queued → visible (#53)
+      [buildInput({ slotAvailable: false }), 'mark-queued'], // queued → visible (#53)
       [
         buildInput({ snapshot: snapshot({ issue: issue({ labels: [labels.inProgress] }) }) }),
         'run-agent',
@@ -516,5 +516,114 @@ describe('A16 — determinism, idempotency, purity', () => {
     for (const [input, kind] of rows) {
       expect(reconcile(input).kind).toBe(kind);
     }
+  });
+});
+
+// --- P — the #29 role pipeline (rolesDeclared: true) ------------------------
+
+describe('P — #29 stage pipeline (only when the WORKFLOW declares roles)', () => {
+  const AC_DRAFT = '<!-- maestro:ac-draft -->';
+  const comment = (author: string, body: string, createdAt: string): Comment => ({
+    id: `c-${createdAt}`,
+    author: user(author),
+    body,
+    createdAt,
+  });
+  const pin = (over: Partial<ReconcileInput> = {}): ReconcileInput =>
+    buildInput({ rolesDeclared: true, ...over });
+
+  it('P1 deriveStage: fresh issue → backlog → run-define', () => {
+    const out = reconcile(pin({ snapshot: snapshot({ mr: undefined }) }));
+    expect(out.kind).toBe('run-define');
+  });
+
+  it('P2 human-applied todo label gates backlog → todo → run-plan', () => {
+    const out = reconcile(pin({ snapshot: snapshot({ issue: issue({ labels: [labels.todo] }) }) }));
+    expect(out.kind).toBe('run-plan');
+  });
+
+  it('P3 /maestro approve after the AC draft also gates → run-plan', () => {
+    const snap = snapshot({
+      recentComments: [
+        comment('reporter', '/maestro approve', '2026-06-05T12:00:00Z'),
+        comment(BOT, `### 📋 AC draft\n${AC_DRAFT}`, '2026-06-05T11:00:00Z'),
+      ],
+    });
+    expect(reconcile(pin({ snapshot: snap })).kind).toBe('run-plan');
+  });
+
+  it('P4 a bot approve comment can NOT open the gate', () => {
+    const snap = snapshot({
+      recentComments: [
+        comment(BOT, '/maestro approve', '2026-06-05T12:00:00Z'),
+        comment(BOT, `draft\n${AC_DRAFT}`, '2026-06-05T11:00:00Z'),
+      ],
+    });
+    expect(reconcile(pin({ snapshot: snap })).kind).toBe('run-define');
+  });
+
+  it('P5 approve BEFORE the draft does not gate (must answer the draft)', () => {
+    const snap = snapshot({
+      recentComments: [
+        comment(BOT, `draft\n${AC_DRAFT}`, '2026-06-05T12:00:00Z'),
+        comment('reporter', '/maestro approve', '2026-06-05T11:00:00Z'),
+      ],
+    });
+    expect(reconcile(pin({ snapshot: snap })).kind).toBe('run-define');
+  });
+
+  it('P6 a draft MR derives in-progress → run-agent as implement', () => {
+    const out = reconcile(pin({ snapshot: snapshot({ mr: mr({ isDraft: true }) }) }));
+    expect(out.kind).toBe('run-agent');
+    if (out.kind === 'run-agent') expect(out.role).toBe('implement');
+  });
+
+  it('P7 a ready MR derives review:human → poll / merge / changes-requested', () => {
+    const ready = (ap: Partial<ApprovalState>) =>
+      reconcile(
+        pin({ snapshot: snapshot({ mr: mr({ isDraft: false, approvals: approvals(ap) }) }) }),
+      );
+    expect(ready({}).kind).toBe('poll-review');
+    expect(ready({ approved: true }).kind).toBe('merge');
+    expect(ready({ changesRequested: true }).kind).toBe('apply-changes-requested');
+  });
+
+  it('P8 blocked is a modifier: reply resumes the STAGE role, not implementation', () => {
+    // blocked during definition (no MR, no gate): the reply routes to the define agent
+    const snap = snapshot({
+      issue: issue({ labels: [labels.blocked] }),
+      recentComments: [
+        comment('reporter', 'answer: yes, OAuth2 only', '2026-06-05T12:00:00Z'),
+        comment(BOT, 'blocked: which providers?', '2026-06-05T11:00:00Z'),
+      ],
+    });
+    const out = reconcile(pin({ snapshot: snap }));
+    expect(out.kind).toBe('apply-unblock');
+    if (out.kind === 'apply-unblock') expect(out.role).toBe('define');
+  });
+
+  it('P9 blocked with no reply waits, regardless of stage', () => {
+    const snap = snapshot({
+      issue: issue({ labels: [labels.blocked] }),
+      recentComments: [comment(BOT, 'blocked: which providers?', '2026-06-05T11:00:00Z')],
+    });
+    expect(reconcile(pin({ snapshot: snap })).kind).toBe('blocked-wait');
+  });
+
+  it('P10 no slot queues every agent stage with the queued marker', () => {
+    const backlog = reconcile(pin({ slotAvailable: false }));
+    expect(backlog.kind).toBe('mark-queued');
+    const todo = reconcile(
+      pin({
+        slotAvailable: false,
+        snapshot: snapshot({ issue: issue({ labels: [labels.todo] }) }),
+      }),
+    );
+    expect(todo.kind).toBe('mark-queued');
+  });
+
+  it('P11 rolesDeclared=false keeps the legacy FSM byte-for-byte', () => {
+    expect(reconcile(buildInput()).kind).toBe('start-new');
+    expect(reconcile(buildInput({ rolesDeclared: false })).kind).toBe('start-new');
   });
 });

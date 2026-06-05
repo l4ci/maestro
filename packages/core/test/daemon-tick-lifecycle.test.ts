@@ -37,7 +37,9 @@ describe('A1 — start-new executes the New path', () => {
     expect(adapter.createdMRs[0]?.draft).toBe(true);
     expect(adapter.createdMRs[0]?.description).toContain('Closes #42');
     // label flip into in-progress, retiring the queued marker (#53)
-    expect(adapter.labelOps).toEqual([{ iid: 42, set: [labels.inProgress], unset: [labels.todo] }]);
+    expect(adapter.labelOps).toEqual([
+      { iid: 42, set: [labels.inProgress], unset: [labels.queued] },
+    ]);
     // a "started" comment is posted
     expect(adapter.issueComments).toHaveLength(1);
     // the agent ran in the prepared workspace
@@ -206,7 +208,7 @@ describe('A5 — non-acting intents are pure no-ops', () => {
     expect(slots.globalActive).toBe(0);
   });
 
-  it('queued (no slot) marks todo once, then touches nothing (#53)', async () => {
+  it('queued (no slot) marks queued once, then touches nothing (#53)', async () => {
     const snap = makeSnapshot(); // new issue
     const adapter = recordingAdapter({ snapshot: snap });
     const { SlotAccountant } = await import('../src/daemon/slots.js');
@@ -217,12 +219,12 @@ describe('A5 — non-acting intents are pure no-ops', () => {
     await tickRepo(repo, ctx);
 
     // first queued pass: exactly one cheap label write, nothing else
-    expect(adapter.labelOps).toEqual([{ iid: 42, set: [labels.todo], unset: [] }]);
+    expect(adapter.labelOps).toEqual([{ iid: 42, set: [labels.queued], unset: [] }]);
     expect(adapter.calls.filter((c) => c === 'createBranch')).toEqual([]);
     expect(runnerSpy.inputs).toHaveLength(0);
 
     // second queued pass with the marker present: pure no-op
-    snap.issue.labels.push(labels.todo);
+    snap.issue.labels.push(labels.queued);
     await tickRepo(repo, ctx);
     expect(adapter.labelOps).toHaveLength(1);
     expect(runnerSpy.inputs).toHaveLength(0);
@@ -495,5 +497,101 @@ describe('A9 — forge comments are structured Markdown (#25)', () => {
     expect(blocked?.body).toContain('### 🚧 Blocked — input needed');
     expect(blocked?.body).toContain('1. postgres or sqlite?'); // questions verbatim
     expect(blocked?.body).toContain('Reply in this thread');
+  });
+});
+
+describe('A10 — #29 pipeline tick handlers (roled WORKFLOW)', () => {
+  const ROLED = [
+    'Shared conventions.',
+    '## role: define',
+    'Refine the request into acceptance criteria.',
+    '## role: plan',
+    'Produce the implementation plan.',
+    '## role: implement',
+    'Execute the plan.',
+  ].join('\n');
+  const AC_DRAFT = '<!-- maestro:ac-draft -->';
+
+  it('backlog: define agent runs with its own prompt; done posts the AC draft + backlog label, no MR', async () => {
+    const adapter = recordingAdapter({ snapshot: makeSnapshot({ mr: null }) });
+    const runner = scriptedRunner({
+      status: 'done',
+      summary: 'AC drafted',
+      planComment: '1. login with OAuth2\n2. error states covered',
+    });
+    const { ctx, runnerSpy } = buildContext({ adapter, runner, promptBody: ROLED });
+
+    await tickRepo(repo, ctx);
+
+    // the define agent got ONLY its role section (plus the shared preamble)
+    expect(runnerSpy.inputs[0]?.promptBody).toContain('Refine the request');
+    expect(runnerSpy.inputs[0]?.promptBody).not.toContain('Execute the plan');
+    // AC draft posted with sentinel + gate instructions; backlog label set; NO branch/MR
+    const draft = adapter.issueComments.find((c) => c.body.includes(AC_DRAFT));
+    expect(draft?.body).toContain('1. login with OAuth2');
+    expect(draft?.body).toContain('/maestro approve');
+    expect(adapter.labelOps).toEqual([{ iid: 42, set: [labels.backlog], unset: [labels.queued] }]);
+    expect(adapter.calls).not.toContain('createBranch');
+    expect(adapter.calls).not.toContain('createDraftMR');
+  });
+
+  it('backlog: a re-tick with the draft already posted does not double-post', async () => {
+    const adapter = recordingAdapter({
+      snapshot: makeSnapshot({ mr: null, comments: [`### AC\n${AC_DRAFT}`] }),
+    });
+    const runner = scriptedRunner({ status: 'done', summary: 'same', planComment: 'same AC' });
+    const { ctx } = buildContext({ adapter, runner, promptBody: ROLED });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.issueComments.filter((c) => c.body.includes(AC_DRAFT))).toHaveLength(0);
+  });
+
+  it('todo: plan agent runs first; done creates branch + draft MR carrying the plan, flips labels, comments', async () => {
+    const snap = makeSnapshot({ mr: null, issue: { labels: [labels.todo] } });
+    const adapter = recordingAdapter({ snapshot: snap });
+    const runner = scriptedRunner({
+      status: 'done',
+      summary: 'planned',
+      mrDescription: '## Plan\n- [ ] step one\n- [ ] step two',
+      planComment: 'two steps, no schema change',
+    });
+    const { ctx, runnerSpy } = buildContext({ adapter, runner, promptBody: ROLED });
+
+    await tickRepo(repo, ctx);
+
+    expect(runnerSpy.inputs[0]?.promptBody).toContain('Produce the implementation plan');
+    // agent BEFORE forge mutations; MR carries the plan + Closes trailer from birth
+    expect(adapter.createdMRs[0]?.description).toContain('- [ ] step one');
+    expect(adapter.createdMRs[0]?.description).toContain('Closes #42');
+    const flip = adapter.labelOps.find((o) => o.set.includes(labels.inProgress));
+    expect(flip?.unset).toEqual([labels.todo, labels.backlog, labels.queued]);
+    // started + plan comments, in that order
+    const bodies = adapter.issueComments.map((c) => c.body);
+    expect(bodies.some((b) => b.includes('started work'))).toBe(true);
+    expect(bodies.some((b) => b.includes('### 🎼 Plan'))).toBe(true);
+  });
+
+  it('todo: a plan run that exhausts its turns creates NO MR and retries next tick', async () => {
+    const snap = makeSnapshot({ mr: null, issue: { labels: [labels.todo] } });
+    const adapter = recordingAdapter({ snapshot: snap });
+    const runner = scriptedRunner({ status: 'in_progress', summary: 'half a plan' });
+    const { ctx } = buildContext({ adapter, runner, promptBody: ROLED });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.calls).not.toContain('createDraftMR');
+    expect(adapter.calls).not.toContain('createBranch');
+  });
+
+  it('define needs_input routes through the normal blocked path', async () => {
+    const adapter = recordingAdapter({ snapshot: makeSnapshot({ mr: null }) });
+    const runner = scriptedRunner({ status: 'needs_input', summary: '1. which providers?' });
+    const { ctx } = buildContext({ adapter, runner, promptBody: ROLED });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.labelOps.some((o) => o.set.includes(labels.blocked))).toBe(true);
+    expect(adapter.issueComments.some((c) => c.body.includes('🚧'))).toBe(true);
   });
 });
