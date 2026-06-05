@@ -124,7 +124,7 @@ describe('assembleIssue — single issue view for status', () => {
       [
         7,
         makeSnapshot({
-          issue: { iid: 7, labels: [labels.inReview] },
+          issue: { iid: 7, labels: [labels.inReview], webUrl: 'https://forge/issues/7' },
           mr: {
             webUrl: 'https://mr/7',
             isDraft: false,
@@ -138,6 +138,7 @@ describe('assembleIssue — single issue view for status', () => {
     const view = await assembleIssue(repo, 7, deps(new Map([[repo.url, rec.adapter]])));
 
     expect(view.state).toBe('in-review');
+    expect(view.issueUrl).toBe('https://forge/issues/7');
     expect(view.mrUrl).toBe('https://mr/7');
     expect(view.isDraft).toBe(false);
     expect(view.approved).toBe(true);

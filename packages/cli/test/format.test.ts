@@ -44,6 +44,7 @@ describe('renderStatus (C2)', () => {
       iid: 42,
       title: 'Fix the thing',
       state: 'in-review',
+      issueUrl: 'https://gitlab.com/g/r/-/issues/42',
       mrUrl: 'https://gitlab.com/g/r/-/merge_requests/7',
       isDraft: true,
       approved: false,
@@ -58,7 +59,12 @@ describe('renderStatus (C2)', () => {
   });
 
   it('renders an issue with no MR without crashing (C4)', () => {
-    const view: IssueView = { iid: 1, title: 't', state: 'new' };
+    const view: IssueView = {
+      iid: 1,
+      title: 't',
+      state: 'new',
+      issueUrl: 'https://gitlab.com/g/r/-/issues/1',
+    };
     const out = renderStatus(view);
     expect(out).toContain('new');
   });

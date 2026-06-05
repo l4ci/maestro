@@ -17,6 +17,7 @@ export interface IssueView {
   iid: number;
   title: string;
   state: LifecycleState;
+  issueUrl: string; // canonical forge URL — adapter-supplied, never synthesized (#35)
   mrUrl?: string;
   isDraft?: boolean;
   approved?: boolean;
@@ -54,6 +55,7 @@ async function issueView(repo: RepoRef, iid: number, deps: AssembleDeps): Promis
     iid,
     title: snapshot.issue.title,
     state,
+    issueUrl: snapshot.issue.webUrl,
     ...(mr ? { mrUrl: mr.webUrl, isDraft: mr.isDraft, approved: mr.approvals.approved } : {}),
     ...(lastLog ? { lastLog } : {}),
   };

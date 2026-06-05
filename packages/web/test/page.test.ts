@@ -12,8 +12,15 @@ import { DASHBOARD_HTML } from '../src/page.js';
 // A render-shaped view; the page only reads repos[].{repo.url,repo.project,issues,counts,error}.
 type View = {
   repos: Array<{
-    repo: { url: string; project: string };
-    issues: Array<{ iid: number; title: string; state: string }>;
+    repo: { url: string; project: string; forge?: string };
+    issues: Array<{
+      iid: number;
+      title: string;
+      state: string;
+      issueUrl?: string;
+      mrUrl?: string;
+      isDraft?: boolean;
+    }>;
     counts: Record<string, number>;
     error?: string;
   }>;
@@ -25,16 +32,34 @@ function view(): View {
   return {
     repos: [
       {
-        repo: { url: 'gitlab.com/g/api', project: 'g/api' },
+        repo: { url: 'gitlab.com/g/api', project: 'g/api', forge: 'gitlab' },
         issues: [
-          { iid: 1, title: 'first', state: 'in-progress' },
-          { iid: 2, title: 'second', state: 'new' },
+          {
+            iid: 1,
+            title: 'first',
+            state: 'in-progress',
+            issueUrl: 'https://gitlab.com/g/api/-/issues/1',
+            mrUrl: 'https://gitlab.com/g/api/-/merge_requests/9',
+          },
+          {
+            iid: 2,
+            title: 'second',
+            state: 'new',
+            issueUrl: 'https://gitlab.com/g/api/-/issues/2',
+          },
         ],
         counts: { ...zero, 'in-progress': 1, new: 1 },
       },
       {
-        repo: { url: 'github.com/o/web', project: 'o/web' },
-        issues: [{ iid: 7, title: 'seventh', state: 'in-review' }],
+        repo: { url: 'github.com/o/web', project: 'o/web', forge: 'github' },
+        issues: [
+          {
+            iid: 7,
+            title: 'seventh',
+            state: 'in-review',
+            issueUrl: 'https://github.com/o/web/issues/7',
+          },
+        ],
         counts: { ...zero, 'in-review': 1 },
       },
     ],
@@ -203,6 +228,89 @@ describe('forge-controlled text stays inert (§13.1)', () => {
     w.render(v);
     expect(w.document.querySelector('#repos script')).toBeNull();
     expect(repoCards(w)[0]?.textContent).toContain('<script>boom</script>');
+  });
+});
+
+describe('issue + MR/PR forge links (#35)', () => {
+  const issueAnchor = (w: PageWindow, key: string) =>
+    rowByKey(w, key)?.querySelector('td.iid a') as HTMLAnchorElement | null;
+  const mrAnchor = (w: PageWindow, key: string) =>
+    rowByKey(w, key)?.querySelector('a.mr') as HTMLAnchorElement | null;
+
+  it('links the issue number to the forge issue url, opening in a new tab', () => {
+    const w = loadPage();
+    w.render(view());
+    const a = issueAnchor(w, 'gitlab.com/g/api#1');
+    expect(a?.textContent).toBe('#1');
+    expect(a?.getAttribute('href')).toBe('https://gitlab.com/g/api/-/issues/1');
+    expect(a?.target).toBe('_blank');
+    expect(a?.rel).toBe('noopener');
+  });
+
+  it('renders an MR ↗ link on a GitLab issue that has one', () => {
+    const w = loadPage();
+    w.render(view());
+    const a = mrAnchor(w, 'gitlab.com/g/api#1');
+    expect(a?.textContent).toContain('MR');
+    expect(a?.getAttribute('href')).toBe('https://gitlab.com/g/api/-/merge_requests/9');
+  });
+
+  it('labels the link PR ↗ on a GitHub repo', () => {
+    const w = loadPage();
+    const v = view();
+    const issue = v.repos[1]?.issues[0];
+    if (!issue) throw new Error('fixture shape');
+    issue.mrUrl = 'https://github.com/o/web/pull/3';
+    w.render(v);
+    const a = mrAnchor(w, 'github.com/o/web#7');
+    expect(a?.textContent).toContain('PR');
+    expect(a?.getAttribute('href')).toBe('https://github.com/o/web/pull/3');
+  });
+
+  it('shows no MR/PR link when the issue has no merge request', () => {
+    const w = loadPage();
+    w.render(view());
+    expect(mrAnchor(w, 'gitlab.com/g/api#2')).toBeNull();
+  });
+
+  it('a draft MR link gets the muted draft class', () => {
+    const w = loadPage();
+    const v = view();
+    const issue = v.repos[0]?.issues[0];
+    if (!issue) throw new Error('fixture shape');
+    issue.isDraft = true;
+    w.render(v);
+    expect(mrAnchor(w, 'gitlab.com/g/api#1')?.className).toContain('draft');
+  });
+
+  it('an MR appearing on a later poll adds the link without recreating the row', () => {
+    const w = loadPage();
+    w.render(view());
+    const row = rowByKey(w, 'gitlab.com/g/api#2');
+    expect(mrAnchor(w, 'gitlab.com/g/api#2')).toBeNull();
+    const v = view();
+    const issue = v.repos[0]?.issues[1];
+    if (!issue) throw new Error('fixture shape');
+    issue.mrUrl = 'https://gitlab.com/g/api/-/merge_requests/12';
+    w.render(v);
+    expect(rowByKey(w, 'gitlab.com/g/api#2')).toBe(row); // same node, updated in place
+    expect(mrAnchor(w, 'gitlab.com/g/api#2')?.getAttribute('href')).toBe(
+      'https://gitlab.com/g/api/-/merge_requests/12',
+    );
+  });
+
+  it('a vanishing MR drops its link on the next poll, same row node', () => {
+    const w = loadPage();
+    w.render(view());
+    const row = rowByKey(w, 'gitlab.com/g/api#1');
+    expect(mrAnchor(w, 'gitlab.com/g/api#1')).toBeTruthy();
+    const v = view();
+    const issue = v.repos[0]?.issues[0];
+    if (!issue) throw new Error('fixture shape');
+    issue.mrUrl = undefined;
+    w.render(v);
+    expect(rowByKey(w, 'gitlab.com/g/api#1')).toBe(row);
+    expect(mrAnchor(w, 'gitlab.com/g/api#1')).toBeNull();
   });
 });
 
