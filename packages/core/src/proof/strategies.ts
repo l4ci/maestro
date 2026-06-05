@@ -183,7 +183,25 @@ export function selectProofStrategy(kind: ProofStrategyKind, tuning?: Playwright
   }
 }
 
-/** Select + run the configured strategy. */
+/** Select + run a single configured strategy. */
 export function generateProof(input: ProofInput, tuning?: PlaywrightTuning): Promise<ProofResult> {
   return selectProofStrategy(input.workflowProof.type, tuning).run(input);
+}
+
+/**
+ * Run every configured strategy and return one ProofResult per strategy, in config
+ * order. Sequential by design (§14): a server-spawning strategy (playwright) must not
+ * race another for ports/resources, and the order is what the handoff comment renders.
+ * The handoff folds these into the single proof comment (all-must-pass).
+ */
+export async function generateProofs(
+  base: Omit<ProofInput, 'workflowProof'>,
+  strategies: { type: ProofStrategyKind; command?: string }[],
+  tuning?: PlaywrightTuning,
+): Promise<ProofResult[]> {
+  const results: ProofResult[] = [];
+  for (const workflowProof of strategies) {
+    results.push(await generateProof({ ...base, workflowProof }, tuning));
+  }
+  return results;
 }
