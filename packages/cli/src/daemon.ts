@@ -334,8 +334,9 @@ function safe(fn: () => void, what: string): void {
  *  `git`/`claude`, §8/§10) BEFORE looping. A missing binary otherwise hides as an
  *  endlessly-retried failing tick; here it's one clear error and a nonzero exit.
  *  startDaemon() stays sync (and preflight-free) so programmatic/test callers are
- *  unaffected — only this entry path gates on the check. */
-async function boot(): Promise<void> {
+ *  unaffected — only this entry path gates on the check. Returns the exit code so both
+ *  the `maestro daemon` subcommand (main.ts) and the `dist/daemon.js` alias share it. */
+export async function bootDaemon(): Promise<number> {
   const configPath = process.env.MAESTRO_CONFIG ?? './maestro.config.yaml';
   let config: MaestroConfig;
   try {
@@ -344,8 +345,7 @@ async function boot(): Promise<void> {
     config = parsed.value;
   } catch (err) {
     log.error('daemon: cannot start — config unreadable', { err: String(err) });
-    process.exitCode = 1;
-    return;
+    return 1;
   }
 
   const preflight = await checkBinaries(new NodeExec(), requiredBinaries(config));
@@ -356,12 +356,17 @@ async function boot(): Promise<void> {
     log.error('daemon: not starting — install the missing tool(s) (try `maestro doctor`)', {
       missing: preflight.missing.map((m) => m.bin),
     });
-    process.exitCode = 1;
-    return;
+    return 1;
   }
 
   startDaemon({ configPath });
+  return 0;
 }
 
+// `dist/daemon.js` alias (§14 systemd target): when invoked directly, boot and map the
+// resolved code onto the process. `maestro daemon` routes through main.ts → bootDaemon().
 const entry = process.argv[1] ?? '';
-if (entry.endsWith('daemon.js') || entry.endsWith('daemon.ts')) void boot();
+if (entry.endsWith('daemon.js') || entry.endsWith('daemon.ts'))
+  void bootDaemon().then((code) => {
+    process.exitCode = code;
+  });

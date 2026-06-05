@@ -250,7 +250,7 @@ node packages/cli/dist/cli.js doctor
 node packages/cli/dist/cli.js add gitlab.com/your-group/your-repo
 
 # 6. Start the daemon — it now watches every repo in the config
-node packages/cli/dist/daemon.js
+node packages/cli/dist/cli.js daemon
 
 # 7. In another terminal, start the dashboard and open it in a browser
 node packages/web/dist/main.js      # → http://127.0.0.1:4000
@@ -436,7 +436,7 @@ daemon per repo.
 
 ```sh
 # start the daemon (watches everything in maestro.config.yaml)
-node packages/cli/dist/daemon.js
+maestro daemon
 ```
 
 On startup it preflights your tools (`git`, `claude`, and the forge binaries you
@@ -447,6 +447,7 @@ Day-to-day you'll mostly use the CLI:
 
 | Command | What it does |
 |---|---|
+| `maestro daemon` | Start the daemon — one process that watches every repo in the config and works assigned issues. Preflights tools, then loops. |
 | `maestro add <url>` | Start watching a repo. Sets up its labels/board and commits the config change. Add `--public` to opt into a public repo (read the safety notes first). |
 | `maestro list` | Show all watched repos and what's in flight. |
 | `maestro status <issue>` | Show one ticket's current stage. |

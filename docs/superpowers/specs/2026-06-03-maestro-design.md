@@ -329,7 +329,7 @@ nothing):
 ```ini
 # /etc/systemd/system/maestro.service
 [Service]
-ExecStart=/usr/bin/node /opt/maestro/packages/cli/dist/daemon.js
+ExecStart=/usr/bin/node /opt/maestro/packages/cli/dist/cli.js daemon
 Restart=always
 EnvironmentFile=/opt/maestro/.env
 MemoryMax=3500M

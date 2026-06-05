@@ -34,6 +34,7 @@ import {
 } from '@maestro/core';
 import { runAdd } from './commands/add.js';
 import { attach } from './commands/run.js';
+import { bootDaemon } from './daemon.js';
 import { renderDoctor, renderList, renderLogs, renderStatus } from './format.js';
 import { type ParsedCommand, parse } from './parse.js';
 
@@ -158,8 +159,13 @@ function firstRepo(env: Env): { repo: RepoRef; deps: AssembleDeps } {
 async function dispatch(cmd: ParsedCommand, env: Env): Promise<number> {
   switch (cmd.kind) {
     case 'help':
-      console.log('maestro <add|status|list|logs|run|doctor> — see docs');
+      console.log('maestro <add|status|list|logs|run|daemon|doctor> — see docs');
       return 0;
+    case 'daemon':
+      // Fold the daemon entry into the CLI so `maestro daemon` replaces the deep
+      // `node dist/daemon.js` path (#28). bootDaemon() owns the preflight + run-forever
+      // loop and returns the exit code; the `dist/daemon.js` alias stays for systemd.
+      return bootDaemon();
     case 'doctor': {
       // Check the binaries this install actually needs (config-scoped); if the config
       // can't be read, fall back to probing the full set so doctor still helps mid-setup.
