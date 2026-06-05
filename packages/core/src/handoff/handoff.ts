@@ -20,11 +20,19 @@ import {
   type ProofInput,
   type ProofResult,
 } from '../contracts/index.js';
-import { type PlaywrightTuning, generateProof } from '../proof/strategies.js';
+import { type PlaywrightTuning, generateProofs } from '../proof/strategies.js';
 
-function proofCommentBody(proof: ProofResult): string {
-  const header = proof.ok ? '### ✅ Proof' : '### ⚠️ Proof (failed — review with caution)';
-  return `${header}\n\n${proof.summary}\n\n${DONE_SENTINEL}`;
+/** Fold N proof results into one comment: header is all-must-pass (ok = AND), each
+ *  strategy gets its own labelled section. A single strategy renders flat (no label),
+ *  preserving the original one-proof comment shape. */
+function proofCommentBody(proofs: ProofResult[]): string {
+  const allOk = proofs.every((p) => p.ok);
+  const header = allOk ? '### ✅ Proof' : '### ⚠️ Proof (failed — review with caution)';
+  const body =
+    proofs.length === 1
+      ? (proofs[0]?.summary ?? '')
+      : proofs.map((p) => `#### ${p.ok ? '✅' : '❌'} ${p.kind}\n\n${p.summary}`).join('\n\n');
+  return `${header}\n\n${body}\n\n${DONE_SENTINEL}`;
 }
 
 /** Idempotency marker for the fallback reviewer @-mention (handoff step 3, #6). */
@@ -100,22 +108,27 @@ export function isHandoffComplete(
 }
 
 export interface ProofAndHandoffInput extends Omit<HandoffInput, 'proof'> {
-  proofInput: Omit<ProofInput, 'git'> & { git?: { target: string } };
+  proofInput: Omit<ProofInput, 'workflowProof' | 'git'> & {
+    strategies: ProofInput['workflowProof'][];
+    git?: { target: string };
+  };
   playwrightTuning?: PlaywrightTuning;
 }
 
 /**
- * Compose generation + handoff: generate proof FIRST, then run the ordered handoff.
- * This is the unit M5 calls on `AgentResult.status === 'done'`. Proof generation
- * completing before any adapter mutation preserves the §7 proof-before-assign
- * guarantee end-to-end.
+ * Compose generation + handoff: run every configured proof strategy FIRST, then run
+ * the ordered handoff with the folded results. This is the unit M5 calls on
+ * `AgentResult.status === 'done'`. Proof generation completing before any adapter
+ * mutation preserves the §7 proof-before-assign guarantee end-to-end.
  */
-export async function proofAndHandoff(input: ProofAndHandoffInput): Promise<ProofResult> {
+export async function proofAndHandoff(input: ProofAndHandoffInput): Promise<ProofResult[]> {
   const gitTarget: { target: string } = input.proofInput.git ?? {
     target: input.settings.git.target,
   };
-  const proof = await generateProof(
-    { ...input.proofInput, git: gitTarget },
+  const { strategies, git: _git, ...base } = input.proofInput;
+  const proof = await generateProofs(
+    { ...base, git: gitTarget },
+    strategies,
     input.playwrightTuning,
   );
   await handoff({

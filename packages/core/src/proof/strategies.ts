@@ -9,7 +9,13 @@
 // CAPACITY (§14): only `playwright` touches a browser (~300–700MB); it must tear
 // down anything it started so the daemon doesn't leak processes.
 
-import type { Exec, ProofInput, ProofResult, ProofStrategyKind } from '../contracts/index.js';
+import type {
+  Exec,
+  ProofInput,
+  ProofResult,
+  ProofStrategyKind,
+  ProofStrategySpec,
+} from '../contracts/index.js';
 
 const OUTPUT_CAP = 4000; // bound captured output so a chatty command can't bloat a comment
 
@@ -183,7 +189,25 @@ export function selectProofStrategy(kind: ProofStrategyKind, tuning?: Playwright
   }
 }
 
-/** Select + run the configured strategy. */
+/** Select + run a single configured strategy. */
 export function generateProof(input: ProofInput, tuning?: PlaywrightTuning): Promise<ProofResult> {
   return selectProofStrategy(input.workflowProof.type, tuning).run(input);
+}
+
+/**
+ * Run every configured strategy and return one ProofResult per strategy, in config
+ * order. Sequential by design (§14): a server-spawning strategy (playwright) must not
+ * race another for ports/resources, and the order is what the handoff comment renders.
+ * The handoff folds these into the single proof comment (all-must-pass).
+ */
+export async function generateProofs(
+  base: Omit<ProofInput, 'workflowProof'>,
+  strategies: ProofStrategySpec[],
+  tuning?: PlaywrightTuning,
+): Promise<ProofResult[]> {
+  const results: ProofResult[] = [];
+  for (const workflowProof of strategies) {
+    results.push(await generateProof({ ...base, workflowProof }, tuning));
+  }
+  return results;
 }

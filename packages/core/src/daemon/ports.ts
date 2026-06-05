@@ -55,7 +55,7 @@ export interface Logger {
 /** M4 proof-then-handoff unit (the agent-`done` path), injected so tests can spy on
  *  invocation without real proof/forge I/O. The bare `HandoffFn` (crash-recovery
  *  resume) is the frozen contract type, imported above. */
-export type ProofAndHandoffFn = (input: ProofAndHandoffInput) => Promise<ProofResult>;
+export type ProofAndHandoffFn = (input: ProofAndHandoffInput) => Promise<ProofResult[]>;
 
 /**
  * Everything one repo's tick composes. Assembled per repo per tick by the daemon;

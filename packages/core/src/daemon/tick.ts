@@ -75,7 +75,7 @@ export async function tick(units: RepoUnit[]): Promise<Map<string, RepoTickResul
 
 /** Proof stand-in for the crash-recovery resume: the real proof is already on the
  *  forge (the sentinel is how we detected workComplete), so handoff skips re-posting. */
-const RECOVERED_PROOF: ProofResult = { ok: true, kind: 'none', summary: '(recovered)' };
+const RECOVERED_PROOF: ProofResult[] = [{ ok: true, kind: 'none', summary: '(recovered)' }];
 
 /** crash-recovery signal (AM-1): the agent reached `done` (proof comment posted) on a
  *  prior tick but handoff did not finish (issue still labelled in-progress). */
@@ -351,10 +351,7 @@ async function applyAgentResult(
         adapter: ctx.adapter,
         proofInput: {
           workspaceDir,
-          workflowProof:
-            ctx.workflow.proof.command !== undefined
-              ? { type: ctx.workflow.proof.type, command: ctx.workflow.proof.command }
-              : { type: ctx.workflow.proof.type },
+          strategies: ctx.workflow.proof, // already normalized to a list by WorkflowSchema
           environment: ctx.workflow.environment,
           exec: ctx.exec,
         },

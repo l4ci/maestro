@@ -15,10 +15,29 @@ export const WorkflowSchema = z.object({
       allowed_actors: z.array(z.string()).default([]),
     })
     .default({}),
-  proof: z.object({
-    type: z.enum(['playwright', 'test-output', 'diff-summary', 'none']),
-    command: z.string().optional(),
-  }),
+  // One strategy, or a list to prove multiple surfaces at handoff (all must pass).
+  // Single-object form stays valid (back-compat); both normalize to an array so every
+  // downstream reader sees a list. A list containing `none` is a config error — `none`
+  // means "no proof", which can't coexist with a real one.
+  proof: z.preprocess(
+    (p) => (Array.isArray(p) ? p : [p]),
+    z
+      .array(
+        z.object({
+          type: z.enum(['playwright', 'test-output', 'diff-summary', 'none']),
+          command: z.string().optional(),
+        }),
+      )
+      .nonempty('proof must list at least one strategy')
+      .superRefine((strategies, ctx) => {
+        if (strategies.length > 1 && strategies.some((s) => s.type === 'none')) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "proof 'none' must be the only strategy, not one of a list",
+          });
+        }
+      }),
+  ),
   git: z.object({
     default_branch: z.string().default('main'),
     target: z.string().default('main'),
