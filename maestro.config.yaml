@@ -14,10 +14,17 @@ defaults:
 
 forges:
   gitlab:
-    host: gitlab.com
-    token_env: MAESTRO_GITLAB_TOKEN
+    - host: gitlab.com
+      token_env: MAESTRO_GITLAB_TOKEN
+    - host: git.digital-masters.de
+      token_env: MAESTRO_DM_GITLAB_TOKEN
+      bot_user: volker.otto # usernames are per-forge; overrides defaults.bot_user on this host
   github:
     host: github.com
     token_env: MAESTRO_GITHUB_TOKEN
 
-repos: [ { url: github.com/l4ci/maestro } ]
+repos:
+  [
+    { url: github.com/l4ci/maestro },
+    { url: git.digital-masters.de/digitalmasters/internal-tools/dm-docu-gen }
+  ]
