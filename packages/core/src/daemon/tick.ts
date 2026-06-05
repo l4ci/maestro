@@ -267,6 +267,34 @@ function guard(
     .finally(() => release?.());
 }
 
+/** Start-of-work comment (#25): structured, and says where the plan will land. The agent
+ *  only produces its plan during the first session, so the daemon posts the plan summary
+ *  right after it (recordPlan's "### 🎼 Plan" comment) instead of inventing one here. */
+function startWorkComment(branch: string, mr: MergeRequest): string {
+  const mrRef = mr.webUrl && mr.webUrl !== 'u' ? `[!${mr.iid}](${mr.webUrl})` : `!${mr.iid}`;
+  return [
+    '🎼 **maestro started work on this issue.**',
+    '',
+    `- Branch: \`${branch}\``,
+    `- Draft MR: ${mrRef} — its description carries the live plan + todo list`,
+    '',
+    '_A short plan summary follows after the first working session._',
+  ].join('\n');
+}
+
+/** Blocked comment (#25): a heading the thread can scan, the agent's questions verbatim
+ *  (the STATUS_CONTRACT asks it to number multiple questions), and what unblocks it.
+ *  Unblock detection keys on author + timestamp (repliesSinceBlock), not on this text. */
+function blockedComment(summary: string): string {
+  return [
+    '### 🚧 Blocked — input needed',
+    '',
+    summary,
+    '',
+    '_Reply in this thread to answer; maestro resumes this issue on its next pass._',
+  ].join('\n');
+}
+
 /** Surface a #55 rescue: the workspace reset found committed-but-unpushed work and
  *  parked it on a rescue ref instead of destroying it — a human may want it back. */
 function warnIfRescued(handle: WorkspaceHandleLike, ctx: TickContext): void {
@@ -304,7 +332,7 @@ async function runStartNew(
     assignToBot: true,
   });
   await ctx.adapter.setIssueLabels(repo, issue.iid, [ctx.settings.labels.inProgress], []);
-  await ctx.adapter.commentIssue(repo, issue.iid, '🎼 maestro started work on this issue.');
+  await ctx.adapter.commentIssue(repo, issue.iid, startWorkComment(intent.branch, mr));
   const result = await ctx.runner.run(
     buildRunnerInput(handle.dir, snapshot, mr, snapshot.recentComments, ctx),
   );
@@ -423,11 +451,7 @@ async function applyAgentResult(
         [ctx.settings.labels.blocked],
         [ctx.settings.labels.inProgress],
       );
-      await ctx.adapter.commentIssue(
-        repo,
-        issue.iid,
-        `🚧 Blocked — agent needs input:\n\n${result.summary}`,
-      );
+      await ctx.adapter.commentIssue(repo, issue.iid, blockedComment(result.summary));
       return;
     default:
       // in_progress → leave the labels untouched; the next tick resumes (§0.9).
