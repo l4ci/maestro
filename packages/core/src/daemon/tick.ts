@@ -470,7 +470,15 @@ export async function cleanupSweep(repo: RepoRef, ctx: TickContext): Promise<voi
   for (const { dir, iid } of ctx.workspace.listWorkspaces(repo)) {
     try {
       const state = await ctx.adapter.getIssueState(repo, iid);
-      if (state === 'closed' || state === 'missing') await ctx.workspace.evict(dir);
+      if (state === 'closed' || state === 'missing') {
+        const evicted = await ctx.workspace.evict(dir);
+        // refused (#56): the dir still holds unpushed commits — keep it, retry next sweep
+        if (!evicted)
+          ctx.log.warn('cleanup: workspace kept — unpushed commits (#56)', {
+            repo: repoKey(repo),
+            iid,
+          });
+      }
     } catch (err) {
       ctx.log.error('cleanup: sweep entry failed', { repo: repoKey(repo), iid, err: String(err) });
     }

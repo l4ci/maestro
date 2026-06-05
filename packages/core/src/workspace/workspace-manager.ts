@@ -4,11 +4,14 @@
 // manager only provides the eviction mechanism. Clone auth uses a per-clone git
 // credential helper reading the token from env, never argv/URL (§0.8, OD-1).
 
-import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import type { Exec, RepoRef } from '../contracts/index.js';
 import { type GitAuth, gitCloneAuth } from './git-auth.js';
 import { assertInsideRoot, resolveWorkspacePath, slugifyProject } from './paths.js';
+
+/** Staging dir for atomic eviction (#56): rename in, then burn. Lives under root. */
+const TRASH_DIR = '.trash';
 
 export interface WorkspaceHandle {
   dir: string;
@@ -54,6 +57,13 @@ export class WorkspaceManager {
     const dir = resolveWorkspacePath(this.#root, repo, iid);
     const auth = this.#cloneAuth(repo);
     let rescuedRef: string | undefined;
+
+    // A half-deleted remnant of an interrupted cleanup (#56) — `.git` without HEAD, or a
+    // dir with no `.git` at all — is unusable as a repo and would fail every git command
+    // (or break the clone) forever. Wipe it and fall through to a fresh clone.
+    if (existsSync(dir) && !existsSync(join(dir, '.git', 'HEAD'))) {
+      await this.evict(dir);
+    }
 
     if (existsSync(join(dir, '.git'))) {
       // reuse: fetch + hard reset, no clone. The reset must never destroy committed-
@@ -177,22 +187,66 @@ export class WorkspaceManager {
     for (const dir of byLru) {
       if (total <= this.#diskCap) break;
       const size = dirSize(dir);
-      await this.evict(dir);
+      // a refused eviction (unpushed commits, #56) frees nothing — move on to the next LRU
+      if (!(await this.evict(dir))) continue;
       total -= size;
       evicted.push(dir);
     }
     return evicted;
   }
 
-  /** Recursively remove a workspace dir. Re-validates confinement (defense in depth);
-   *  idempotent (missing dir is a no-op). The daemon's cleanup sweep calls this. */
-  async evict(dir: string): Promise<void> {
+  /** Remove a workspace dir. Re-validates confinement (defense in depth); idempotent
+   *  (missing dir is a no-op). Returns false — and deletes NOTHING — when the workspace
+   *  still holds committed-but-unpushed commits (#56): eviction must never be a data-loss
+   *  path (the caller logs and retries a later sweep, by which time the push landed).
+   *  Deletion is atomic (#56): rename into `<root>/.trash` first (one syscall — the live
+   *  path can never be left half-deleted), then burn the staged dir; leftovers from a
+   *  crash mid-burn are purged on the next evict. A corrupted dir (no usable `.git`) has
+   *  no checkable work and is treated as garbage. */
+  async evict(dir: string): Promise<boolean> {
     assertInsideRoot(this.#root, dir);
-    rmSync(dir, { recursive: true, force: true });
+    if (!existsSync(dir)) {
+      this.#recency.delete(dir);
+      return true;
+    }
+    if (existsSync(join(dir, '.git', 'HEAD')) && (await this.#hasUnpushed(dir))) return false;
+
+    const trash = join(this.#root, TRASH_DIR);
+    this.#purgeTrash(trash);
+    mkdirSync(trash, { recursive: true });
+    const staged = join(trash, `${basename(dirname(dir))}__${basename(dir)}.${this.#now()}`);
+    renameSync(dir, staged);
+    rmSync(staged, { recursive: true, force: true });
     this.#recency.delete(dir);
+    return true;
   }
 
   // --- internals ----------------------------------------------------------
+
+  /** Commits on HEAD that no origin ref has — work that would be lost with the dir.
+   *  An unanswerable probe (git itself failing) counts as unpushed: refuse, don't risk. */
+  async #hasUnpushed(dir: string): Promise<boolean> {
+    return this.#gitOut([
+      '-C',
+      dir,
+      'rev-list',
+      '--count',
+      'HEAD',
+      '--not',
+      '--remotes=origin',
+    ]).then(
+      (count) => Number(count) > 0,
+      () => true,
+    );
+  }
+
+  /** Burn .trash leftovers from a crash mid-eviction — they are garbage by definition. */
+  #purgeTrash(trash: string): void {
+    if (!existsSync(trash)) return;
+    for (const name of readdirSync(trash)) {
+      rmSync(join(trash, name), { recursive: true, force: true });
+    }
+  }
 
   /** #55 guard for the reuse reset. Counts commits on HEAD that no origin ref has; when
    *  found, catch-up pushes them if HEAD sits on `fromRef` and fast-forwards it (the
@@ -255,10 +309,11 @@ export class WorkspaceManager {
   }
 
   #listWorkspaceDirs(): string[] {
-    // workspaces/<repo-slug>/<iid>/ — two levels deep
+    // workspaces/<repo-slug>/<iid>/ — two levels deep. Dot-dirs (.trash) are not workspaces.
     if (!existsSync(this.#root)) return [];
     const out: string[] = [];
     for (const repoSlug of readdirSync(this.#root)) {
+      if (repoSlug.startsWith('.')) continue;
       const repoDir = join(this.#root, repoSlug);
       if (!statSync(repoDir).isDirectory()) continue;
       for (const iid of readdirSync(repoDir)) {

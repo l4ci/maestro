@@ -43,7 +43,8 @@ export interface Workspace {
    *  GitHub rejects a PR whose head has no commits beyond base. Called in start-new before
    *  createDraftMR; the agent's real commits land on top. */
   seedBranch(handle: WorkspaceHandleLike, branchName: string): Promise<void>;
-  evict(dir: string): Promise<void>;
+  /** Returns false when the workspace was KEPT (committed-but-unpushed work, #56). */
+  evict(dir: string): Promise<boolean>;
   workspaceExists(repo: RepoRef, iid: number): boolean;
   listWorkspaces(repo: RepoRef): { dir: string; iid: number }[];
 }
