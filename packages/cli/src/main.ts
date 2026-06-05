@@ -23,6 +23,7 @@ import {
   allBinaries,
   assembleDashboard,
   assembleIssue,
+  botUserForHost,
   checkBinaries,
   deriveWatchSet,
   parseConfig,
@@ -59,9 +60,10 @@ function loadConfig(configPath: string) {
   return parsed.value;
 }
 
-/** Construct the concrete adapter for a repo's forge+host — the one forge-aware seam. */
+/** Construct the concrete adapter for a repo's forge+host — the one forge-aware seam.
+ *  botUser resolves per host (forge entry bot_user, else the global default). */
 function makeAdapter(repo: RepoRef, config: MaestroConfig, exec: Exec): ForgeAdapter {
-  const botUser = config.defaults.bot_user;
+  const botUser = botUserForHost(repo.host, config);
   if (repo.forge === 'gitlab') {
     const entry = config.forges.gitlab?.find((e) => e.host === repo.host);
     if (!entry) throw new Error(`no gitlab forge configured for host '${repo.host}'`);
@@ -86,12 +88,14 @@ function buildAssembleDeps(env: Env): { repos: RepoRef[]; deps: AssembleDeps } {
   const config = loadConfig(env.configPath);
   const repos = deriveWatchSet(config);
 
+  // Cache per (forge, host) — two hosts of the same forge carry different tokens/bots.
   const adapters = new Map<string, ReadOnlyForgeAdapter>();
   const adapterFor = (repo: RepoRef): ReadOnlyForgeAdapter => {
-    let a = adapters.get(repo.forge);
+    const key = `${repo.forge}:${repo.host}`;
+    let a = adapters.get(key);
     if (!a) {
       a = makeAdapter(repo, config, exec);
-      adapters.set(repo.forge, a);
+      adapters.set(key, a);
     }
     return a;
   };
@@ -141,7 +145,7 @@ function buildAddDeps(env: Env, url: string): AddRepoDeps {
       deps.bootstrapPr = {
         workspace,
         templateText: readFileSync(templatePath, 'utf8'),
-        botUser: config.defaults.bot_user,
+        botUser: botUserForHost(repo.host, config),
       };
     }
   } catch {

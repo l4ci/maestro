@@ -4,7 +4,14 @@
 import { z } from 'zod';
 import { zByteSize, zDuration } from './zod-helpers.js';
 
-const ForgeEntrySchema = z.object({ host: z.string(), token_env: z.string() });
+// bot_user (optional): the bot's account name ON THIS HOST. Usernames are per-forge
+// namespaces, so one global default cannot span e.g. github.com and a self-hosted
+// GitLab; absent → defaults.bot_user.
+const ForgeEntrySchema = z.object({
+  host: z.string(),
+  token_env: z.string(),
+  bot_user: z.string().optional(),
+});
 
 const ForgeConfigSchema = z.object({
   gitlab: z.union([ForgeEntrySchema, z.array(ForgeEntrySchema)]).optional(),

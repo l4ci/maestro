@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { ConfigStore, inferForge, parseConfig } from '../src/config/load-config.js';
+import { ConfigStore, botUserForHost, inferForge, parseConfig } from '../src/config/load-config.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 // The stable example fixture (the live maestro.config.yaml is user data and changes).
@@ -83,6 +83,34 @@ describe('B2 — host → ForgeKind inference', () => {
     expect(inferForge('gitlab.com/group/api', multi)).toBe('gitlab');
     expect(inferForge('git.digital-masters.de/team/project', multi)).toBe('gitlab');
     expect(inferForge('github.com/org/web', multi)).toBe('github');
+  });
+});
+
+describe('B2b — per-host bot user (forge entry bot_user)', () => {
+  const yaml = `
+defaults:
+  bot_user: l4ci
+forges:
+  gitlab:
+    - host: gitlab.com
+      token_env: A
+    - host: git.acme.internal
+      token_env: B
+      bot_user: acme-bot
+  github:
+    host: github.com
+    token_env: C
+repos: []
+`;
+
+  it('resolves the entry bot_user for its host, the global default elsewhere', () => {
+    const r = parseConfig(yaml);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(botUserForHost('git.acme.internal', r.value)).toBe('acme-bot');
+    expect(botUserForHost('gitlab.com', r.value)).toBe('l4ci');
+    expect(botUserForHost('github.com', r.value)).toBe('l4ci');
+    expect(botUserForHost('unknown.host', r.value)).toBe('l4ci'); // total: default, never throw
   });
 });
 

@@ -63,7 +63,10 @@ export class ForgeCli {
     if (opts.paginate) args.push('--paginate');
     const runOpts: { env: Record<string, string>; input?: string } = { env: this.#cfg.env };
     if (opts.body !== undefined) {
-      args.push('--input', '-');
+      // glab's --input sends an EMPTY Content-Type and GitLab rejects the call with
+      // HTTP 415, so the header must be explicit. gh already defaults JSON for --input;
+      // there the explicit header is a no-op. One transport, one rule.
+      args.push('-H', 'Content-Type: application/json', '--input', '-');
       runOpts.input = JSON.stringify(opts.body);
     }
     const res = await this.#exec.run(this.#cfg.bin, args, runOpts);

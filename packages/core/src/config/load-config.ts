@@ -50,6 +50,17 @@ function findForgeEntry(
 }
 
 /**
+ * The bot's account name on a given host: the forge entry's bot_user when declared,
+ * else the global default. Usernames are per-forge namespaces (one global name cannot
+ * exist on every host), so every botUser consumer must resolve through this.
+ */
+export function botUserForHost(host: string, config: MaestroConfig): string {
+  const entry =
+    findForgeEntry(host, config.forges.gitlab) ?? findForgeEntry(host, config.forges.github);
+  return entry?.bot_user ?? config.defaults.bot_user;
+}
+
+/**
  * Resolve a repo's forge from its url host (§0.6 "host inferred → ForgeKind").
  * Configured `forges.*.host` entries match first (supports self-hosted); the
  * well-known public hosts are the fallback. Unknown host → throw.

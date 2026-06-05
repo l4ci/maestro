@@ -53,6 +53,7 @@ import {
   WorkflowSource,
   WorkflowStore,
   WorkspaceManager,
+  botUserForHost,
   buildBootstrapWorkflow,
   checkBinaries,
   handoff,
@@ -76,16 +77,17 @@ const log: Logger = {
 const systemClock: Clock = { now: () => Date.now() };
 const systemRng: Rng = { next: () => Math.random() };
 
-/** One forge adapter per unique (kind, host); selectAdapter() picks per repo. */
+/** One forge adapter per unique (kind, host); selectAdapter() picks per repo. The bot's
+ *  account name is per host (forge entry bot_user, else the global default) — usernames
+ *  are per-forge namespaces. */
 function buildAdapters(config: MaestroConfig, exec: Exec): ForgeAdapter[] {
   const out: ForgeAdapter[] = [];
-  const botUser = config.defaults.bot_user;
   for (const entry of config.forges.gitlab ?? []) {
     out.push(
       new GitlabAdapter(exec, {
         token: process.env[entry.token_env] ?? '',
         host: entry.host,
-        botUser,
+        botUser: entry.bot_user ?? config.defaults.bot_user,
       }),
     );
   }
@@ -94,7 +96,7 @@ function buildAdapters(config: MaestroConfig, exec: Exec): ForgeAdapter[] {
       new GithubAdapter(exec, {
         token: process.env[entry.token_env] ?? '',
         host: entry.host,
-        botUser,
+        botUser: entry.bot_user ?? config.defaults.bot_user,
       }),
     );
   }
@@ -208,7 +210,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     const parsed: WorkflowParseResult =
       workflowText !== undefined
         ? parseWorkflow(workflowText, repo.host)
-        : buildBootstrapWorkflow(repo, templateText, config.defaults.bot_user);
+        : buildBootstrapWorkflow(repo, templateText, botUserForHost(repo.host, config));
     if (!parsed.ok) {
       log.error('WORKFLOW invalid — keeping previous workflow if any', {
         repo: repo.project,

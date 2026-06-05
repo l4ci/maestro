@@ -32,12 +32,23 @@ describe('ForgeCli — transport seam', () => {
     expect(fake.calls[0]?.opts?.env?.GH_TOKEN).toBe('t-gh');
   });
 
-  it('sends a JSON body on stdin via --input -', async () => {
+  it('sends a JSON body on stdin via --input -, declaring its content type', async () => {
     const fake = new FakeExec().onApi('POST', '/issues', { iid: 9 });
     await new ForgeCli(fake, GL).api('POST', '/issues', { body: { title: 'x' } });
     const call = fake.calls[0];
     expect(call?.args).toContain('--input');
     expect(call?.opts?.input).toBe(JSON.stringify({ title: 'x' }));
+    // glab's --input sends an EMPTY Content-Type (GitLab answers 415); the header must
+    // ride along explicitly. gh defaults to JSON, where this is a harmless no-op.
+    const h = call?.args.indexOf('-H') ?? -1;
+    expect(h).toBeGreaterThan(-1);
+    expect(call?.args[h + 1]).toBe('Content-Type: application/json');
+  });
+
+  it('sends no Content-Type header on body-less calls', async () => {
+    const fake = new FakeExec().onApi('GET', '/issues', []);
+    await new ForgeCli(fake, GL).api('GET', '/issues');
+    expect(fake.calls[0]?.args).not.toContain('-H');
   });
 
   it('appends --paginate only when requested', async () => {
