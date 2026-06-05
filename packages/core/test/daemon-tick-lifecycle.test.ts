@@ -36,8 +36,8 @@ describe('A1 — start-new executes the New path', () => {
     expect(adapter.createdMRs[0]?.targetBranch).toBe('main');
     expect(adapter.createdMRs[0]?.draft).toBe(true);
     expect(adapter.createdMRs[0]?.description).toContain('Closes #42');
-    // label flip into in-progress
-    expect(adapter.labelOps).toEqual([{ iid: 42, set: [labels.inProgress], unset: [] }]);
+    // label flip into in-progress, retiring the queued marker (#53)
+    expect(adapter.labelOps).toEqual([{ iid: 42, set: [labels.inProgress], unset: [labels.todo] }]);
     // a "started" comment is posted
     expect(adapter.issueComments).toHaveLength(1);
     // the agent ran in the prepared workspace
@@ -206,7 +206,7 @@ describe('A5 — non-acting intents are pure no-ops', () => {
     expect(slots.globalActive).toBe(0);
   });
 
-  it('queued none (no slot) touches nothing', async () => {
+  it('queued (no slot) marks todo once, then touches nothing (#53)', async () => {
     const snap = makeSnapshot(); // new issue
     const adapter = recordingAdapter({ snapshot: snap });
     const { SlotAccountant } = await import('../src/daemon/slots.js');
@@ -216,7 +216,15 @@ describe('A5 — non-acting intents are pure no-ops', () => {
 
     await tickRepo(repo, ctx);
 
-    for (const m of mutating) expect(adapter.calls).not.toContain(m);
+    // first queued pass: exactly one cheap label write, nothing else
+    expect(adapter.labelOps).toEqual([{ iid: 42, set: [labels.todo], unset: [] }]);
+    expect(adapter.calls.filter((c) => c === 'createBranch')).toEqual([]);
+    expect(runnerSpy.inputs).toHaveLength(0);
+
+    // second queued pass with the marker present: pure no-op
+    snap.issue.labels.push(labels.todo);
+    await tickRepo(repo, ctx);
+    expect(adapter.labelOps).toHaveLength(1);
     expect(runnerSpy.inputs).toHaveLength(0);
   });
 });

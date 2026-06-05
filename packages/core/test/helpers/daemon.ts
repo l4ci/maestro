@@ -99,6 +99,7 @@ export interface AdapterRecorder {
 
 export interface AdapterConfig {
   issues?: Issue[]; // listAssignedOpenIssues
+  labeled?: Issue[]; // listOpenIssuesByLabel (#53)
   snapshot?: IssueSnapshot; // single-issue getSnapshot (default)
   snapshots?: Map<number, IssueSnapshot>; // per-iid getSnapshot
   issueStates?: Map<number, 'open' | 'closed' | 'missing'>; // getIssueState
@@ -136,6 +137,10 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
       const s = cfg.snapshots?.get(iid) ?? cfg.snapshot;
       if (!s) throw new Error(`no snapshot configured for iid ${iid}`);
       return s;
+    },
+    listOpenIssuesByLabel: async () => {
+      r.calls.push('listOpenIssuesByLabel');
+      return cfg.labeled ?? [];
     },
     getIssueState: async (_repo, iid) => {
       r.calls.push('getIssueState');

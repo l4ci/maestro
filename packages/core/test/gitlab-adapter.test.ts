@@ -332,7 +332,7 @@ describe('Slice 10 — ensureLabels', () => {
     const created = fake
       .callsTo('POST', '/labels')
       .map((c) => JSON.parse(c.opts?.input ?? '{}').name);
-    expect(created).toEqual(['maestro::in-review', 'maestro::blocked']);
+    expect(created).toEqual(['maestro::todo', 'maestro::in-review', 'maestro::blocked']); // todo added by #53
   });
 
   it('is fully idempotent when all present', async () => {
@@ -376,13 +376,13 @@ describe('Slice 11 — ensureBoard (§11)', () => {
     const listLabelIds = fake
       .callsTo('POST', '/boards/99/lists')
       .map((c) => JSON.parse(c.opts?.input ?? '{}').label_id);
-    expect(listLabelIds).toEqual([10, 11, 12]); // inProgress, inReview, blocked — lifecycle order
+    expect(listLabelIds).toEqual([10, 11, 12, 13]); // todo, inProgress, inReview, blocked — lifecycle order (#53)
   });
 
   it('reuses the single existing Free-tier board and skips existing lists', async () => {
     const { a, fake } = mk();
     const l = labelNames('gitlab');
-    fake.onApi('GET', '/boards/5/lists', [{ id: 1, label: { id: 10, name: l.inProgress } }]);
+    fake.onApi('GET', '/boards/5/lists', [{ id: 1, label: { id: 11, name: l.inProgress } }]);
     fake.onApi('POST', '/boards/5/lists', { id: 2 });
     fake.onApi(
       'GET',
@@ -398,7 +398,7 @@ describe('Slice 11 — ensureBoard (§11)', () => {
     const listLabelIds = fake
       .callsTo('POST', '/boards/5/lists')
       .map((c) => JSON.parse(c.opts?.input ?? '{}').label_id);
-    expect(listLabelIds).toEqual([11, 12]); // in-progress list already existed
+    expect(listLabelIds).toEqual([10, 12, 13]); // in-progress list already existed (#53 adds todo)
   });
 });
 
@@ -526,5 +526,30 @@ describe('Slice 15 — lastActor', () => {
     fake.onApi('GET', '/issues/42/notes', []);
     fake.onApi('GET', '/issues/42', rawIssue());
     expect((await a.getSnapshot(repo, 42)).issue.lastActor).toBeUndefined();
+  });
+});
+
+// --- Slice 12: listOpenIssuesByLabel (#53) ----------------------------------
+
+describe('Slice 12 — listOpenIssuesByLabel (#53)', () => {
+  it('queries open issues by label', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/issues', [
+      {
+        iid: 9,
+        id: 9,
+        title: 'queued',
+        state: 'opened',
+        assignees: [],
+        labels: [],
+        author: { username: 'r', id: 1 },
+        web_url: 'u',
+      },
+    ]);
+    const out = await a.listOpenIssuesByLabel(repo, 'maestro::todo');
+    expect(out).toHaveLength(1);
+    const call = fake.callsTo('GET', '/issues')[0];
+    expect(call?.args.join(' ')).toContain('labels=maestro%3A%3Atodo');
+    expect(call?.args.join(' ')).toContain('state=opened');
   });
 });

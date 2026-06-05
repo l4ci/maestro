@@ -45,6 +45,7 @@ export interface AgentFeedback {
 
 export type Intent =
   | { kind: 'none'; reason: string }
+  | { kind: 'mark-todo' } // seen + queued, no slot yet — make it visible on the forge (#53)
   | { kind: 'start-new'; branch: string; mrTitle: string }
   | { kind: 'run-agent'; resume: boolean; feedback?: AgentFeedback }
   | { kind: 'handoff' }
