@@ -28,6 +28,10 @@ export interface AgentResult {
   /** A short plan summary posted ONCE as an issue comment (first planning session).
    *  The daemon guards re-posting with {@link PLAN_COMMENT_SENTINEL}. */
   planComment?: string;
+  /** The internal review agent's verdict (#29 P3) — only meaningful from the `review`
+   *  role. `pass` lets the daemon run the human handoff; `fail` posts the findings
+   *  (with a round marker) and sends the issue back to implementation. */
+  review?: { verdict: 'pass' | 'fail'; findings?: string };
   /** Set when the run failed because the Claude account is usage/rate-limited (#47).
    *  The daemon pauses ALL agent spawning until `resetAt` (epoch ms, when the CLI
    *  reported one) or its own capped exponential backoff. Additive like the above. */
@@ -41,6 +45,16 @@ export const PLAN_COMMENT_SENTINEL = '<!-- maestro:plan -->';
 /** Marker on the define agent's acceptance-criteria draft comment (#29). Its presence
  *  is what the human definition gate approves (todo label or /maestro approve). */
 export const AC_DRAFT_SENTINEL = '<!-- maestro:ac-draft -->';
+
+/** Internal review verdict markers (#29 P3). Machine-readable HTML comments in the
+ *  issue thread: durable across cold sessions/evictions, invisible to humans, and
+ *  unspoofable by prose. The round number makes the bounce cap derivable read-only
+ *  from the snapshot — count fails since the last human comment. */
+export const REVIEW_PASS_SENTINEL = '<!-- maestro:review-pass -->';
+export const REVIEW_FAIL_RE = /<!-- maestro:review-fail round=(\d+) -->/;
+export function reviewFailMarker(round: number): string {
+  return `<!-- maestro:review-fail round=${round} -->`;
+}
 
 export interface RunnerInput {
   workspaceDir: string;

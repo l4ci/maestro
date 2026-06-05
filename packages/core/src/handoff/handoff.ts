@@ -121,6 +121,26 @@ export interface ProofAndHandoffInput extends Omit<HandoffInput, 'proof'> {
  * `AgentResult.status === 'done'`. Proof generation completing before any adapter
  * mutation preserves the §7 proof-before-assign guarantee end-to-end.
  */
+/**
+ * Proof WITHOUT the handoff (#29 P3): run every configured strategy and post the folded
+ * proof comment (with DONE_SENTINEL), leaving the MR draft and the reviewer unassigned —
+ * the internal review gate decides when the human handoff runs. Same §7 guarantee:
+ * proof generation completes before the one adapter mutation (the comment).
+ */
+export async function proofAndComment(input: ProofAndHandoffInput): Promise<ProofResult[]> {
+  const gitTarget: { target: string } = input.proofInput.git ?? {
+    target: input.settings.git.target,
+  };
+  const { strategies, git: _git, ...base } = input.proofInput;
+  const proof = await generateProofs(
+    { ...base, git: gitTarget },
+    strategies,
+    input.playwrightTuning,
+  );
+  await input.adapter.commentIssue(input.repo, input.issueIid, proofCommentBody(proof));
+  return proof;
+}
+
 export async function proofAndHandoff(input: ProofAndHandoffInput): Promise<ProofResult[]> {
   const gitTarget: { target: string } = input.proofInput.git ?? {
     target: input.settings.git.target,

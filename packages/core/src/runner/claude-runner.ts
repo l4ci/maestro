@@ -171,7 +171,13 @@ export const STATUS_CONTRACT =
   'Re-emit it each session with the boxes you have finished ticked (`- [x]`). Keep the ' +
   '`Closes #<issue>` line so the merge auto-closes the issue.\n' +
   '  "planComment": "<a short plan summary>"\n' +
-  '      Posted ONCE as an issue comment on your first planning session. Omit it afterwards.';
+  '      Posted ONCE as an issue comment on your first planning session. Omit it afterwards.\n' +
+  '\n' +
+  'When you are the REVIEW agent (#29): judge the diff against the plan and add\n' +
+  '  "review": {"verdict":"pass"}                                — no blocking findings\n' +
+  '  "review": {"verdict":"fail","findings":"<numbered list>"}   — blocking findings; they are\n' +
+  '                                                                posted for the next implementation\n' +
+  '                                                                session, so be specific and actionable.';
 
 interface StreamLine {
   type?: string;
@@ -272,6 +278,16 @@ function toAgentResult(obj: Record<string, unknown>): AgentResult {
   }
   if (typeof obj.planComment === 'string' && obj.planComment.trim()) {
     out.planComment = obj.planComment;
+  }
+  // #29 P3: the review role's verdict rides the same final JSON.
+  const rev = obj.review as { verdict?: unknown; findings?: unknown } | undefined;
+  if (rev && (rev.verdict === 'pass' || rev.verdict === 'fail')) {
+    out.review = {
+      verdict: rev.verdict,
+      ...(typeof rev.findings === 'string' && rev.findings.trim()
+        ? { findings: rev.findings }
+        : {}),
+    };
   }
   return out;
 }

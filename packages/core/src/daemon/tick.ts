@@ -26,8 +26,10 @@ import {
   type MergeRequest,
   PLAN_COMMENT_SENTINEL,
   type ProofResult,
+  REVIEW_PASS_SENTINEL,
   type RepoRef,
   type RunnerInput,
+  reviewFailMarker,
 } from '../contracts/index.js';
 import type { ForgeAdapter } from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
@@ -222,6 +224,13 @@ function beginIntent(
         promise: guard(runPlan(intent, snapshot, ctx), ctx, meta, release),
       };
     }
+    case 'run-review': {
+      const release = ctx.slots.acquire(key);
+      return {
+        active: true,
+        promise: guard(runReview(intent, snapshot, ctx), ctx, meta, release),
+      };
+    }
     case 'apply-changes-requested': {
       // reconcile does not gate this on a slot; the daemon does (§14). No slot → queue.
       if (!slotAvailable) {
@@ -282,6 +291,7 @@ const SPAWNING_INTENTS: ReadonlySet<Intent['kind']> = new Set([
   'start-new',
   'run-define',
   'run-plan',
+  'run-review',
   'run-agent',
   'apply-changes-requested',
   'apply-unblock',
@@ -538,6 +548,89 @@ async function runApplyUnblock(
   await runAgent(snapshot, snapshot.mr, intent.feedback.reviewComments, ctx, role);
 }
 
+/** review:internal stage (#29 P3): a cold code-review session over the diff. The
+ *  verdict rides the final JSON. pass → pass marker + the idempotent human handoff
+ *  (M4 — proof comment already posted, so it only assigns/undrafts/labels). fail →
+ *  findings comment with a round marker (handoff context AND the countable bounce
+ *  signal); at review.max_rounds since the last human action, escalate: blocked flag
+ *  + a summary instead of another doomed bounce. */
+async function runReview(
+  intent: Extract<Intent, { kind: 'run-review' }>,
+  snapshot: IssueSnapshot,
+  ctx: TickContext,
+): Promise<void> {
+  const { repo, issue } = snapshot;
+  const mr = snapshot.mr;
+  if (!mr) {
+    ctx.log.error('review intent but no MR', { repo: repoKey(repo), iid: issue.iid });
+    return;
+  }
+  const handle = await ctx.workspace.ensureWorkspace(repo, issue.iid, mr.sourceBranch);
+  warnIfRescued(handle, ctx);
+  const result = await ctx.runner.run(
+    buildRunnerInput(handle.dir, snapshot, mr, snapshot.recentComments, ctx, 'review'),
+  );
+  if (result.rateLimit || result.status === 'needs_input') {
+    await applyAgentResult(result, snapshot, mr, handle.dir, ctx);
+    return;
+  }
+  if (result.status !== 'done' || !result.review) {
+    // No verdict (out of turns / contract miss): retry next tick — never guess a pass.
+    ctx.log.warn('review run ended without a verdict — will retry', {
+      repo: repoKey(repo),
+      iid: issue.iid,
+      status: result.status,
+    });
+    return;
+  }
+
+  if (result.review.verdict === 'pass') {
+    await ctx.adapter.commentIssue(
+      repo,
+      issue.iid,
+      `### ✅ Internal review passed\n\n${result.summary}\n\n${REVIEW_PASS_SENTINEL}`,
+    );
+    await ctx.handoff({
+      repo,
+      issueIid: issue.iid,
+      mrIid: mr.iid,
+      ticketCreator: issue.author.username,
+      settings: ctx.settings,
+      adapter: ctx.adapter,
+      proof: [{ ok: true, kind: 'none', summary: '(internal review passed)' }],
+    });
+    return;
+  }
+
+  const round = intent.rounds + 1;
+  const findings = result.review.findings ?? result.summary;
+  await ctx.adapter.commentIssue(
+    repo,
+    issue.iid,
+    `### 🔍 Internal review — changes needed (round ${round})\n\n${findings}\n\n${reviewFailMarker(round)}`,
+  );
+  const maxRounds = ctx.workflow.review.max_rounds;
+  if (round >= maxRounds) {
+    // Bounce cap (#29): never auto-merge, never silently drop — park it for a human.
+    await ctx.adapter.setIssueLabels(
+      repo,
+      issue.iid,
+      [ctx.settings.labels.blocked],
+      [ctx.settings.labels.inProgress],
+    );
+    await ctx.adapter.commentIssue(
+      repo,
+      issue.iid,
+      `### 🚧 Blocked — review bounce cap reached (${maxRounds} rounds)\n\nThe internal review keeps finding blocking issues. Outstanding findings are in the round comments above.\n\n_Reply in this thread to reset the count and resume; any human comment clears it._`,
+    );
+    ctx.log.warn('review bounce cap hit — escalated to blocked (#29)', {
+      repo: repoKey(repo),
+      iid: issue.iid,
+      rounds: round,
+    });
+  }
+}
+
 /** §0.9 runner-result → lifecycle mapping — the mapping the daemon OWNS. */
 async function applyAgentResult(
   result: AgentResult,
@@ -570,6 +663,32 @@ async function applyAgentResult(
     case 'done': {
       if (!mr) {
         ctx.log.error('agent done but no MR to hand off', { repo: repoKey(repo), iid: issue.iid });
+        return;
+      }
+      // Role pipeline (#29 P3): implementation `done` posts the proof but NOT the
+      // handoff — the internal review gate decides when a human gets pinged. The
+      // in-review label is a projection for boards; the thread markers are the truth.
+      if (declaresRoles(ctx.promptBody)) {
+        await ctx.proofOnly({
+          repo,
+          issueIid: issue.iid,
+          mrIid: mr.iid,
+          ticketCreator: issue.author.username,
+          settings: ctx.settings,
+          adapter: ctx.adapter,
+          proofInput: {
+            workspaceDir,
+            strategies: ctx.workflow.proof,
+            environment: ctx.workflow.environment,
+            exec: ctx.exec,
+          },
+        });
+        await ctx.adapter.setIssueLabels(
+          repo,
+          issue.iid,
+          [ctx.settings.labels.inReview],
+          [ctx.settings.labels.inProgress],
+        );
         return;
       }
       await ctx.proofAndHandoff({

@@ -595,3 +595,110 @@ describe('A10 — #29 pipeline tick handlers (roled WORKFLOW)', () => {
     expect(adapter.issueComments.some((c) => c.body.includes('🚧'))).toBe(true);
   });
 });
+
+describe('A11 — #29 P3 review tick handlers (roled WORKFLOW)', () => {
+  const ROLED = '## role: implement\nbuild it\n## role: review\njudge the diff';
+  const DONE = '<!-- maestro:proof:done -->';
+  const PASS = '<!-- maestro:review-pass -->';
+  // Review markers are BOT comments (the daemon posts them); makeSnapshot authors
+  // comments as 'reporter', which would reset the bounce window — author them properly.
+  const inProgressWithProof = (extra: string[] = []) => {
+    const snap = makeSnapshot({ issue: { labels: [labels.inProgress] } });
+    // newest-first: the latest proof tops the thread; prior fail rounds sit below it
+    snap.recentComments = [`proof ok ${DONE}`, ...extra].map((body, i) => ({
+      id: `b${i}`,
+      author: user('maestro-bot'),
+      body,
+      createdAt: `2026-06-05T1${9 - i}:00:00Z`, // newest first
+    }));
+    return snap;
+  };
+
+  it('implement done in a roled repo posts proof WITHOUT handoff, flips to in-review', async () => {
+    const adapter = recordingAdapter({
+      snapshot: makeSnapshot({ issue: { labels: [labels.inProgress] } }),
+    });
+    const runner = scriptedRunner({ status: 'done', summary: 'built' });
+    const { ctx, proofOnlySpy, proofHandoffSpy, handoffSpy } = buildContext({
+      adapter,
+      runner,
+      promptBody: ROLED,
+    });
+
+    await tickRepo(repo, ctx);
+
+    expect(proofOnlySpy).toHaveBeenCalledTimes(1);
+    expect(proofHandoffSpy).not.toHaveBeenCalled();
+    expect(handoffSpy).not.toHaveBeenCalled();
+    const flip = adapter.labelOps.find((o) => o.set.includes(labels.inReview));
+    expect(flip?.unset).toContain(labels.inProgress);
+  });
+
+  it('review pass → pass marker + the idempotent human handoff, review prompt isolated', async () => {
+    const adapter = recordingAdapter({ snapshot: inProgressWithProof() });
+    const runner = scriptedRunner({
+      status: 'done',
+      summary: 'clean diff, plan satisfied',
+      review: { verdict: 'pass' },
+    });
+    const { ctx, runnerSpy, handoffSpy } = buildContext({ adapter, runner, promptBody: ROLED });
+
+    await tickRepo(repo, ctx);
+
+    expect(runnerSpy.inputs[0]?.promptBody).toContain('judge the diff');
+    expect(runnerSpy.inputs[0]?.promptBody).not.toContain('build it');
+    expect(adapter.issueComments.some((c) => c.body.includes(PASS))).toBe(true);
+    expect(handoffSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('review fail below the cap → round marker, no handoff, no blocked', async () => {
+    const adapter = recordingAdapter({ snapshot: inProgressWithProof() });
+    const runner = scriptedRunner({
+      status: 'done',
+      summary: 'issues found',
+      review: { verdict: 'fail', findings: '1. missing error handling' },
+    });
+    const { ctx, handoffSpy } = buildContext({ adapter, runner, promptBody: ROLED });
+
+    await tickRepo(repo, ctx);
+
+    const fail = adapter.issueComments.find((c) => c.body.includes('review-fail round=1'));
+    expect(fail?.body).toContain('1. missing error handling');
+    expect(handoffSpy).not.toHaveBeenCalled();
+    expect(adapter.labelOps.some((o) => o.set.includes(labels.blocked))).toBe(false);
+  });
+
+  it('review fail AT the cap → escalation: blocked flag + summary comment', async () => {
+    // two prior fails since the last human action; max_rounds=3 → this one escalates
+    const adapter = recordingAdapter({
+      snapshot: inProgressWithProof([
+        'f2 <!-- maestro:review-fail round=2 -->',
+        'f1 <!-- maestro:review-fail round=1 -->',
+      ]),
+    });
+    const runner = scriptedRunner({
+      status: 'done',
+      summary: 'still broken',
+      review: { verdict: 'fail', findings: 'same findings' },
+    });
+    const { ctx, handoffSpy } = buildContext({ adapter, runner, promptBody: ROLED });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.issueComments.some((c) => c.body.includes('review-fail round=3'))).toBe(true);
+    expect(adapter.labelOps.some((o) => o.set.includes(labels.blocked))).toBe(true);
+    expect(adapter.issueComments.some((c) => c.body.includes('bounce cap'))).toBe(true);
+    expect(handoffSpy).not.toHaveBeenCalled();
+  });
+
+  it('a review run without a verdict never passes — retried next tick', async () => {
+    const adapter = recordingAdapter({ snapshot: inProgressWithProof() });
+    const runner = scriptedRunner({ status: 'done', summary: 'ran out of context' }); // no review field
+    const { ctx, handoffSpy } = buildContext({ adapter, runner, promptBody: ROLED });
+
+    await tickRepo(repo, ctx);
+
+    expect(handoffSpy).not.toHaveBeenCalled();
+    expect(adapter.issueComments).toHaveLength(0);
+  });
+});

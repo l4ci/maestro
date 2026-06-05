@@ -627,3 +627,84 @@ describe('P — #29 stage pipeline (only when the WORKFLOW declares roles)', () 
     expect(reconcile(buildInput({ rolesDeclared: false })).kind).toBe('start-new');
   });
 });
+
+// --- R — the #29 P3 internal review gate ------------------------------------
+
+describe('R — internal review gate (#29 P3)', () => {
+  const DONE = '<!-- maestro:proof:done -->';
+  const PASS = '<!-- maestro:review-pass -->';
+  const failM = (n: number) => `<!-- maestro:review-fail round=${n} -->`;
+  const comment = (author: string, body: string, createdAt: string): Comment => ({
+    id: `c-${createdAt}`,
+    author: user(author),
+    body,
+    createdAt,
+  });
+  const draftMr = () => mr({ isDraft: true });
+  const pin = (comments: Comment[], over: Partial<ReconcileInput> = {}): ReconcileInput =>
+    buildInput({
+      rolesDeclared: true,
+      snapshot: snapshot({ mr: draftMr(), recentComments: comments }),
+      ...over,
+    });
+
+  it('R1 proof posted, no verdict → run-review carrying the round count', () => {
+    const out = reconcile(pin([comment(BOT, `proof ok ${DONE}`, '2026-06-05T10:00:00Z')]));
+    expect(out.kind).toBe('run-review');
+    if (out.kind === 'run-review') expect(out.rounds).toBe(0);
+  });
+
+  it('R2 fail verdict after the proof → back to implementation, findings as context', () => {
+    const out = reconcile(
+      pin([
+        comment(BOT, `findings ${failM(1)}`, '2026-06-05T11:00:00Z'),
+        comment(BOT, `proof ok ${DONE}`, '2026-06-05T10:00:00Z'),
+      ]),
+    );
+    expect(out.kind).toBe('run-agent');
+    if (out.kind === 'run-agent') expect(out.role).toBe('implement');
+  });
+
+  it('R3 pass verdict after the proof → handoff (idempotent M4 sequence)', () => {
+    const out = reconcile(
+      pin([
+        comment(BOT, `lgtm ${PASS}`, '2026-06-05T11:00:00Z'),
+        comment(BOT, `proof ok ${DONE}`, '2026-06-05T10:00:00Z'),
+      ]),
+    );
+    expect(out.kind).toBe('handoff');
+  });
+
+  it('R4 a second done after a fail re-enters review with the bounce count', () => {
+    const out = reconcile(
+      pin([
+        comment(BOT, `proof ok again ${DONE}`, '2026-06-05T12:00:00Z'),
+        comment(BOT, `findings ${failM(1)}`, '2026-06-05T11:00:00Z'),
+        comment(BOT, `proof ok ${DONE}`, '2026-06-05T10:00:00Z'),
+      ]),
+    );
+    expect(out.kind).toBe('run-review');
+    if (out.kind === 'run-review') expect(out.rounds).toBe(1);
+  });
+
+  it('R5 a human comment resets the bounce window by construction', () => {
+    const out = reconcile(
+      pin([
+        comment(BOT, `proof ok again ${DONE}`, '2026-06-05T13:00:00Z'),
+        comment('reporter', 'looks like the right direction', '2026-06-05T12:30:00Z'),
+        comment(BOT, `findings ${failM(2)}`, '2026-06-05T12:00:00Z'),
+        comment(BOT, `findings ${failM(1)}`, '2026-06-05T11:00:00Z'),
+        comment(BOT, `proof ok ${DONE}`, '2026-06-05T10:00:00Z'),
+      ]),
+    );
+    expect(out.kind).toBe('run-review');
+    if (out.kind === 'run-review') expect(out.rounds).toBe(0); // fails predate the human
+  });
+
+  it('R6 review without a free slot queues like any other agent stage', () => {
+    const out = reconcile(
+      pin([comment(BOT, `proof ok ${DONE}`, '2026-06-05T10:00:00Z')], { slotAvailable: false }),
+    );
+    expect(out.kind).toBe('mark-queued');
+  });
+});

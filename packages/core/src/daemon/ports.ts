@@ -61,6 +61,9 @@ export interface Logger {
  *  resume) is the frozen contract type, imported above. */
 export type ProofAndHandoffFn = (input: ProofAndHandoffInput) => Promise<ProofResult[]>;
 
+/** Proof + comment WITHOUT the handoff (#29 P3) — the review gate owns the handoff. */
+export type ProofOnlyFn = (input: ProofAndHandoffInput) => Promise<ProofResult[]>;
+
 /**
  * Everything one repo's tick composes. Assembled per repo per tick by the daemon;
  * `slots` and `log` are the process-wide singletons (shared across repos), the rest
@@ -72,6 +75,7 @@ export interface TickContext {
   runner: Runner; // §0.9
   handoff: HandoffFn; // M4 — bare sequence (crash-recovery resume)
   proofAndHandoff: ProofAndHandoffFn; // M4 — generate proof + sequence (agent `done`)
+  proofOnly: ProofOnlyFn; // #29 P3 — proof comment only; review gate runs the handoff
   exec: Exec; // §0.8 — proof generation runs commands through this
   settings: RepoSettings; // resolved; carries git / labels / trigger / concurrency
   workflow: WorkflowFrontMatter; // proof / environment / claude live here, not RepoSettings

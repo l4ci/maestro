@@ -38,6 +38,9 @@ export const WorkflowSchema = z.object({
         }
       }),
   ),
+  // Internal review loop (#29 P3): how many review-fail bounces are allowed since the
+  // last human action before the daemon escalates (blocked flag + summary comment).
+  review: z.object({ max_rounds: z.number().int().positive().default(3) }).default({}),
   git: z.object({
     default_branch: z.string().default('main'),
     target: z.string().default('main'),
