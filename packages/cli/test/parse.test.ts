@@ -16,6 +16,7 @@ describe('parse (A1 — verb dispatch)', () => {
     expect(parse(['list'])).toEqual({ kind: 'list' });
     expect(parse(['logs', '42'])).toEqual({ kind: 'logs', issue: 42 });
     expect(parse(['run', '42', '--attach'])).toEqual({ kind: 'run', issue: 42, attach: true });
+    expect(parse(['daemon'])).toEqual({ kind: 'daemon' });
     expect(parse(['doctor'])).toEqual({ kind: 'doctor' });
   });
 

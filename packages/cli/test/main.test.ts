@@ -3,6 +3,13 @@
 // the commands themselves are tested in isolation.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+// `maestro daemon` must route to the daemon boot path (#28) instead of the deep
+// `dist/daemon.js` invocation. Mock bootDaemon so the test never starts the real loop.
+// vi.hoisted keeps the spy reachable from the hoisted vi.mock factory.
+const { bootDaemon } = vi.hoisted(() => ({ bootDaemon: vi.fn(async () => 0) }));
+vi.mock('../src/daemon.js', () => ({ bootDaemon }));
+
 import { run } from '../src/main.js';
 
 describe('run (usage-error → nonzero exit, no stacktrace)', () => {
@@ -21,6 +28,12 @@ describe('run (usage-error → nonzero exit, no stacktrace)', () => {
   it('returns 0 and prints help for an unknown verb', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const code = await run(['frobnicate']);
+    expect(code).toBe(0);
+  });
+
+  it('routes `daemon` to bootDaemon and returns its exit code', async () => {
+    const code = await run(['daemon']);
+    expect(bootDaemon).toHaveBeenCalledOnce();
     expect(code).toBe(0);
   });
 });
