@@ -205,3 +205,72 @@ describe('forge-controlled text stays inert (§13.1)', () => {
     expect(repoCards(w)[0]?.textContent).toContain('<script>boom</script>');
   });
 });
+
+describe('collapsible repo cards (#34)', () => {
+  const header = (w: PageWindow, url: string) =>
+    w.document.querySelector(`[data-key="${url}"] h2`) as HTMLElement;
+  const table = (w: PageWindow, url: string) =>
+    w.document.querySelector(`[data-key="${url}"] table`) as HTMLTableElement;
+
+  it('clicking the header hides the issue table; clicking again shows it', () => {
+    const w = loadPage();
+    w.render(view());
+    expect(table(w, 'gitlab.com/g/api').hidden).toBe(false);
+    header(w, 'gitlab.com/g/api').click();
+    expect(table(w, 'gitlab.com/g/api').hidden).toBe(true);
+    header(w, 'gitlab.com/g/api').click();
+    expect(table(w, 'gitlab.com/g/api').hidden).toBe(false);
+  });
+
+  it('the chevron flips with the collapse state', () => {
+    const w = loadPage();
+    w.render(view());
+    const h = header(w, 'gitlab.com/g/api');
+    expect(h.textContent).toContain('▾');
+    h.click();
+    expect(h.textContent).toContain('▸');
+    expect(h.textContent).not.toContain('▾');
+  });
+
+  it('collapsing one card leaves the others expanded', () => {
+    const w = loadPage();
+    w.render(view());
+    header(w, 'gitlab.com/g/api').click();
+    expect(table(w, 'gitlab.com/g/api').hidden).toBe(true);
+    expect(table(w, 'github.com/o/web').hidden).toBe(false);
+  });
+
+  it('collapse state survives a poll re-render with changed data', () => {
+    const w = loadPage();
+    w.render(view());
+    header(w, 'gitlab.com/g/api').click();
+    const v = view(); // changed data: issue state moves on
+    const issue = v.repos[0]?.issues[0];
+    if (!issue) throw new Error('fixture shape');
+    issue.state = 'in-review';
+    w.render(v);
+    expect(table(w, 'gitlab.com/g/api').hidden).toBe(true);
+    expect(header(w, 'gitlab.com/g/api').textContent).toContain('▸');
+  });
+
+  it('per-state counts stay visible in the collapsed header', () => {
+    const w = loadPage();
+    w.render(view());
+    header(w, 'gitlab.com/g/api').click();
+    const h = header(w, 'gitlab.com/g/api');
+    expect(h.textContent).toContain('in-progress');
+    expect(h.textContent).toContain('new');
+  });
+
+  it('an unreachable repo still shows its badge in the collapsed header', () => {
+    const w = loadPage();
+    const v = view();
+    const repo = v.repos[1];
+    if (!repo) throw new Error('fixture shape');
+    repo.error = 'auth failed (401)';
+    repo.issues = [];
+    w.render(v);
+    header(w, 'github.com/o/web').click();
+    expect(header(w, 'github.com/o/web').textContent).toContain('unreachable');
+  });
+});

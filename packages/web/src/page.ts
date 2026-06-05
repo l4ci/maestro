@@ -42,7 +42,11 @@ export const DASHBOARD_HTML = `<!doctype html>
   .repo h2 {
     margin: 0; padding: 12px 16px; font-size: 14px; border-bottom: 1px solid #21262d;
     display: flex; align-items: center; gap: 10px;
+    cursor: pointer; user-select: none;
   }
+  .chev { color: #768390; font-size: 12px; }
+  .repo table[hidden] { display: none; }
+  .repo:has(table[hidden]) h2 { border-bottom: none; } /* no double border when collapsed */
   .counts { margin-left: auto; display: flex; gap: 6px; }
   table { width: 100%; border-collapse: collapse; }
   td { padding: 8px 16px; border-top: 1px solid #161b22; }
@@ -135,9 +139,16 @@ function createRepoCard(r) {
   const card = document.createElement('div');
   card.className = 'repo';
   const h2 = document.createElement('h2');
-  h2.append(r.repo.project, span('counts', ''));
+  const chev = span('chev', '▾');
+  h2.append(chev, r.repo.project, span('counts', ''));
   const table = document.createElement('table');
   table.append(document.createElement('tbody'));
+  // Collapse on header click (#34): plain node state — the keyed renderer never
+  // recreates this card across polls, so the toggle survives every refresh for free.
+  h2.addEventListener('click', () => {
+    table.hidden = !table.hidden;
+    chev.textContent = table.hidden ? '▸' : '▾';
+  });
   card.append(h2, table);
   return card;
 }
