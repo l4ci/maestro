@@ -121,6 +121,12 @@ In words:
   in-progress and feeds your feedback to the agent.
 - **Blocked** — The agent hit something it can't decide on its own. It posts the
   question and waits for a human. No slot is consumed while it waits.
+  Maestro recognises your answer by its author: any reply from an account other
+  than the bot resumes work. If you **share the bot's account** (a per-host
+  `bot_user` pointing at your own user), start the reply with `/maestro` — a
+  body-start command is the one thing the agent can never produce (it has no
+  forge access; the daemon posts everything, and always behind a heading), so
+  it counts as provably human even from the bot's account.
 - **Done** — Ticket closed, local workspace cleaned up.
 
 ---
@@ -292,9 +298,13 @@ defaults:
   concurrency:
     global_max: 2             # how many tickets to actively work at once
 forges:
-  # Single entry per forge (shorthand)
-  gitlab: { host: gitlab.com, token_env: MAESTRO_GITLAB_TOKEN }
+  # Single entry per forge (shorthand)…
   github: { host: github.com, token_env: MAESTRO_GITHUB_TOKEN }
+  # …or a list for multiple hosts of the same kind. A username only exists on its
+  # own forge, so an entry may carry its own bot_user (else defaults.bot_user).
+  gitlab:
+    - { host: gitlab.com, token_env: MAESTRO_GITLAB_TOKEN }
+    - { host: git.acme.internal, token_env: MAESTRO_ACME_TOKEN, bot_user: acme-bot }
 repos:
   - url: gitlab.com/group/api
   - url: github.com/org/web
