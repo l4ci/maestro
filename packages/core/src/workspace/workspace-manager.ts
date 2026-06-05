@@ -14,6 +14,9 @@ export interface WorkspaceHandle {
   dir: string;
   repo: RepoRef;
   iid: number;
+  /** Set when the reuse reset found committed-but-unpushed local work it could not
+   *  catch-up push: the commits were parked on this ref before the reset (#55). */
+  rescuedRef?: string;
 }
 
 export interface WorkspaceManagerConfig {
@@ -50,17 +53,30 @@ export class WorkspaceManager {
   async ensureWorkspace(repo: RepoRef, iid: number, fromRef: string): Promise<WorkspaceHandle> {
     const dir = resolveWorkspacePath(this.#root, repo, iid);
     const auth = this.#cloneAuth(repo);
+    let rescuedRef: string | undefined;
 
     if (existsSync(join(dir, '.git'))) {
-      // reuse: fetch + hard reset, no clone
+      // reuse: fetch + hard reset, no clone. The reset must never destroy committed-
+      // but-unpushed work (#55): a crash between the agent's commit and the daemon's
+      // push would otherwise be erased on the next tick.
       await this.#git([...auth.args, '-C', dir, 'fetch', 'origin', fromRef], auth.env);
-      await this.#git(['-C', dir, 'reset', '--hard', 'FETCH_HEAD']);
+      const saved = await this.#preserveUnpushed(dir, fromRef, auth);
+      if (saved.kind === 'rescued') rescuedRef = saved.ref;
+      // After a successful catch-up push, remote == HEAD; resetting to FETCH_HEAD would
+      // rewind the just-pushed commits — clean the working tree in place instead.
+      await this.#git([
+        '-C',
+        dir,
+        'reset',
+        '--hard',
+        saved.kind === 'pushed' ? 'HEAD' : 'FETCH_HEAD',
+      ]);
     } else {
       const remote = `https://${repo.host}/${repo.project}.git`; // plain URL, no userinfo
       await this.#git([...auth.args, 'clone', remote, dir], auth.env);
     }
     this.#touch(dir);
-    return { dir, repo, iid };
+    return rescuedRef !== undefined ? { dir, repo, iid, rescuedRef } : { dir, repo, iid };
   }
 
   /** Create-or-reset the work branch (idempotent). Branch name is owned by the reconciler. */
@@ -178,14 +194,59 @@ export class WorkspaceManager {
 
   // --- internals ----------------------------------------------------------
 
+  /** #55 guard for the reuse reset. Counts commits on HEAD that no origin ref has; when
+   *  found, catch-up pushes them if HEAD sits on `fromRef` and fast-forwards it (the
+   *  crash-between-commit-and-push case — the push the daemon owed), else parks them on
+   *  `refs/maestro/rescue/<sha>` so the reset cannot orphan them. */
+  async #preserveUnpushed(
+    dir: string,
+    fromRef: string,
+    auth: GitAuth,
+  ): Promise<{ kind: 'none' | 'pushed' } | { kind: 'rescued'; ref: string }> {
+    const unpushed = await this.#gitOut([
+      '-C',
+      dir,
+      'rev-list',
+      '--count',
+      'HEAD',
+      '--not',
+      '--remotes=origin',
+    ]);
+    if (!Number(unpushed)) return { kind: 'none' };
+
+    const branch = await this.#gitOut(['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD']).catch(
+      () => '',
+    );
+    const fastForward = await this.#exec
+      .run('git', ['-C', dir, 'merge-base', '--is-ancestor', 'FETCH_HEAD', 'HEAD'], {})
+      .then((r) => r.code === 0);
+    if (branch === fromRef && fastForward) {
+      try {
+        await this.#git([...auth.args, '-C', dir, 'push', '-u', 'origin', fromRef], auth.env);
+        return { kind: 'pushed' };
+      } catch {
+        // push refused (e.g. remote moved underneath us) — park the commits instead
+      }
+    }
+    const sha = await this.#gitOut(['-C', dir, 'rev-parse', '--short', 'HEAD']);
+    const ref = `refs/maestro/rescue/${sha}`;
+    await this.#git(['-C', dir, 'update-ref', ref, 'HEAD']);
+    return { kind: 'rescued', ref };
+  }
+
   #cloneAuth(repo: RepoRef): GitAuth {
     return gitCloneAuth(repo, this.#tokenEnv, this.#getEnv);
   }
 
   #git(args: string[], env?: Record<string, string>): Promise<void> {
+    return this.#gitOut(args, env).then(() => {});
+  }
+
+  #gitOut(args: string[], env?: Record<string, string>): Promise<string> {
     return this.#exec.run('git', args, env ? { env } : {}).then((r) => {
       if (r.code !== 0)
         throw new Error(`git ${args[0]} failed (exit ${r.code}): ${r.stderr.trim()}`);
+      return r.stdout.trim();
     });
   }
 

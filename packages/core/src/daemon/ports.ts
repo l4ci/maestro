@@ -23,6 +23,8 @@ export interface WorkspaceHandleLike {
   dir: string;
   repo: RepoRef;
   iid: number;
+  /** Set when the reuse reset parked committed-but-unpushed commits on a rescue ref (#55). */
+  rescuedRef?: string;
 }
 
 /**

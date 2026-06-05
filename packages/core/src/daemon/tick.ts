@@ -30,7 +30,7 @@ import {
 } from '../contracts/index.js';
 import type { ForgeAdapter } from '../contracts/index.js';
 import { reconcile } from '../reconciler/reconcile.js';
-import type { TickContext } from './ports.js';
+import type { TickContext, WorkspaceHandleLike } from './ports.js';
 import { repoKey } from './ports.js';
 
 /** Result of one repo's tick — `active` drives the adaptive scheduler (§14). */
@@ -244,6 +244,18 @@ function guard(
     .finally(() => release?.());
 }
 
+/** Surface a #55 rescue: the workspace reset found committed-but-unpushed work and
+ *  parked it on a rescue ref instead of destroying it — a human may want it back. */
+function warnIfRescued(handle: WorkspaceHandleLike, ctx: TickContext): void {
+  if (handle.rescuedRef) {
+    ctx.log.warn('workspace: parked unpushed commits before reset (#55)', {
+      repo: handle.repo.project,
+      iid: handle.iid,
+      ref: handle.rescuedRef,
+    });
+  }
+}
+
 /** New issue → branch + draft MR + label + "started" comment, THEN run the agent
  *  (§7 New row ordering: everything review-facing is set up before the agent runs). */
 async function runStartNew(
@@ -254,6 +266,7 @@ async function runStartNew(
   const { repo, issue } = snapshot;
   const target = ctx.settings.git.target;
   const handle = await ctx.workspace.ensureWorkspace(repo, issue.iid, target);
+  warnIfRescued(handle, ctx);
   await ctx.workspace.prepareBranch(handle, intent.branch);
   await ctx.adapter.createBranch(repo, intent.branch, target);
   // Seed the branch with an empty commit before opening the PR: GitHub 422s a PR whose head
@@ -290,6 +303,7 @@ async function runAgent(
 ): Promise<void> {
   const fromRef = mr?.sourceBranch ?? ctx.settings.git.target;
   const handle = await ctx.workspace.ensureWorkspace(snapshot.repo, snapshot.issue.iid, fromRef);
+  warnIfRescued(handle, ctx);
   const result = await ctx.runner.run(buildRunnerInput(handle.dir, snapshot, mr, comments, ctx));
   if (mr) await ctx.workspace.pushBranch(handle, mr.sourceBranch);
   await applyAgentResult(result, snapshot, mr, handle.dir, ctx);
