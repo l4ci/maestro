@@ -14,6 +14,7 @@ import type {
   RepoRef,
   RepoSettings,
 } from '../contracts/index.js';
+import type { Heartbeat } from '../daemon/heartbeat.js';
 import { deriveState } from '../reconciler/reconcile.js';
 
 /** The single newest signal across an issue's three activity sources (#39), projected for
@@ -48,12 +49,19 @@ export interface RepoView {
 
 export interface DashboardView {
   repos: RepoView[];
+  /** Daemon liveness (#40). `undefined` when no heartbeat file exists (daemon never ran);
+   *  the page ages `lastTickAt` against `tickIntervalMs` to read up / stale. The forge view
+   *  is otherwise unchanged — a dead daemon must not look like a healthy empty board. */
+  daemon?: Heartbeat;
 }
 
 export interface AssembleDeps {
   adapterFor: (repo: RepoRef) => ReadOnlyForgeAdapter;
   settingsFor: (repo: RepoRef) => RepoSettings;
   logs: LogReader;
+  /** Reads the daemon heartbeat from the shared logs root; `undefined` (or omitted) → no
+   *  signal. Synchronous (a tiny local file) and called once per dashboard assembly. */
+  heartbeat?: () => Heartbeat | undefined;
 }
 
 function zeroCounts(): Record<LifecycleState, number> {
@@ -153,5 +161,6 @@ export async function assembleDashboard(
       out.push({ repo, issues: [], counts: zeroCounts(), error: String((err as Error).message) });
     }
   }
-  return { repos: out };
+  const daemon = deps.heartbeat?.();
+  return { repos: out, ...(daemon ? { daemon } : {}) };
 }

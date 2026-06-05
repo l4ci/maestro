@@ -111,6 +111,13 @@ describe('F1 — GET routes serialize assembled views, never mutate', () => {
     expect(JSON.parse(res.body)).toEqual({ ...cannedDashboard, writesEnabled: true });
   });
 
+  it('GET / passes the daemon heartbeat through to the JSON read-model (#40)', async () => {
+    const daemon = { lastTickAt: 123, activeWorkers: 1, maxWorkers: 2, tickIntervalMs: 1000 };
+    const withDaemon: DashboardView = { ...cannedDashboard, daemon };
+    const res = await call(fakeDeps({ loadDashboard: async () => withDaemon }), 'GET', '/');
+    expect(JSON.parse(res.body)).toEqual({ ...withDaemon, writesEnabled: true });
+  });
+
   it('GET / reports writesEnabled:false when no token is configured', async () => {
     const res = await call(fakeDeps({ writeToken: undefined }), 'GET', '/');
     expect(res.status).toBe(200);

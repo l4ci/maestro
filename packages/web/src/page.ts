@@ -24,7 +24,10 @@ export const DASHBOARD_HTML = `<!doctype html>
   }
   header h1 { margin: 0; font-size: 18px; letter-spacing: .5px; }
   header .tag { color: #768390; font-size: 12px; }
-  #updated { margin-left: auto; color: #768390; font-size: 12px; }
+  #daemon { margin-left: auto; font-size: 12px; }
+  #daemon.up { color: #57ab5a; }
+  #daemon.down { color: #f47067; }
+  #updated { color: #768390; font-size: 12px; }
   main { padding: 24px; max-width: 1000px; margin: 0 auto; }
   form.add {
     display: flex; gap: 8px; margin-bottom: 24px;
@@ -96,6 +99,7 @@ export const DASHBOARD_HTML = `<!doctype html>
 <header>
   <h1>maestro</h1>
   <span class="tag">read-only dashboard</span>
+  <span id="daemon"></span>
   <span id="updated"></span>
 </header>
 <main>
@@ -238,7 +242,45 @@ function reconcile(container, items, keyOf, create, update) {
   for (const leftover of byKey.values()) leftover.remove();
 }
 
+// Daemon liveness (#40). The dashboard reads the forge directly, so without this it renders
+// a healthy board while the daemon is dead and issues silently stop moving. The heartbeat is
+// the daemon's own per-tick stamp; we judge freshness against the tick cadence IT recorded
+// (tickIntervalMs), never a constant guessed here. Three states:
+//   · fresh  (age < ~3 ticks)  → green '● daemon up · A/M workers'
+//   · stale  (older)           → red   '○ daemon not seen for Nm'
+//   · no file (daemon never ran)→ red   '○ daemon not running'
+// All text via textContent — the only field that ever came off disk is numeric, but the
+// inert-text discipline holds regardless (§13.1).
+function fmtAge(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm';
+  return Math.floor(m / 60) + 'h';
+}
+
+function renderDaemon(d) {
+  const node = el('daemon');
+  if (!d) {
+    node.className = 'down';
+    node.textContent = '○ daemon not running';
+    return;
+  }
+  const age = Date.now() - d.lastTickAt;
+  // Floor the window at 10s so a fast 1s tick plus the 5s poll cadence and clock skew
+  // doesn't flap the indicator; otherwise allow ~3 of the daemon's own tick intervals.
+  const stale = age > Math.max(3 * d.tickIntervalMs, 10000);
+  if (stale) {
+    node.className = 'down';
+    node.textContent = '○ daemon not seen for ' + fmtAge(age);
+  } else {
+    node.className = 'up';
+    node.textContent = '● daemon up · ' + d.activeWorkers + '/' + d.maxWorkers + ' workers';
+  }
+}
+
 function render(view) {
+  renderDaemon(view.daemon);
   const root = el('repos');
   if (!view.repos || view.repos.length === 0) {
     const none = document.createElement('div');
