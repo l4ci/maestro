@@ -24,6 +24,7 @@ import {
   assembleDashboard,
   assembleIssue,
   botUserForHost,
+  buildBootstrapWorkflow,
   checkBinaries,
   deriveWatchSet,
   parseConfig,
@@ -58,6 +59,16 @@ function loadConfig(configPath: string) {
   const parsed = parseConfig(readFileSync(configPath, 'utf8'));
   if (!parsed.ok) throw new Error(`config invalid: ${parsed.error}`);
   return parsed.value;
+}
+
+/** The M0 template — base for a bootstrap-mode repo's stand-in workflow (mirrors the
+ *  daemon's readTemplate). Empty string if unreadable; the parse error then surfaces. */
+function readTemplate(): string {
+  try {
+    return readFileSync(process.env.MAESTRO_TEMPLATE ?? './templates/WORKFLOW.md', 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 /** Construct the concrete adapter for a repo's forge+host — the one forge-aware seam.
@@ -101,8 +112,20 @@ function buildAssembleDeps(env: Env): { repos: RepoRef[]; deps: AssembleDeps } {
   };
 
   const settingsFor = (repo: RepoRef): RepoSettings => {
+    // The workflow cache only exists once the repo has a committed WORKFLOW.md; a missing
+    // file means BOOTSTRAP mode (the daemon's deriveCell does the same dance), so list/
+    // status must fall back to the template instead of reporting the repo unreachable.
     const path = `${env.workflowsDir}/${slugifyProject(repo.project)}/WORKFLOW.md`;
-    const wf = parseWorkflow(readFileSync(path, 'utf8'), repo.host);
+    let text: string | undefined;
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch {
+      // no cache yet → bootstrap fallback below
+    }
+    const wf =
+      text !== undefined
+        ? parseWorkflow(text, repo.host)
+        : buildBootstrapWorkflow(repo, readTemplate(), botUserForHost(repo.host, config));
     if (!wf.ok) throw new Error(`WORKFLOW invalid for ${repo.project}: ${wf.error}`);
     const override = config.repos.find((r) => r.url === repo.url)?.overrides;
     return resolveRepoSettings({
