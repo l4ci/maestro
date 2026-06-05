@@ -34,11 +34,16 @@ const cannedIssue: IssueView = {
   issueUrl: 'gitlab.com/g/r/-/issues/42',
 };
 
+// A shared token the write-path tests authenticate with. Writes are DISABLED unless a
+// deps.writeToken is set, so fakeDeps enables them by default to keep existing POST tests green.
+const TOKEN = 'sekret-token';
+
 function fakeDeps(over: Partial<ServerDeps> = {}): ServerDeps {
   return {
     loadDashboard: async () => cannedDashboard,
     loadIssue: async () => cannedIssue,
     addRepo: async () => ({ added: true, repo }) as AddResult,
+    writeToken: TOKEN,
     ...over,
   };
 }
@@ -49,6 +54,7 @@ async function call(
   method: string,
   url: string,
   body?: string,
+  authToken?: string,
 ): Promise<{ status: number; body: string; headers: Record<string, string> }> {
   const server = createServer(deps);
   const { Readable } = await import('node:stream');
@@ -63,6 +69,7 @@ async function call(
           : 'application/x-www-form-urlencoded',
       }
     : {};
+  if (authToken !== undefined) req.headers.authorization = `Bearer ${authToken}`;
 
   return await new Promise((resolve) => {
     let status = 0;
@@ -100,7 +107,14 @@ describe('F1 — GET routes serialize assembled views, never mutate', () => {
     const res = await call(fakeDeps(), 'GET', '/');
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('application/json');
-    expect(JSON.parse(res.body)).toEqual(cannedDashboard);
+    // The read-model is unchanged save for the appended write-capability flag.
+    expect(JSON.parse(res.body)).toEqual({ ...cannedDashboard, writesEnabled: true });
+  });
+
+  it('GET / reports writesEnabled:false when no token is configured', async () => {
+    const res = await call(fakeDeps({ writeToken: undefined }), 'GET', '/');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ...cannedDashboard, writesEnabled: false });
   });
 
   it('GET /repos/:id returns the issue view as JSON with 200', async () => {
@@ -120,7 +134,7 @@ describe('F1 — GET routes serialize assembled views, never mutate', () => {
   });
 });
 
-describe('F2 — POST /repos delegates to the shared addRepo', () => {
+describe('F2 — POST /repos delegates to the shared addRepo (authenticated)', () => {
   it('parses a JSON url and returns 2xx on added:true', async () => {
     const addRepo = vi.fn(async () => ({ added: true, repo }) as AddResult);
     const res = await call(
@@ -128,6 +142,7 @@ describe('F2 — POST /repos delegates to the shared addRepo', () => {
       'POST',
       '/repos',
       JSON.stringify({ url: 'gitlab.com/g/r' }),
+      TOKEN,
     );
     expect(addRepo).toHaveBeenCalledWith('gitlab.com/g/r');
     expect(res.status).toBeGreaterThanOrEqual(200);
@@ -141,6 +156,7 @@ describe('F2 — POST /repos delegates to the shared addRepo', () => {
       'POST',
       '/repos',
       'url=gitlab.com%2Fg%2Fr',
+      TOKEN,
     );
     // form bodies arrive without the JSON content-type, handler must still parse
     expect(addRepo).toHaveBeenCalledWith('gitlab.com/g/r');
@@ -149,16 +165,100 @@ describe('F2 — POST /repos delegates to the shared addRepo', () => {
 
   it('returns a 4xx with the typed reason on added:false (never a 500)', async () => {
     const addRepo = vi.fn(async () => ({ added: false, reason: 'already-watched' }) as AddResult);
-    const res = await call(fakeDeps({ addRepo }), 'POST', '/repos', JSON.stringify({ url: 'x' }));
+    const res = await call(
+      fakeDeps({ addRepo }),
+      'POST',
+      '/repos',
+      JSON.stringify({ url: 'x' }),
+      TOKEN,
+    );
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
     expect(res.body).toContain('already-watched');
   });
 
   it('missing url is a 4xx, not a crash', async () => {
-    const res = await call(fakeDeps(), 'POST', '/repos', JSON.stringify({}));
+    const res = await call(fakeDeps(), 'POST', '/repos', JSON.stringify({}), TOKEN);
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
+  });
+});
+
+describe('F2-auth — POST /repos is gated by a bearer token', () => {
+  it('401 when no Authorization header is sent (writes enabled)', async () => {
+    const addRepo = vi.fn(async () => ({ added: true, repo }) as AddResult);
+    const res = await call(
+      fakeDeps({ addRepo }),
+      'POST',
+      '/repos',
+      JSON.stringify({ url: 'gitlab.com/g/r' }),
+    );
+    expect(res.status).toBe(401);
+    // The forge-mutating call must NOT run for an unauthenticated request.
+    expect(addRepo).not.toHaveBeenCalled();
+  });
+
+  it('403 when the bearer token does not match', async () => {
+    const addRepo = vi.fn(async () => ({ added: true, repo }) as AddResult);
+    const res = await call(
+      fakeDeps({ addRepo }),
+      'POST',
+      '/repos',
+      JSON.stringify({ url: 'gitlab.com/g/r' }),
+      'wrong-token',
+    );
+    expect(res.status).toBe(403);
+    expect(addRepo).not.toHaveBeenCalled();
+  });
+
+  it('403 even when the wrong token has the same length as the real one', async () => {
+    // Guards the constant-time path: equal-length-but-different must still reject.
+    const addRepo = vi.fn(async () => ({ added: true, repo }) as AddResult);
+    const wrong = 'x'.repeat(TOKEN.length);
+    const res = await call(
+      fakeDeps({ addRepo }),
+      'POST',
+      '/repos',
+      JSON.stringify({ url: 'gitlab.com/g/r' }),
+      wrong,
+    );
+    expect(res.status).toBe(403);
+    expect(addRepo).not.toHaveBeenCalled();
+  });
+
+  it('200 when the correct bearer token is presented', async () => {
+    const addRepo = vi.fn(async () => ({ added: true, repo }) as AddResult);
+    const res = await call(
+      fakeDeps({ addRepo }),
+      'POST',
+      '/repos',
+      JSON.stringify({ url: 'gitlab.com/g/r' }),
+      TOKEN,
+    );
+    expect(res.status).toBe(200);
+    expect(addRepo).toHaveBeenCalledWith('gitlab.com/g/r');
+  });
+});
+
+describe('F2-disabled — writes are off unless a token is configured', () => {
+  it('POST /repos is a 404 when no writeToken is set, even with a token header', async () => {
+    // Fail closed: the write surface does not exist, so a reader can not probe it.
+    const addRepo = vi.fn(async () => ({ added: true, repo }) as AddResult);
+    const res = await call(
+      fakeDeps({ addRepo, writeToken: undefined }),
+      'POST',
+      '/repos',
+      JSON.stringify({ url: 'gitlab.com/g/r' }),
+      'any-token',
+    );
+    expect(res.status).toBe(404);
+    expect(addRepo).not.toHaveBeenCalled();
+  });
+
+  it('GET routes are unaffected when writes are disabled', async () => {
+    const res = await call(fakeDeps({ writeToken: undefined }), 'GET', '/repos/42');
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual(cannedIssue);
   });
 });
 
@@ -192,7 +292,7 @@ describe('HTML dashboard — browser content-negotiation', () => {
     // The page's own data fetch, API clients, and every other test hit this path unchanged.
     const res = await call(fakeDeps(), 'GET', '/');
     expect(res.headers['content-type']).toContain('application/json');
-    expect(JSON.parse(res.body)).toEqual(cannedDashboard);
+    expect(JSON.parse(res.body)).toEqual({ ...cannedDashboard, writesEnabled: true });
   });
 });
 
@@ -207,11 +307,11 @@ describe('F3 — wiring smoke (the only socket-binding test)', () => {
     try {
       const get = await fetch(`${base}/`);
       expect(get.status).toBe(200);
-      expect(await get.json()).toEqual(cannedDashboard);
+      expect(await get.json()).toEqual({ ...cannedDashboard, writesEnabled: true });
 
       const post = await fetch(`${base}/repos`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', Authorization: `Bearer ${TOKEN}` },
         body: JSON.stringify({ url: 'gitlab.com/g/r' }),
       });
       expect(post.status).toBeLessThan(400);

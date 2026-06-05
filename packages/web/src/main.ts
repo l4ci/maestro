@@ -33,15 +33,20 @@ interface Env {
   logsRoot: string;
   host: string;
   port: number;
+  /** Bearer token gating POST /repos. Unset → the dashboard is read-only (no write path). */
+  writeToken?: string;
 }
 
 function readEnv(): Env {
+  // A blank/whitespace token must not silently enable writes with an empty secret.
+  const token = process.env.MAESTRO_DASHBOARD_TOKEN?.trim();
   return {
     configPath: process.env.MAESTRO_CONFIG ?? './maestro.config.yaml',
     workflowsDir: process.env.MAESTRO_WORKFLOWS_DIR ?? './workspaces',
     logsRoot: process.env.MAESTRO_LOGS_DIR ?? './logs',
     host: process.env.MAESTRO_WEB_HOST ?? '127.0.0.1',
     port: Number(process.env.MAESTRO_WEB_PORT ?? '4000'),
+    ...(token ? { writeToken: token } : {}),
   };
 }
 
@@ -120,15 +125,22 @@ function buildDeps(env: Env) {
     return repo;
   };
 
-  return buildServerDeps({ repos, assemble, add, repoForId });
+  return buildServerDeps({
+    repos,
+    assemble,
+    add,
+    repoForId,
+    ...(env.writeToken ? { writeToken: env.writeToken } : {}),
+  });
 }
 
 /** Wire deps + listen. Returns the server so callers can close() it. */
 export function startWebServer(env: Env = readEnv()) {
   const server = createServer(buildDeps(env));
   server.listen(env.port, env.host, () => {
-    // Single startup line — never logs a token (deps read env directly at construction).
-    console.log(`maestro dashboard on http://${env.host}:${env.port}`);
+    // Single startup line — states the write mode but NEVER the token value itself.
+    const mode = env.writeToken ? 'writes enabled (bearer token)' : 'read-only';
+    console.log(`maestro dashboard on http://${env.host}:${env.port} — ${mode}`);
   });
   return server;
 }

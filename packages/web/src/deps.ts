@@ -23,6 +23,11 @@ export interface BuildServerDepsArgs {
   add: AddRepoDeps;
   /** Resolve a repo id (the :id path segment) back to a RepoRef for /repos/:id. */
   repoForId: (repoId: string) => RepoRef;
+  /**
+   * Bearer token gating POST /repos. Undefined → writes stay disabled (read-only host).
+   * Read from the env at the composition root; never logged.
+   */
+  writeToken?: string;
 }
 
 export function buildServerDeps(args: BuildServerDepsArgs): ServerDeps {
@@ -31,5 +36,6 @@ export function buildServerDeps(args: BuildServerDepsArgs): ServerDeps {
     loadIssue: (repoId, iid) => assembleIssue(args.repoForId(repoId), iid, args.assemble),
     // commit:true by default — the web `add` has the same effect as `maestro add` (§8).
     addRepo: (url) => addRepo({ url, commit: true }, args.add),
+    ...(args.writeToken ? { writeToken: args.writeToken } : {}),
   };
 }
