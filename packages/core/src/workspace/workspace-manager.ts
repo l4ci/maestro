@@ -7,7 +7,7 @@
 import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Exec, RepoRef } from '../contracts/index.js';
-import { MissingTokenError } from './errors.js';
+import { type GitAuth, gitCloneAuth } from './git-auth.js';
 import { assertInsideRoot, resolveWorkspacePath, slugifyProject } from './paths.js';
 
 export interface WorkspaceHandle {
@@ -27,10 +27,6 @@ export interface WorkspaceManagerConfig {
   getEnv?: (key: string) => string | undefined; // injectable for tests; defaults to process.env
   now?: () => number; // injectable clock for LRU recency
 }
-
-// Credential helper: emits oauth2 + the token read from $MAESTRO_GIT_TOKEN at git
-// runtime. The token value never appears in argv — only the literal var reference.
-const CRED_HELPER = '!f() { echo username=oauth2; echo "password=$MAESTRO_GIT_TOKEN"; }; f';
 
 export class WorkspaceManager {
   readonly #root: string;
@@ -182,15 +178,8 @@ export class WorkspaceManager {
 
   // --- internals ----------------------------------------------------------
 
-  #cloneAuth(repo: RepoRef): { args: string[]; env: Record<string, string> } {
-    const tokenEnv = typeof this.#tokenEnv === 'function' ? this.#tokenEnv(repo) : this.#tokenEnv;
-    const token = this.#getEnv(tokenEnv);
-    if (!token) throw new MissingTokenError(tokenEnv);
-    // reset any inherited helper, then install ours; token rides in env only
-    return {
-      args: ['-c', 'credential.helper=', '-c', `credential.helper=${CRED_HELPER}`],
-      env: { MAESTRO_GIT_TOKEN: token },
-    };
+  #cloneAuth(repo: RepoRef): GitAuth {
+    return gitCloneAuth(repo, this.#tokenEnv, this.#getEnv);
   }
 
   #git(args: string[], env?: Record<string, string>): Promise<void> {
