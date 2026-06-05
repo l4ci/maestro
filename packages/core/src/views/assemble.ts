@@ -6,13 +6,24 @@
 
 import type {
   ForgeUser,
+  IssueSnapshot,
   LifecycleState,
+  LogLine,
   LogReader,
   ReadOnlyForgeAdapter,
   RepoRef,
   RepoSettings,
 } from '../contracts/index.js';
 import { deriveState } from '../reconciler/reconcile.js';
+
+/** The single newest signal across an issue's three activity sources (#39), projected for
+ *  the dashboard. `at` is ISO 8601 (rendered relative, with the absolute time on hover);
+ *  `summary` is a short, forge-controlled string the page MUST render as inert text. */
+export interface LastActivity {
+  at: string; // ISO 8601 of the newest movement
+  source: 'issue' | 'mr' | 'agent';
+  summary: string; // truncated; attacker-controlled on public repos (§13.1)
+}
 
 export interface IssueView {
   iid: number;
@@ -25,6 +36,7 @@ export interface IssueView {
   lastLog?: string;
   author: ForgeUser; // the issue reporter (#37)
   reviewer?: ForgeUser; // MR assignee — the ticket creator assigned at handoff; absent before (#37)
+  lastActivity?: LastActivity; // newest of issue/MR/agent movement, when any is known (#39)
 }
 
 export interface RepoView {
@@ -48,11 +60,55 @@ function zeroCounts(): Record<LifecycleState, number> {
   return { new: 0, 'in-progress': 0, 'in-review': 0, blocked: 0, done: 0 };
 }
 
+const SUMMARY_CAP = 80;
+
+/** Collapse whitespace and cap to ~80 chars with an ellipsis, so a multi-line or huge
+ *  comment body renders as one short line. Inert-text safety is the renderer's job. */
+function truncate(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > SUMMARY_CAP ? `${flat.slice(0, SUMMARY_CAP - 1)}…` : flat;
+}
+
+/**
+ * The unified last-activity line (#39): the single newest movement across the three
+ * sources an issue can move through — a new issue comment, an MR review thread or bot
+ * push, and the daemon's own log. Each candidate carries its own timestamp; the newest
+ * (lexicographic on ISO 8601) wins. Sources without a signal simply don't compete, and
+ * when none do the whole line is omitted (caller spreads it conditionally).
+ */
+export function lastActivityOf(snapshot: IssueSnapshot, log?: LogLine): LastActivity | undefined {
+  const candidates: LastActivity[] = [];
+
+  const comment = snapshot.recentComments[0];
+  if (comment) {
+    candidates.push({
+      at: comment.createdAt,
+      source: 'issue',
+      summary: truncate(`@${comment.author.username}: ${comment.body}`),
+    });
+  }
+
+  const mrAt = snapshot.mrActivityAt;
+  if (mrAt) {
+    candidates.push({
+      at: mrAt.at,
+      source: 'mr',
+      summary: mrAt.kind === 'push' ? 'bot pushed a commit' : 'review thread',
+    });
+  }
+
+  if (log) candidates.push({ at: log.ts, source: 'agent', summary: truncate(log.msg) });
+
+  return candidates.sort((a, b) => b.at.localeCompare(a.at))[0];
+}
+
 async function issueView(repo: RepoRef, iid: number, deps: AssembleDeps): Promise<IssueView> {
   const adapter = deps.adapterFor(repo);
   const snapshot = await adapter.getSnapshot(repo, iid);
   const state = deriveState(snapshot, deps.settingsFor(repo));
-  const lastLog = (await deps.logs.readIssueLog(repo, iid, 1)).at(-1)?.msg;
+  const log = (await deps.logs.readIssueLog(repo, iid, 1)).at(-1);
+  const lastLog = log?.msg;
+  const lastActivity = lastActivityOf(snapshot, log);
   const mr = snapshot.mr;
   // The reviewer is whoever the MR is assigned to — handoff assigns the ticket creator
   // (§7), so before handoff (or on a bare MR) there is simply no assignee to show.
@@ -66,6 +122,7 @@ async function issueView(repo: RepoRef, iid: number, deps: AssembleDeps): Promis
     ...(mr ? { mrUrl: mr.webUrl, isDraft: mr.isDraft, approved: mr.approvals.approved } : {}),
     ...(reviewer ? { reviewer } : {}),
     ...(lastLog ? { lastLog } : {}),
+    ...(lastActivity ? { lastActivity } : {}),
   };
 }
 

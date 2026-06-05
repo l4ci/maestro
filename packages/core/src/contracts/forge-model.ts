@@ -68,12 +68,21 @@ export interface Comment {
   createdAt: string; // ISO 8601
 }
 
+/** Newest MR-side movement, derived from the edge-trigger timestamps the snapshot already
+ *  fetches (a blocking review thread or a bot push). Exposed for the dashboard's unified
+ *  last-activity line (#39); the reconciler never reads it. */
+export interface MrActivity {
+  at: string; // ISO 8601
+  kind: 'thread' | 'push'; // a review thread vs. a bot commit push
+}
+
 /** Everything the reconciler needs about ONE issue, gathered by the adapter in one snapshot. */
 export interface IssueSnapshot {
   repo: RepoRef;
   issue: Issue;
   mr?: MergeRequest; // the maestro MR for this issue, if one exists
   recentComments: Comment[]; // newest-first; bounded (adapter caps, e.g. last 50)
+  mrActivityAt?: MrActivity; // newest MR review-thread / bot-push timestamp (#39), when an MR exists
 }
 
 export interface RepoRef {
