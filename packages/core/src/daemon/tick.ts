@@ -30,6 +30,7 @@ import {
 } from '../contracts/index.js';
 import type { ForgeAdapter } from '../contracts/index.js';
 import { reconcile } from '../reconciler/reconcile.js';
+import { type AgentRole, promptForRole } from '../workflow/roles.js';
 import type { TickContext, WorkspaceHandleLike } from './ports.js';
 import { repoKey } from './ports.js';
 
@@ -592,10 +593,13 @@ function buildRunnerInput(
   mr: MergeRequest | undefined,
   recentComments: IssueSnapshot['recentComments'],
   ctx: TickContext,
+  role: AgentRole = 'implement', // every dispatch today is implementation work (#29 P1)
 ): RunnerInput {
   return {
     workspaceDir,
-    promptBody: ctx.promptBody,
+    // The role's own section when the WORKFLOW declares roles; whole body otherwise
+    // (legacy generalist — #29 stays opt-in per repo).
+    promptBody: promptForRole(ctx.promptBody, role),
     context: mr
       ? { issue: snapshot.issue, mr, recentComments }
       : { issue: snapshot.issue, recentComments },
