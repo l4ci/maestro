@@ -214,12 +214,14 @@ export interface WorkspaceFake extends Workspace {
   seeded: { dir: string; branch: string }[]; // records seedBranch(handle, branch)
 }
 
-/** Fake workspace: configurable existing dirs; eviction removes from the list. */
+/** Fake workspace: configurable existing dirs; eviction removes from the list.
+ *  `keep` lists dirs whose eviction is REFUSED (unpushed commits, #56). */
 export function fakeWorkspace(
-  opts: { exists?: number[]; dirs?: { dir: string; iid: number }[] } = {},
+  opts: { exists?: number[]; dirs?: { dir: string; iid: number }[]; keep?: string[] } = {},
 ): WorkspaceFake {
   const dirs = opts.dirs ? [...opts.dirs] : [];
   const exists = new Set(opts.exists ?? []);
+  const keep = new Set(opts.keep ?? []);
   const ws: WorkspaceFake = {
     evicted: [],
     dirs,
@@ -234,9 +236,11 @@ export function fakeWorkspace(
     pushBranch: async (handle, branch) => void ws.pushed.push({ dir: handle.dir, branch }),
     seedBranch: async (handle, branch) => void ws.seeded.push({ dir: handle.dir, branch }),
     evict: async (dir: string) => {
+      if (keep.has(dir)) return false; // refused: unpushed commits (#56)
       ws.evicted.push(dir);
       const i = ws.dirs.findIndex((d) => d.dir === dir);
       if (i !== -1) ws.dirs.splice(i, 1);
+      return true;
     },
     workspaceExists: (_r, iid) => exists.has(iid),
     listWorkspaces: () => [...ws.dirs],

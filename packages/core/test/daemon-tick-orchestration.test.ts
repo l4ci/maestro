@@ -85,6 +85,35 @@ describe('B3 — post-eviction fixpoint', () => {
   });
 });
 
+describe('B4 — sweep keeps a workspace whose eviction is refused (#56)', () => {
+  it('a dir with unpushed commits survives the sweep and is retried next tick', async () => {
+    const ws = fakeWorkspace({
+      dirs: [
+        { dir: '/ws/1', iid: 1 },
+        { dir: '/ws/2', iid: 2 },
+      ],
+      keep: ['/ws/1'],
+    });
+    const adapter = recordingAdapter({
+      issues: [],
+      issueStates: new Map([
+        [1, 'closed'],
+        [2, 'closed'],
+      ]),
+    });
+    const { ctx } = buildContext({ adapter, workspace: ws });
+
+    await tickRepo(repo, ctx);
+
+    expect(ws.evicted).toEqual(['/ws/2']); // the kept dir was not deleted...
+    expect(ws.dirs.map((d) => d.dir)).toEqual(['/ws/1']); // ...and is still enumerable
+
+    await tickRepo(repo, ctx); // next sweep retries it (by then the push may have landed)
+    const stateReads = adapter.calls.filter((c) => c === 'getIssueState');
+    expect(stateReads.length).toBe(3); // 2 first sweep + 1 retry
+  });
+});
+
 // ── Part C — slot accounting through the daemon (§14) ─────────────────────────
 
 describe('C1 — global cap queues excess work across repos', () => {
