@@ -13,6 +13,7 @@ defaults:
     root: ./workspaces
     disk_cap: 20GB # evict above this
     cleanup: lru # lru | on_terminal
+    clone_filter: blob:none # partial clone (#27); null = full clone
 
 # Forge configs: single-object shorthand (one host per kind) or array
 # (multiple hosts per kind — e.g. gitlab.com + self-hosted).

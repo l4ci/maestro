@@ -148,6 +148,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
   const workspace = new WorkspaceManager({
     root: config.defaults.workspaces.root,
     diskCap: config.defaults.workspaces.disk_cap,
+    cloneFilter: config.defaults.workspaces.clone_filter, // partial clone (#27)
     exec,
     tokenEnv: resolveTokenEnv,
   });

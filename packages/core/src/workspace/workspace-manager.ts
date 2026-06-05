@@ -7,7 +7,7 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { Exec, RepoRef } from '../contracts/index.js';
-import { type GitAuth, gitCloneAuth } from './git-auth.js';
+import { type GitAuth, gitCloneAuth, persistedCredHelper } from './git-auth.js';
 import { assertInsideRoot, resolveWorkspacePath, slugifyProject } from './paths.js';
 
 /** Staging dir for atomic eviction (#56): rename in, then burn. Lives under root. */
@@ -30,6 +30,9 @@ export interface WorkspaceManagerConfig {
    *  one manager can clone repos on different forges (gh/glab) with their own tokens; a
    *  bare string is the single-forge shorthand. */
   tokenEnv: string | ((repo: RepoRef) => string);
+  /** Partial-clone filter (#27, §5 workspaces.clone_filter). Default `blob:none`
+   *  (commits/trees up front, blobs on demand); `null` → full clone. */
+  cloneFilter?: string | null;
   getEnv?: (key: string) => string | undefined; // injectable for tests; defaults to process.env
   now?: () => number; // injectable clock for LRU recency
 }
@@ -39,6 +42,7 @@ export class WorkspaceManager {
   readonly #diskCap: number;
   readonly #exec: Exec;
   readonly #tokenEnv: string | ((repo: RepoRef) => string);
+  readonly #cloneFilter: string | null;
   readonly #getEnv: (key: string) => string | undefined;
   readonly #now: () => number;
   readonly #recency = new Map<string, number>();
@@ -48,6 +52,7 @@ export class WorkspaceManager {
     this.#diskCap = cfg.diskCap;
     this.#exec = cfg.exec;
     this.#tokenEnv = cfg.tokenEnv;
+    this.#cloneFilter = cfg.cloneFilter === undefined ? 'blob:none' : cfg.cloneFilter;
     this.#getEnv = cfg.getEnv ?? ((k) => process.env[k]);
     this.#now = cfg.now ?? (() => Date.now());
   }
@@ -83,7 +88,25 @@ export class WorkspaceManager {
       ]);
     } else {
       const remote = `https://${repo.host}/${repo.project}.git`; // plain URL, no userinfo
-      await this.#git([...auth.args, 'clone', remote, dir], auth.env);
+      // Partial clone (#27): blobless by default — commits/trees up front, blobs fetched
+      // lazily. Cuts per-issue disk and cold-clone time while keeping full isolation,
+      // independent failure, and plain-rm eviction (worktrees/--shared were rejected for
+      // coupling the object store across issues — see #27).
+      const filter = this.#cloneFilter ? [`--filter=${this.#cloneFilter}`] : [];
+      await this.#git([...auth.args, 'clone', ...filter, remote, dir], auth.env);
+      if (this.#cloneFilter) {
+        // Lazy blob fetches fire from ordinary git commands (diff/log/checkout) that run
+        // WITHOUT our per-invocation -c auth args — persist a helper in the clone's local
+        // config. It references the token env var by NAME (never the value); the token-
+        // scrubbed agent (§13.1) expands it empty and stays network-less.
+        await this.#git([
+          '-C',
+          dir,
+          'config',
+          'credential.helper',
+          persistedCredHelper(auth.tokenEnvName),
+        ]);
+      }
     }
     this.#touch(dir);
     return rescuedRef !== undefined ? { dir, repo, iid, rescuedRef } : { dir, repo, iid };

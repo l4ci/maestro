@@ -15,8 +15,23 @@ describe('B0 — parse + validate', () => {
     if (r.ok) {
       expect(r.value.defaults.poll_interval_active).toBe(30_000);
       expect(r.value.defaults.workspaces.disk_cap).toBe(20 * 1024 ** 3);
+      expect(r.value.defaults.workspaces.clone_filter).toBe('blob:none'); // #27 default
       expect(r.value.repos).toHaveLength(2);
     }
+  });
+});
+
+describe('B0b — workspaces.clone_filter (#27)', () => {
+  it('null opts back into full clones; a custom filter round-trips', () => {
+    const nulled = sample.replace(/clone_filter:.*\n/, 'clone_filter: null\n');
+    const r1 = parseConfig(nulled);
+    expect(r1.ok).toBe(true);
+    if (r1.ok) expect(r1.value.defaults.workspaces.clone_filter).toBeNull();
+
+    const custom = sample.replace(/clone_filter:.*\n/, 'clone_filter: tree:0\n');
+    const r2 = parseConfig(custom);
+    expect(r2.ok).toBe(true);
+    if (r2.ok) expect(r2.value.defaults.workspaces.clone_filter).toBe('tree:0');
   });
 });
 
