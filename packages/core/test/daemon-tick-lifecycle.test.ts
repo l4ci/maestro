@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { DONE_SENTINEL } from '../src/contracts/index.js';
-import { tickRepo } from '../src/daemon/tick.js';
+import { DONE_SENTINEL, PLAN_COMMENT_SENTINEL } from '../src/contracts/index.js';
+import { tickRepo, withClosesTrailer } from '../src/daemon/tick.js';
 import {
   buildContext,
   labels,
@@ -268,6 +268,88 @@ describe('A6 — AgentResult → lifecycle mapping (§0.9)', () => {
     expect(adapter.labelOps).toEqual([]);
     expect(proofHandoffSpy).not.toHaveBeenCalled();
     expect(adapter.calls).not.toContain('commentIssue');
+  });
+});
+
+// #48 — the agent has no forge access, so the daemon writes the plan it returns:
+// MR description (durable detailed plan + ticked todo) + a one-time issue summary.
+describe('A6b — the daemon records the agent plan on the forge (#48)', () => {
+  const inProgress = () => makeSnapshot({ issue: { labels: [labels.inProgress] } });
+
+  it('writes mrDescription via updateMRDescription and posts the planComment once', async () => {
+    const adapter = recordingAdapter({ snapshot: inProgress() });
+    const mrDescription = '## Plan\n\n- [x] step one\n- [ ] step two\n\nCloses #42';
+    const runner = scriptedRunner({
+      status: 'in_progress',
+      summary: 'planned',
+      planComment: 'Here is my plan',
+      mrDescription,
+    });
+    const { ctx } = buildContext({ adapter, runner });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.mrDescriptions).toEqual([{ mrIid: 7, body: mrDescription }]);
+    const plan = adapter.issueComments.at(-1);
+    expect(plan?.iid).toBe(42);
+    expect(plan?.body).toContain('Here is my plan');
+    expect(plan?.body).toContain(PLAN_COMMENT_SENTINEL);
+  });
+
+  it('preserves Closes #N when the agent description dropped it', async () => {
+    const adapter = recordingAdapter({ snapshot: inProgress() });
+    const runner = scriptedRunner({
+      status: 'in_progress',
+      summary: '',
+      mrDescription: '## Plan\n\n- [ ] do it', // no Closes line
+    });
+    const { ctx } = buildContext({ adapter, runner });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.mrDescriptions[0]?.body).toMatch(/Closes #42$/);
+  });
+
+  it('does not re-post the plan comment when the sentinel is already on the issue', async () => {
+    const snap = makeSnapshot({
+      issue: { labels: [labels.inProgress] },
+      comments: [`### 🎼 Plan\n\nearlier plan\n\n${PLAN_COMMENT_SENTINEL}`],
+    });
+    const adapter = recordingAdapter({ snapshot: snap });
+    const runner = scriptedRunner({
+      status: 'in_progress',
+      summary: '',
+      planComment: 'a second plan attempt',
+    });
+    const { ctx } = buildContext({ adapter, runner });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.calls).not.toContain('commentIssue');
+  });
+
+  it('records no plan when the agent returns none (back-compat)', async () => {
+    const adapter = recordingAdapter({ snapshot: inProgress() });
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    const { ctx } = buildContext({ adapter, runner });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.calls).not.toContain('updateMRDescription');
+    expect(adapter.calls).not.toContain('commentIssue');
+  });
+});
+
+describe('A6c — withClosesTrailer', () => {
+  it('appends the closing keyword when absent', () => {
+    expect(withClosesTrailer('a plan', 42)).toBe('a plan\n\nCloses #42');
+  });
+  it.each(['Closes #42', 'fixes #42', 'Resolves #42'])('leaves %s untouched', (ref) => {
+    const body = `## Plan\n\n${ref}`;
+    expect(withClosesTrailer(body, 42)).toBe(body);
+  });
+  it('ignores a different issue number', () => {
+    expect(withClosesTrailer('Closes #99', 42)).toBe('Closes #99\n\nCloses #42');
   });
 });
 
