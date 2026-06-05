@@ -264,10 +264,11 @@ That's the whole loop. Assign an issue on your repo to the bot account, and watc
 its state move across the dashboard as Maestro picks it up, works it, and hands it
 back for review.
 
-> **Tip — a shorter `maestro`:** the commands above call the CLI by its built path.
-> To type just `maestro …`, either alias it
-> (`alias maestro='node /path/to/maestro/packages/cli/dist/cli.js'`) or link it
-> globally with `pnpm --filter @maestro/cli link --global`.
+> **Tip — a shorter `maestro`:** `./scripts/setup.sh` links the CLI onto your
+> PATH automatically when pnpm has a global bin dir (`pnpm setup` creates one —
+> then re-run the setup script, or run `pnpm -C packages/cli link --global`
+> yourself). No global bin dir? Alias it instead:
+> `alias maestro='node /path/to/maestro/packages/cli/dist/cli.js'`.
 
 ---
 

@@ -35,15 +35,28 @@ else
   TOOLS_OK=0
 fi
 
+# 4. Put `maestro` on PATH (best-effort). Needs pnpm's global bin dir, which only
+# exists after `pnpm setup` — so a fresh machine falls back to the full node path.
+say "Linking the maestro CLI globally (pnpm link)"
+if pnpm -C packages/cli link --global >/dev/null 2>&1; then
+  LINKED=1
+  echo "  → 'maestro' is on your PATH (open a new shell if it isn't picked up yet)"
+else
+  LINKED=0
+  echo "  → skipped: pnpm has no global bin dir (run 'pnpm setup' first, then re-run"
+  echo "    this script — or just call the CLI by its full path as shown below)"
+fi
+
 say "Setup complete"
-cat <<'EOF'
+if [ "${LINKED}" = "1" ]; then MAESTRO="maestro"; else MAESTRO="node packages/cli/dist/cli.js"; fi
+cat <<EOF
 Next steps:
   1. Edit .env             — paste your forge token(s)
   2. Edit maestro.config.yaml — set your forge host(s) and watchlist
   3. Onboard your first repo:
-       node packages/cli/dist/cli.js add gitlab.com/your-group/your-repo
+       ${MAESTRO} add gitlab.com/your-group/your-repo
   4. Start the daemon:
-       node packages/cli/dist/daemon.js
+       ${MAESTRO} daemon
   5. Watch the dashboard:
        node packages/web/dist/main.js   # then open http://127.0.0.1:4000
 EOF
