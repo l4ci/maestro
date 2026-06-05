@@ -5,7 +5,7 @@ import type {
   ReadOnlyForgeAdapter,
   RepoRef,
 } from '../src/contracts/index.js';
-import { assembleDashboard, assembleIssue } from '../src/views/assemble.js';
+import { assembleDashboard, assembleIssue, lastActivityOf } from '../src/views/assemble.js';
 import { defaultSettings, labels, makeSnapshot, repo } from './helpers/daemon.js';
 
 const repoB: RepoRef = { ...repo, project: 'group/web', url: 'gitlab.com/group/web' };
@@ -173,5 +173,77 @@ describe('assembleIssue — single issue view for status', () => {
     const view = await assembleIssue(repo, 8, deps(new Map([[repo.url, rec.adapter]])));
 
     expect(view.reviewer).toBeUndefined();
+  });
+});
+
+describe('lastActivityOf — newest of issue / MR / agent (#39)', () => {
+  const comment = (at: string, body = 'looks good', username = 'reviewer') => ({
+    id: 'c',
+    author: { username, id: `id-${username}` },
+    body,
+    createdAt: at,
+  });
+  const log = (at: string, msg = 'cloned workspace'): LogLine => ({
+    ts: at,
+    repo: 'group/api',
+    issueIid: 42,
+    level: 'info',
+    msg,
+  });
+  const snap = (over: Partial<IssueSnapshot>): IssueSnapshot => ({ ...makeSnapshot(), ...over });
+
+  it('returns undefined when no source has a signal', () => {
+    expect(lastActivityOf(snap({ recentComments: [] }))).toBeUndefined();
+  });
+
+  it('uses the issue comment when it is the only signal, author + truncated body', () => {
+    const a = lastActivityOf(snap({ recentComments: [comment('2026-06-01T00:00:00Z')] }));
+    expect(a?.source).toBe('issue');
+    expect(a?.at).toBe('2026-06-01T00:00:00Z');
+    expect(a?.summary).toBe('@reviewer: looks good');
+  });
+
+  it('prefers a newer MR push over a stale issue comment (the core acceptance case)', () => {
+    const a = lastActivityOf(
+      snap({
+        recentComments: [comment('2026-06-01T00:00:00Z')],
+        mrActivityAt: { at: '2026-06-03T00:00:00Z', kind: 'push' },
+      }),
+    );
+    expect(a?.source).toBe('mr');
+    expect(a?.at).toBe('2026-06-03T00:00:00Z');
+    expect(a?.summary).toBe('bot pushed a commit');
+  });
+
+  it('labels an MR review thread distinctly from a push', () => {
+    const a = lastActivityOf(
+      snap({ recentComments: [], mrActivityAt: { at: '2026-06-03T00:00:00Z', kind: 'thread' } }),
+    );
+    expect(a?.summary).toBe('review thread');
+  });
+
+  it('lets the agent log win when its timestamp is the newest', () => {
+    const a = lastActivityOf(
+      snap({
+        recentComments: [comment('2026-06-01T00:00:00Z')],
+        mrActivityAt: { at: '2026-06-02T00:00:00Z', kind: 'push' },
+      }),
+      log('2026-06-04T00:00:00Z', 'agent completed proof'),
+    );
+    expect(a?.source).toBe('agent');
+    expect(a?.summary).toBe('agent completed proof');
+  });
+
+  it('truncates a long comment body to ~80 chars with an ellipsis', () => {
+    const long = 'x'.repeat(200);
+    const a = lastActivityOf(snap({ recentComments: [comment('2026-06-01T00:00:00Z', long)] }));
+    expect(a?.summary.length).toBeLessThanOrEqual(80);
+    expect(a?.summary.endsWith('…')).toBe(true);
+  });
+
+  it('flattens newlines in a summary to a single line', () => {
+    const body = 'line one\n\nline   two';
+    const a = lastActivityOf(snap({ recentComments: [comment('2026-06-01T00:00:00Z', body)] }));
+    expect(a?.summary).toBe('@reviewer: line one line two');
   });
 });

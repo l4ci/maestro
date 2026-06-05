@@ -63,6 +63,16 @@ export const DASHBOARD_HTML = `<!doctype html>
   .s-done { background:#12331c; color:#57ab5a; }
   td.iid a { color: inherit; text-decoration: none; }
   td.iid a:hover { color: #58a6ff; text-decoration: underline; }
+  /* Unified last-activity line (#39): a muted secondary row under the title. */
+  .activity {
+    display: block; margin-top: 3px; color: #768390; font-size: 12px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 520px;
+  }
+  .activity .src {
+    text-transform: uppercase; font-size: 10px; letter-spacing: .4px;
+    border: 1px solid #2a2f37; border-radius: 4px; padding: 0 4px; margin: 0 6px;
+  }
+  .activity .when { color: #8b98a5; }
   a.mr {
     margin-left: 8px; font-size: 12px; color: #58a6ff; text-decoration: none;
     border: 1px solid #21333f; border-radius: 999px; padding: 1px 7px;
@@ -167,6 +177,40 @@ function avatar(role, person) {
   s.title = title;
   s.style.background = initialBg(person.username);
   return s;
+}
+
+// A compact "3m ago" relative time from an ISO 8601 string, recomputed every poll so the
+// dashboard ages in place without a reload. Future or unparsable timestamps degrade to
+// 'just now' rather than throwing. Returns '' on a bad input so callers can skip the line.
+function relativeTime(iso) {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '';
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 45) return 'just now';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  return Math.round(hrs / 24) + 'd ago';
+}
+
+// The unified last-activity line (#39): relative time + source tag + truncated summary,
+// e.g. "2m ago · mr · review thread". The summary is forge-controlled (comment bodies,
+// log lines), so it lands via textContent — inert, never innerHTML (§13.1). The absolute
+// ISO time rides as the title tooltip. Returns null when there's nothing to show.
+function activityLine(a) {
+  if (!a || !a.at) return null;
+  const when = relativeTime(a.at);
+  if (!when) return null;
+  const line = document.createElement('span');
+  line.className = 'activity';
+  line.title = a.at; // absolute time on hover
+  const whenEl = span('when', when);
+  const srcEl = span('src', a.source);
+  const sumEl = document.createElement('span');
+  sumEl.textContent = a.summary || '';
+  line.append(whenEl, srcEl, sumEl);
+  return line;
 }
 
 // Keyed child reconciliation (#42): reuse nodes by data-key, create missing ones,
@@ -288,6 +332,10 @@ function updateRow(tr, x) {
   if (x.issue.mrUrl) {
     children.push(link('mr' + (x.issue.isDraft ? ' draft' : ''), noun + ' ↗', x.issue.mrUrl));
   }
+  // Last-activity line (#39): rebuilt every poll so the relative time ages and a newer
+  // signal (MR push, fresh comment) replaces a stale one without recreating the row.
+  const activity = activityLine(x.issue.lastActivity);
+  if (activity) children.push(activity);
   title.replaceChildren(...children);
   // Rebuild avatars every poll so a reviewer assigned (or unassigned) at handoff is
   // reflected without recreating the row — same update-path discipline the MR link uses.

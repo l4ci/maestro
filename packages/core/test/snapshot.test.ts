@@ -97,13 +97,13 @@ describe('findMaestroMr', () => {
   it('matches by maestro branch prefix', async () => {
     const m = mr({ closesIssueIid: undefined, description: 'no link' });
     const found = await findMaestroMr(42, fakePrimitives({ openMergeRequests: async () => [m] }));
-    expect(found?.iid).toBe(7);
+    expect(found?.mr.iid).toBe(7);
   });
 
   it('matches by Closes #iid when the branch differs', async () => {
     const m = mr({ sourceBranch: 'feature/x' });
     const found = await findMaestroMr(42, fakePrimitives({ openMergeRequests: async () => [m] }));
-    expect(found?.iid).toBe(7);
+    expect(found?.mr.iid).toBe(7);
   });
 
   it('prefers an open MR over a non-open match', async () => {
@@ -113,7 +113,7 @@ describe('findMaestroMr', () => {
       42,
       fakePrimitives({ openMergeRequests: async () => [closed, open] }),
     );
-    expect(found?.iid).toBe(2);
+    expect(found?.mr.iid).toBe(2);
   });
 
   it('returns undefined when nothing matches', async () => {
@@ -133,11 +133,35 @@ describe('findMaestroMr', () => {
         lastBotPushAt: async () => '2026-01-02',
       }),
     );
-    expect(found?.approvals).toEqual({ ...APPROVED, changesRequested: true });
+    expect(found?.mr.approvals).toEqual({ ...APPROVED, changesRequested: true });
   });
 
-  it('short-circuits the commit read when there is no blocking thread', async () => {
-    const lastBotPushAt = vi.fn(async () => '2026-01-02');
+  it('reports the newest MR movement: a blocking thread that post-dates the push (#39)', async () => {
+    const found = await findMaestroMr(
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr()],
+        blockingThreadAt: async () => '2026-01-03',
+        lastBotPushAt: async () => '2026-01-02',
+      }),
+    );
+    expect(found?.activityAt).toEqual({ at: '2026-01-03', kind: 'thread' });
+  });
+
+  it('reports a bot push as the MR movement when it post-dates the thread (#39)', async () => {
+    const found = await findMaestroMr(
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr()],
+        blockingThreadAt: async () => '2026-01-02',
+        lastBotPushAt: async () => '2026-01-04',
+      }),
+    );
+    expect(found?.activityAt).toEqual({ at: '2026-01-04', kind: 'push' });
+  });
+
+  it('keeps the push read short-circuited behind a blocking thread; no thread → no MR activity (#39)', async () => {
+    const lastBotPushAt = vi.fn(async () => '2026-01-04');
     const found = await findMaestroMr(
       42,
       fakePrimitives({
@@ -146,8 +170,9 @@ describe('findMaestroMr', () => {
         lastBotPushAt,
       }),
     );
-    expect(found?.approvals.changesRequested).toBe(false);
-    expect(lastBotPushAt).not.toHaveBeenCalled(); // no blocking → never reads commits
+    expect(found?.mr.approvals.changesRequested).toBe(false);
+    expect(lastBotPushAt).not.toHaveBeenCalled(); // hot-path optimization preserved
+    expect(found?.activityAt).toBeUndefined(); // push never read → no cheap MR signal
   });
 });
 

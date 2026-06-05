@@ -22,6 +22,7 @@ type View = {
       isDraft?: boolean;
       author?: { username: string; id: string; avatarUrl?: string };
       reviewer?: { username: string; id: string; avatarUrl?: string };
+      lastActivity?: { at: string; source: string; summary: string };
     }>;
     counts: Record<string, number>;
     error?: string;
@@ -448,6 +449,105 @@ describe('author + reviewer avatars (#37)', () => {
     w.render(v);
     expect(rowByKey(w, 'gitlab.com/g/api#1')).toBe(row);
     expect(avatars(w, 'gitlab.com/g/api#1')).toHaveLength(1);
+  });
+});
+
+describe('unified last-activity line (#39)', () => {
+  const activity = (w: PageWindow, key: string) =>
+    rowByKey(w, key)?.querySelector('.activity') as HTMLElement | null;
+
+  it('renders relative time + source tag + summary, absolute ISO on hover', () => {
+    const w = loadPage();
+    const v = view();
+    const issue = v.repos[0]?.issues[0];
+    if (!issue) throw new Error('fixture shape');
+    const iso = new Date(Date.now() - 3 * 60_000).toISOString(); // 3m ago
+    issue.lastActivity = { at: iso, source: 'mr', summary: 'bot pushed a commit' };
+    w.render(v);
+    const line = activity(w, 'gitlab.com/g/api#1');
+    expect(line).toBeTruthy();
+    expect(line?.textContent).toContain('3m ago');
+    expect(line?.textContent?.toLowerCase()).toContain('mr');
+    expect(line?.textContent).toContain('bot pushed a commit');
+    expect(line?.title).toBe(iso); // absolute time tooltip
+  });
+
+  it('omits the line entirely when the issue has no activity', () => {
+    const w = loadPage();
+    w.render(view()); // fixture issues carry no lastActivity
+    expect(activity(w, 'gitlab.com/g/api#1')).toBeNull();
+  });
+
+  it('renders on the CREATE path too, not only on a later update (#35 bug class)', () => {
+    // First render is create+update for every row; the line must appear on that first paint.
+    const w = loadPage();
+    const v = view();
+    const issue = v.repos[1]?.issues[0];
+    if (!issue) throw new Error('fixture shape');
+    issue.lastActivity = {
+      at: new Date(Date.now() - 90 * 60_000).toISOString(),
+      source: 'agent',
+      summary: 'cloned workspace',
+    };
+    w.render(v);
+    const line = activity(w, 'github.com/o/web#7');
+    expect(line?.textContent).toContain('cloned workspace');
+    expect(line?.textContent).toContain('h ago');
+  });
+
+  it('keeps the summary inert: an HTML-injection comment body is literal text', () => {
+    const w = loadPage();
+    const v = view();
+    const issue = v.repos[0]?.issues[0];
+    if (!issue) throw new Error('fixture shape');
+    issue.lastActivity = {
+      at: new Date().toISOString(),
+      source: 'issue',
+      summary: '@x: <img src=x onerror=alert(1)>',
+    };
+    w.render(v);
+    const line = activity(w, 'gitlab.com/g/api#1');
+    expect(line?.querySelector('img')).toBeNull();
+    expect(line?.textContent).toContain('<img src=x onerror=alert(1)>');
+  });
+
+  it('updates the line in place across a poll without recreating the row', () => {
+    const w = loadPage();
+    const v1 = view();
+    const i1 = v1.repos[0]?.issues[0];
+    if (!i1) throw new Error('fixture shape');
+    i1.lastActivity = {
+      at: new Date(Date.now() - 60_000).toISOString(),
+      source: 'issue',
+      summary: 'first comment',
+    };
+    w.render(v1);
+    const row = rowByKey(w, 'gitlab.com/g/api#1');
+    const v2 = view();
+    const i2 = v2.repos[0]?.issues[0];
+    if (!i2) throw new Error('fixture shape');
+    i2.lastActivity = {
+      at: new Date().toISOString(),
+      source: 'mr',
+      summary: 'bot pushed a commit',
+    };
+    w.render(v2);
+    expect(rowByKey(w, 'gitlab.com/g/api#1')).toBe(row); // same node
+    expect(activity(w, 'gitlab.com/g/api#1')?.textContent).toContain('bot pushed a commit');
+  });
+
+  it('drops the line when activity disappears on a later poll, same row node', () => {
+    const w = loadPage();
+    const v = view();
+    const issue = v.repos[0]?.issues[0];
+    if (!issue) throw new Error('fixture shape');
+    issue.lastActivity = { at: new Date().toISOString(), source: 'issue', summary: 'hi' };
+    w.render(v);
+    const row = rowByKey(w, 'gitlab.com/g/api#1');
+    expect(activity(w, 'gitlab.com/g/api#1')).toBeTruthy();
+    w.render(view()); // no lastActivity
+    expect(rowByKey(w, 'gitlab.com/g/api#1')).toBe(row);
+    expect(activity(w, 'gitlab.com/g/api#1')).toBeNull();
   });
 });
 

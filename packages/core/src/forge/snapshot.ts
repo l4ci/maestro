@@ -15,6 +15,7 @@ import type {
   Issue,
   IssueSnapshot,
   MergeRequest,
+  MrActivity,
   RepoRef,
 } from '../contracts/index.js';
 
@@ -63,7 +64,7 @@ export function computeChangesRequested(
 export async function findMaestroMr(
   issueIid: number,
   prim: ForgePrimitives,
-): Promise<MergeRequest | undefined> {
+): Promise<{ mr: MergeRequest; activityAt?: MrActivity } | undefined> {
   const pool = await prim.openMergeRequests(issueIid);
   const prefix = `maestro/issue-${issueIid}-`;
   const matches = (m: MergeRequest): boolean =>
@@ -73,11 +74,32 @@ export async function findMaestroMr(
 
   const base = await prim.approvalBase(candidate.iid);
   const blockingAt = await prim.blockingThreadAt(candidate.iid);
+  // The push read stays short-circuited behind a blocking thread (the per-forge hot-path
+  // optimization the reconciler depends on): no blocking → no commit fetch. The dashboard's
+  // last-activity line (#39) therefore reports MR movement only from timestamps already on
+  // hand — "where cheap" (issue #39). A clean MR with just a recent push contributes nothing
+  // here and the line falls back to the issue/agent signals, which still move in that case.
+  const lastBotPushAt = blockingAt === undefined ? undefined : await prim.lastBotPushAt(candidate);
   const changesRequested =
-    blockingAt === undefined
-      ? false
-      : computeChangesRequested(blockingAt, await prim.lastBotPushAt(candidate));
-  return { ...candidate, approvals: { ...base, changesRequested } };
+    blockingAt === undefined ? false : computeChangesRequested(blockingAt, lastBotPushAt);
+  const activityAt = newestMrActivity(blockingAt, lastBotPushAt);
+  return {
+    mr: { ...candidate, approvals: { ...base, changesRequested } },
+    ...(activityAt ? { activityAt } : {}),
+  };
+}
+
+/** The newer of a blocking review thread vs. the last bot push, tagged with which it was.
+ *  Only timestamps already fetched are considered (the push read is short-circuited). */
+function newestMrActivity(
+  blockingAt: string | undefined,
+  lastBotPushAt: string | undefined,
+): MrActivity | undefined {
+  if (lastBotPushAt !== undefined && (blockingAt === undefined || lastBotPushAt > blockingAt)) {
+    return { at: lastBotPushAt, kind: 'push' };
+  }
+  if (blockingAt !== undefined) return { at: blockingAt, kind: 'thread' };
+  return undefined;
 }
 
 /**
@@ -95,11 +117,17 @@ export async function assembleSnapshot(
   const lastActor = await prim.lastActor(issueIid);
   const issueWithActor: Issue = lastActor ? { ...issue, lastActor } : issue;
 
-  const mr = await findMaestroMr(issueIid, prim);
+  const found = await findMaestroMr(issueIid, prim);
 
   const recentComments = (await prim.comments(issueIid))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, commentCap);
 
-  return { repo, issue: issueWithActor, recentComments, ...(mr ? { mr } : {}) };
+  return {
+    repo,
+    issue: issueWithActor,
+    recentComments,
+    ...(found ? { mr: found.mr } : {}),
+    ...(found?.activityAt ? { mrActivityAt: found.activityAt } : {}),
+  };
 }
