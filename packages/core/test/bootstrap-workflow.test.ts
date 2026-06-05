@@ -24,7 +24,7 @@ describe('buildBootstrapWorkflow', () => {
     if (!wf.ok) return;
     expect(wf.value.frontMatter.project).toBe('l4ci/maestro');
     expect(wf.value.frontMatter.bot_user).toBe('l4ci');
-    expect(wf.value.frontMatter.proof.type).toBe('none'); // bootstrap runs no proof
+    expect(wf.value.frontMatter.proof[0]?.type).toBe('none'); // bootstrap runs no proof
     expect(wf.value.promptBody).toBe(BOOTSTRAP_PROMPT_BODY);
     expect(wf.value.promptBody).toMatch(/ask the maintainer|STOP|blocked/i);
   });

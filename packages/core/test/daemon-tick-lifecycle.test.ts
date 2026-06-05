@@ -236,7 +236,7 @@ describe('A6 — AgentResult → lifecycle mapping (§0.9)', () => {
     expect(arg.mrIid).toBe(7);
     expect(arg.ticketCreator).toBe('reporter');
     expect(arg.proofInput.workspaceDir).toBe('/ws/42');
-    expect(arg.proofInput.workflowProof.type).toBe('diff-summary');
+    expect(arg.proofInput.strategies[0]?.type).toBe('diff-summary');
     expect(handoffSpy).not.toHaveBeenCalled(); // done uses proofAndHandoff, not the bare seam
     // not blocked
     expect(adapter.labelOps.some((o) => o.set.includes(labels.blocked))).toBe(false);

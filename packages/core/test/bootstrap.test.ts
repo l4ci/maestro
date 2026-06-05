@@ -128,7 +128,7 @@ describe('Slice 3 — inferWorkflowSeed renders a schema-valid seed', () => {
     expect(seed.frontMatter.bot_user).toBe('maestro-bot');
     expect(seed.frontMatter.git.default_branch).toBe('trunk');
     expect(seed.frontMatter.git.target).toBe('trunk');
-    expect(seed.frontMatter.proof).toEqual({ type: 'test-output', command: 'npm test' });
+    expect(seed.frontMatter.proof).toEqual([{ type: 'test-output', command: 'npm test' }]);
     // schema defaults still carried
     expect(seed.frontMatter.manage_board).toBe(true);
     expect(seed.frontMatter.git.merge_strategy).toBe('squash');
@@ -145,14 +145,14 @@ describe('Slice 3 — inferWorkflowSeed renders a schema-valid seed', () => {
       readFile: readerFrom({}),
       botUser: 'maestro-bot',
     });
-    expect(seed.frontMatter.proof.type).toBe('none');
+    expect(seed.frontMatter.proof[0]?.type).toBe('none');
     expect(seed.frontMatter.forge).toBe('github');
   });
 
   it('NEGATIVE: a seed missing proof.type fails the schema (validated, not trusted)', () => {
     // simulate a malformed render — proof block without the required `type`
     const bad = TEMPLATE.replace(
-      /proof:\n(\s+type:.*\n)(\s+command:.*\n)/,
+      /proof:.*\n(\s+type:.*\n)(\s+command:.*\n)/,
       'proof:\n  command: "x"\n',
     );
     const parsed = WorkflowSchema.safeParse({

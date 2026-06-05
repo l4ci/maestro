@@ -24,7 +24,7 @@ describe('C1 — validate front matter via WorkflowSchema', () => {
     const r = parseWorkflow(template);
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.value.frontMatter.proof.type).toBe('playwright');
+      expect(r.value.frontMatter.proof[0]?.type).toBe('playwright');
       expect(r.value.frontMatter.git.merge_strategy).toBe('squash');
       expect(r.value.frontMatter.manage_board).toBe(true);
       expect(r.value.frontMatter.claude.max_turns).toBe(40);
@@ -79,3 +79,36 @@ function parseWorkflowOrThrow(text: string, host?: string) {
   if (!r.ok) throw new Error(r.error);
   return r.value;
 }
+
+describe('C1b — proof accepts a list of strategies (#12)', () => {
+  const fm = (proofYaml: string) =>
+    `---\nproject: g/r\nforge: gitlab\nbot_user: bot\nproof:\n${proofYaml}git:\n  default_branch: main\n  target: main\n---\nbody`;
+
+  it('parses a list and keeps config order', () => {
+    const r = parseWorkflow(
+      fm('  - type: diff-summary\n  - type: test-output\n    command: npm test\n'),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.frontMatter.proof.map((p) => p.type)).toEqual(['diff-summary', 'test-output']);
+    }
+  });
+
+  it('normalizes the single-object form to a one-element list (back-compat)', () => {
+    const r = parseWorkflow(fm('  type: diff-summary\n'));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.frontMatter.proof).toEqual([{ type: 'diff-summary' }]);
+  });
+
+  it("rejects 'none' inside a multi-strategy list", () => {
+    const r = parseWorkflow(fm('  - type: none\n  - type: diff-summary\n'));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/only strategy/);
+  });
+
+  it('rejects an empty list', () => {
+    const r = parseWorkflow(fm('  []\n'));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/at least one/);
+  });
+});
