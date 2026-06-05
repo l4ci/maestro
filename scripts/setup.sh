@@ -58,7 +58,7 @@ Next steps:
   4. Start the daemon:
        ${MAESTRO} daemon
   5. Watch the dashboard:
-       node packages/web/dist/main.js   # then open http://127.0.0.1:4000
+       ${MAESTRO} dashboard   # then open http://127.0.0.1:4000
 EOF
 
 [ "${TOOLS_OK}" = "1" ] || echo "

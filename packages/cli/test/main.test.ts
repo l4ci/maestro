@@ -10,6 +10,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const { bootDaemon } = vi.hoisted(() => ({ bootDaemon: vi.fn(async () => 0) }));
 vi.mock('../src/daemon.js', () => ({ bootDaemon }));
 
+// `maestro dashboard` must route to the dashboard launcher the same way (#28 pattern).
+const { dashboard } = vi.hoisted(() => ({ dashboard: vi.fn(async () => 0) }));
+vi.mock('../src/commands/dashboard.js', () => ({ dashboard }));
+
 import { run } from '../src/main.js';
 
 describe('run (usage-error → nonzero exit, no stacktrace)', () => {
@@ -34,6 +38,12 @@ describe('run (usage-error → nonzero exit, no stacktrace)', () => {
   it('routes `daemon` to bootDaemon and returns its exit code', async () => {
     const code = await run(['daemon']);
     expect(bootDaemon).toHaveBeenCalledOnce();
+    expect(code).toBe(0);
+  });
+
+  it('routes `dashboard` to the dashboard launcher and returns its exit code', async () => {
+    const code = await run(['dashboard']);
+    expect(dashboard).toHaveBeenCalledOnce();
     expect(code).toBe(0);
   });
 });

@@ -258,7 +258,7 @@ set -a; . ./.env; set +a
 node packages/cli/dist/cli.js daemon
 
 # 7. In another terminal, start the dashboard and open it in a browser
-node packages/web/dist/main.js      # → http://127.0.0.1:4000
+node packages/cli/dist/cli.js dashboard    # → http://127.0.0.1:4000
 ```
 
 That's the whole loop. Assign an issue on your repo to the bot account, and watch
@@ -543,6 +543,7 @@ Day-to-day you'll mostly use the CLI:
 | `maestro status <issue>` | Show one ticket's current stage. |
 | `maestro logs <issue>` | Show the agent's logs for a ticket. |
 | `maestro run <issue> --attach` | Open an **interactive** Claude in that ticket's workspace so you can watch or drive it by hand. Local-dev only, not the daemon path. |
+| `maestro dashboard` | Start the web dashboard (same as `node packages/web/dist/main.js`) — see below. |
 | `maestro doctor` | Check that every required tool (`git`, `claude`, `glab`/`gh`) is on your `PATH`. Exits non-zero if anything's missing. |
 
 ### The dashboard
@@ -558,7 +559,7 @@ summarises its counts. A repo whose forge can't be reached shows as "unreachable
 instead of looking idle.*
 
 ```sh
-node packages/web/dist/main.js      # → http://127.0.0.1:4000
+maestro dashboard      # → http://127.0.0.1:4000
 ```
 
 Override the bind address with `MAESTRO_WEB_HOST` / `MAESTRO_WEB_PORT`. The same
@@ -571,7 +572,7 @@ config and creates labels plus a bootstrap issue/PR on the forge — so it stays
 disabled unless you opt in by setting `MAESTRO_DASHBOARD_TOKEN`:
 
 ```sh
-MAESTRO_DASHBOARD_TOKEN="$(openssl rand -hex 32)" node packages/web/dist/main.js
+MAESTRO_DASHBOARD_TOKEN="$(openssl rand -hex 32)" maestro dashboard
 ```
 
 With no token set the write path doesn't exist (a `POST /repos` returns `404`) and
@@ -692,7 +693,7 @@ It's a pnpm + TypeScript monorepo.
 ```
 packages/core   the brain: reconciler, forge adapters, Claude runner, proof,
                 config + workflow loaders, daemon loop, tool preflight
-packages/cli    maestro add | status | list | logs | run | doctor + daemon entry
+packages/cli    maestro add | status | list | logs | run | dashboard | doctor + daemon entry
 packages/web    read-only dashboard (HTML page + JSON API) + add-repo form
 templates/      the default WORKFLOW.md used when onboarding a repo
 scripts/        setup.sh — one-shot install + build + tool check

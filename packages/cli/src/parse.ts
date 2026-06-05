@@ -9,6 +9,7 @@ export type ParsedCommand =
   | { kind: 'logs'; issue: number }
   | { kind: 'run'; issue: number; attach: true }
   | { kind: 'daemon' }
+  | { kind: 'dashboard' }
   | { kind: 'doctor' }
   | { kind: 'help' }
   | { kind: 'usage-error'; message: string };
@@ -60,6 +61,8 @@ export function parse(argv: string[]): ParsedCommand {
     }
     case 'daemon':
       return { kind: 'daemon' };
+    case 'dashboard':
+      return { kind: 'dashboard' };
     case 'doctor':
       return { kind: 'doctor' };
     default:

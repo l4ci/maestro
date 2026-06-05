@@ -33,6 +33,7 @@ import {
   slugifyProject,
 } from '@maestro/core';
 import { runAdd } from './commands/add.js';
+import { dashboard } from './commands/dashboard.js';
 import { attach } from './commands/run.js';
 import { bootDaemon } from './daemon.js';
 import { renderDoctor, renderList, renderLogs, renderStatus } from './format.js';
@@ -159,13 +160,17 @@ function firstRepo(env: Env): { repo: RepoRef; deps: AssembleDeps } {
 async function dispatch(cmd: ParsedCommand, env: Env): Promise<number> {
   switch (cmd.kind) {
     case 'help':
-      console.log('maestro <add|status|list|logs|run|daemon|doctor> — see docs');
+      console.log('maestro <add|status|list|logs|run|daemon|dashboard|doctor> — see docs');
       return 0;
     case 'daemon':
       // Fold the daemon entry into the CLI so `maestro daemon` replaces the deep
       // `node dist/daemon.js` path (#28). bootDaemon() owns the preflight + run-forever
       // loop and returns the exit code; the `dist/daemon.js` alias stays for systemd.
       return bootDaemon();
+    case 'dashboard':
+      // Same fold-in for the web dashboard: spawn the sibling package's built entry
+      // (never import @maestro/web — both shells stay thin over core).
+      return dashboard({ exec: new NodeExec() });
     case 'doctor': {
       // Check the binaries this install actually needs (config-scoped); if the config
       // can't be read, fall back to probing the full set so doctor still helps mid-setup.
