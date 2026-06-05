@@ -23,6 +23,10 @@ export const ConfigSchema = z.object({
         root: z.string().default('./workspaces'),
         disk_cap: zByteSize.default('20GB'),
         cleanup: z.enum(['lru', 'on_terminal']).default('lru'),
+        // Partial-clone filter for per-issue workspaces (#27). Blobless by default:
+        // commits/trees up front, blobs fetched lazily — far smaller and faster per
+        // clone while keeping full isolation. `null` opts back into full clones.
+        clone_filter: z.string().nullable().default('blob:none'),
       })
       .default({}),
   }),
