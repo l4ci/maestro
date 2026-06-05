@@ -225,7 +225,7 @@ daemon will run:
 | **gh** | talk to the GitHub API — *only if you watch GitHub repos* | [cli.github.com](https://cli.github.com) |
 
 You don't need to log into `glab`/`gh` — Maestro injects the token itself (from
-your `.env`). It only needs the binaries present. Run **`maestro doctor`** at any
+its environment, loaded from your `.env`). It only needs the binaries present. Run **`maestro doctor`** at any
 time to check what's missing; the daemon also runs this check on startup and
 refuses to boot (with a clear message) if a required tool is absent.
 
@@ -253,7 +253,8 @@ node packages/cli/dist/cli.js doctor
 # 5. Connect your first repo (creates its labels/board, commits the config change)
 node packages/cli/dist/cli.js add gitlab.com/your-group/your-repo
 
-# 6. Start the daemon — it now watches every repo in the config
+# 6. Load the tokens into your shell, then start the daemon
+set -a; . ./.env; set +a
 node packages/cli/dist/cli.js daemon
 
 # 7. In another terminal, start the dashboard and open it in a browser
@@ -519,9 +520,14 @@ The daemon is one process that watches **all** your repos. You never run one
 daemon per repo.
 
 ```sh
-# start the daemon (watches everything in maestro.config.yaml)
+# load the forge tokens, then start the daemon (watches everything in the config)
+set -a; . ./.env; set +a
 maestro daemon
 ```
+
+The daemon reads tokens from its environment, not from the `.env` file directly —
+hence the `source` line (a [service](#keeping-it-running-background-and-boot)
+does this for you via `EnvironmentFile=`).
 
 On startup it preflights your tools (`git`, `claude`, and the forge binaries you
 need) and refuses to boot if any are missing — so a misconfigured host fails fast
@@ -575,6 +581,44 @@ header is `401`, a wrong token `403`. This keeps a read-only dashboard safe to
 expose on a shared tailnet/LAN while gating the one write path behind a secret. On
 an untrusted network, still prefer binding `127.0.0.1` and fronting it with
 `tailscale serve` + ACLs.
+
+### Keeping it running: background and boot
+
+`maestro daemon` runs in the foreground. For a quick detached session, `tmux`
+(or `nohup maestro daemon &`) does the job — but it dies with the machine. The
+proper way to survive reboots is a systemd **user** service; the repo ships a
+ready unit at [`templates/maestro.service`](templates/maestro.service):
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp templates/maestro.service ~/.config/systemd/user/
+$EDITOR ~/.config/systemd/user/maestro.service   # set the three EDIT lines (paths)
+systemctl --user daemon-reload
+systemctl --user enable --now maestro
+
+# start at boot without anyone logging in
+loginctl enable-linger $USER
+
+# watch it
+journalctl --user -u maestro -f
+```
+
+Three things the unit handles that a bare `nohup` doesn't:
+
+- **Tokens.** Nothing in Maestro reads the `.env` file itself — the tokens must
+  be in the daemon's process environment. In the foreground you load them into
+  your shell once (`set -a; . ./.env; set +a`); the unit does it declaratively
+  with `EnvironmentFile=`.
+- **PATH.** The daemon shells out to `git`, `claude`, `glab`/`gh`, and a systemd
+  user session's default `PATH` misses the usual homes of two of them
+  (`~/.local/bin` for claude, `/snap/bin` for glab). The unit extends `PATH`;
+  if a tool still can't be found, the startup preflight fails fast and names it.
+- **Restarts.** `Restart=on-failure` is safe precisely because of the design
+  above: the daemon keeps no state of its own, so a restarted process re-reads
+  the forge and picks up every ticket where it left off.
+
+A user service (not a system one) is deliberate: the daemon runs Claude with
+*your* login and settings, so it should run as your user, not root.
 
 ---
 

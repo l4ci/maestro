@@ -1,0 +1,50 @@
+# Maestro daemon as a systemd USER service — survives logout and reboot.
+#
+# Install (edit the three EDIT lines first):
+#   mkdir -p ~/.config/systemd/user
+#   cp templates/maestro.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now maestro
+#
+# Start at boot WITHOUT anyone logging in:
+#   loginctl enable-linger $USER
+#
+# Watch it:
+#   systemctl --user status maestro
+#   journalctl --user -u maestro -f
+
+[Unit]
+Description=Maestro daemon - works forge tickets with Claude
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# EDIT: absolute path to your maestro clone. The daemon resolves its config,
+# templates, workspaces and logs relative to this directory.
+WorkingDirectory=/home/you/maestro
+
+# EDIT: absolute node path (`which node`) — systemd requires it. The script
+# argument is relative to WorkingDirectory.
+ExecStart=/usr/bin/node packages/cli/dist/cli.js daemon
+
+# Forge tokens. The daemon reads them from its process environment; systemd
+# loads the gitignored .env (plain KEY=value lines) straight into it.
+EnvironmentFile=/home/you/maestro/.env
+
+# EDIT if needed: the daemon shells out to git/claude/glab/gh, and user units
+# get a minimal PATH that misses ~/.local/bin (claude's default install) and
+# /snap/bin (glab on Ubuntu). The startup preflight fails fast and tells you
+# which tool it can't find.
+Environment="PATH=%h/.local/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin"
+
+# The daemon is stateless by design (the forge is the memory), so a restart
+# after a crash just re-reads the forge and carries on.
+Restart=on-failure
+RestartSec=10
+
+# Optional: cap memory on small boxes — each active worker runs Claude plus
+# possibly a browser for proof (spec §14 sizes ~3.5G for a 4GB host).
+#MemoryMax=3500M
+
+[Install]
+WantedBy=default.target
