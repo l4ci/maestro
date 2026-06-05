@@ -205,7 +205,9 @@ async function dispatch(cmd: ParsedCommand, env: Env): Promise<number> {
         root: config.defaults.workspaces.root,
         diskCap: config.defaults.workspaces.disk_cap,
         exec,
-        tokenEnv: config.forges.gitlab?.find((e) => e.host === repo.host)?.token_env ?? 'MAESTRO_GITLAB_TOKEN',
+        tokenEnv:
+          config.forges.gitlab?.find((e) => e.host === repo.host)?.token_env ??
+          'MAESTRO_GITLAB_TOKEN',
       });
       const resolveWorkspace = (iid: number): string | undefined =>
         workspace.workspaceExists(repo, iid)

@@ -21,7 +21,7 @@ export interface CreateIssueArgs {
 }
 
 export interface ForgeAdapter {
-  readonly kind: RepoRef["forge"];
+  readonly kind: RepoRef['forge'];
   readonly host: string;
 
   // --- discovery ---

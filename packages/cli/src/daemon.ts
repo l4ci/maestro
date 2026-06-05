@@ -74,10 +74,22 @@ function buildAdapters(config: MaestroConfig, exec: Exec): ForgeAdapter[] {
   const out: ForgeAdapter[] = [];
   const botUser = config.defaults.bot_user;
   for (const entry of config.forges.gitlab ?? []) {
-    out.push(new GitlabAdapter(exec, { token: process.env[entry.token_env] ?? '', host: entry.host, botUser }));
+    out.push(
+      new GitlabAdapter(exec, {
+        token: process.env[entry.token_env] ?? '',
+        host: entry.host,
+        botUser,
+      }),
+    );
   }
   for (const entry of config.forges.github ?? []) {
-    out.push(new GithubAdapter(exec, { token: process.env[entry.token_env] ?? '', host: entry.host, botUser }));
+    out.push(
+      new GithubAdapter(exec, {
+        token: process.env[entry.token_env] ?? '',
+        host: entry.host,
+        botUser,
+      }),
+    );
   }
   return out;
 }

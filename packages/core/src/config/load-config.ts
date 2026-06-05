@@ -5,10 +5,10 @@
 import { parse as parseYaml } from 'yaml';
 import {
   ConfigSchema,
-  normalizeForges,
   type ForgeEntry,
   type ForgeKind,
   type MaestroConfig,
+  normalizeForges,
 } from '../contracts/index.js';
 
 export type ConfigParseResult = { ok: true; value: MaestroConfig } | { ok: false; error: string };
