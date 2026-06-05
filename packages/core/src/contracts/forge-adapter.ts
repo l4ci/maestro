@@ -22,6 +22,7 @@ export interface CreateIssueArgs {
 
 export interface ForgeAdapter {
   readonly kind: RepoRef['forge'];
+  readonly host: string;
 
   // --- discovery ---
   /** Open issues assigned to bot_user in this repo. Drives active lifecycle. */

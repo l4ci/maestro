@@ -42,10 +42,10 @@ export interface RepoUnit {
   ctx: TickContext;
 }
 
-/** Pick the adapter whose `kind` matches the repo's forge (M7 drop-in seam, §0.3). */
+/** Pick the adapter whose `kind` AND `host` match the repo (M7 drop-in seam, §0.3). */
 export function selectAdapter(repo: RepoRef, adapters: ForgeAdapter[]): ForgeAdapter {
-  const a = adapters.find((x) => x.kind === repo.forge);
-  if (!a) throw new Error(`no adapter registered for forge '${repo.forge}'`);
+  const a = adapters.find((x) => x.kind === repo.forge && x.host === repo.host);
+  if (!a) throw new Error(`no adapter registered for forge '${repo.forge}' host '${repo.host}'`);
   return a;
 }
 

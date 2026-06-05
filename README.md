@@ -286,6 +286,7 @@ defaults:
   concurrency:
     global_max: 2             # how many tickets to actively work at once
 forges:
+  # Single entry per forge (shorthand)
   gitlab: { host: gitlab.com, token_env: MAESTRO_GITLAB_TOKEN }
   github: { host: github.com, token_env: MAESTRO_GITHUB_TOKEN }
 repos:
