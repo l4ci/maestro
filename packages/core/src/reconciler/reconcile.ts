@@ -83,9 +83,15 @@ export function reconcile(input: ReconcileInput): Intent {
   const state = deriveState(snapshot, settings);
   switch (state) {
     case 'new':
-      return slotAvailable
-        ? { kind: 'start-new', branch: branchName(issue), mrTitle: mrTitle(issue) }
-        : { kind: 'none', reason: 'new issue queued: no concurrency slot' };
+      if (slotAvailable) {
+        return { kind: 'start-new', branch: branchName(issue), mrTitle: mrTitle(issue) };
+      }
+      // Queued with no slot: make the queue visible on the forge (#53). `todo` is a
+      // marker, not a lifecycle state — deriveState still reads this issue as `new`,
+      // so a freed slot starts it exactly as before. Idempotent: marked once.
+      return issue.labels.includes(settings.labels.todo)
+        ? { kind: 'none', reason: 'new issue queued: no concurrency slot (todo marked)' }
+        : { kind: 'mark-todo' };
 
     case 'in-progress':
       if (workComplete) return { kind: 'handoff' }; // crash-recovery (AM-1); no slot consumed

@@ -219,9 +219,22 @@ describe('New row (§7)', () => {
     }
   });
 
-  it('A6 new issue without slot queues', () => {
+  it('A6 new issue without slot queues — marked todo on the forge (#53)', () => {
     const out = reconcile(buildInput({ slotAvailable: false }));
+    expect(out.kind).toBe('mark-todo');
+  });
+
+  it('A6b an already-marked queued issue is a stable no-op (#53)', () => {
+    const input = buildInput({ slotAvailable: false });
+    input.snapshot.issue.labels.push(input.settings.labels.todo);
+    const out = reconcile(input);
     expect(out.kind).toBe('none');
+  });
+
+  it('A6c the todo marker does not change state: a freed slot still starts it (#53)', () => {
+    const input = buildInput({ slotAvailable: true });
+    input.snapshot.issue.labels.push(input.settings.labels.todo);
+    expect(reconcile(input).kind).toBe('start-new');
   });
 });
 
@@ -483,7 +496,7 @@ describe('A16 — determinism, idempotency, purity', () => {
   it('every canonical §7 row yields exactly one expected kind', () => {
     const rows: Array<[ReconcileInput, string]> = [
       [buildInput(), 'start-new'],
-      [buildInput({ slotAvailable: false }), 'none'],
+      [buildInput({ slotAvailable: false }), 'mark-todo'], // queued → visible (#53)
       [
         buildInput({ snapshot: snapshot({ issue: issue({ labels: [labels.inProgress] }) }) }),
         'run-agent',

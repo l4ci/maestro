@@ -226,6 +226,17 @@ function beginIntent(
         promise: guard(runApplyUnblock(intent, snapshot, ctx), ctx, meta, release),
       };
     }
+    case 'mark-todo':
+      // Seen + queued (#53): one cheap label write, no slot, not "active" (the issue is
+      // waiting, not worked). Visible on the forge as maestro:todo until a slot frees.
+      return {
+        active: false,
+        promise: guard(
+          ctx.adapter.setIssueLabels(repo, issue.iid, [ctx.settings.labels.todo], []),
+          ctx,
+          meta,
+        ),
+      };
     case 'merge':
       return {
         active: false,
@@ -331,7 +342,13 @@ async function runStartNew(
     draft: true,
     assignToBot: true,
   });
-  await ctx.adapter.setIssueLabels(repo, issue.iid, [ctx.settings.labels.inProgress], []);
+  // in-progress replaces the queued marker (#53) — an agent is actually on it now.
+  await ctx.adapter.setIssueLabels(
+    repo,
+    issue.iid,
+    [ctx.settings.labels.inProgress],
+    [ctx.settings.labels.todo],
+  );
   await ctx.adapter.commentIssue(repo, issue.iid, startWorkComment(intent.branch, mr));
   const result = await ctx.runner.run(
     buildRunnerInput(handle.dir, snapshot, mr, snapshot.recentComments, ctx),
@@ -524,10 +541,33 @@ async function runRecoveryHandoff(snapshot: IssueSnapshot, ctx: TickContext): Pr
   });
 }
 
+/** Unassigning the bot is how a human stops maestro on a queued issue (#53). Queued
+ *  (todo-labelled) issues vanish from listAssignedOpenIssues the moment they are
+ *  unassigned, so the lifecycle pass can never see them again — this sweep step finds
+ *  them BY LABEL and retracts the stale mark. Stateless (survives restarts); one extra
+ *  list call per repo per sweep. Failures are logged and retried next sweep. */
+async function retractStaleTodos(repo: RepoRef, ctx: TickContext): Promise<void> {
+  try {
+    const marked = await ctx.adapter.listOpenIssuesByLabel(repo, ctx.settings.labels.todo);
+    for (const issue of marked) {
+      const assignedToBot = issue.assignees.some((a) => a.username === ctx.settings.botUser);
+      if (assignedToBot) continue;
+      await ctx.adapter.setIssueLabels(repo, issue.iid, [], [ctx.settings.labels.todo]);
+      ctx.log.info('todo retracted: bot unassigned — no longer watching (#53)', {
+        repo: repoKey(repo),
+        iid: issue.iid,
+      });
+    }
+  } catch (err) {
+    ctx.log.error('cleanup: todo retraction failed', { repo: repoKey(repo), err: String(err) });
+  }
+}
+
 /** Cleanup sweep (b). Workspace-cache-driven and INDEPENDENT of the open-issue list
  *  (§0.5): enumerate this repo's workspace dirs, read each issue's state, evict the
  *  terminal (closed/missing) ones. Per-dir failures are isolated. */
 export async function cleanupSweep(repo: RepoRef, ctx: TickContext): Promise<void> {
+  await retractStaleTodos(repo, ctx);
   for (const { dir, iid } of ctx.workspace.listWorkspaces(repo)) {
     try {
       const state = await ctx.adapter.getIssueState(repo, iid);

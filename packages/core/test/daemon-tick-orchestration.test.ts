@@ -114,6 +114,24 @@ describe('B4 — sweep keeps a workspace whose eviction is refused (#56)', () =>
   });
 });
 
+describe('B5 — stale todo marks are retracted when the bot is unassigned (#53)', () => {
+  it('unassigned todo issue loses the label; an assigned one keeps it', async () => {
+    const ws = fakeWorkspace();
+    const adapter = recordingAdapter({
+      issues: [],
+      labeled: [
+        makeIssue({ iid: 70, assignees: [] }), // bot unassigned → retract
+        makeIssue({ iid: 71 }), // still assigned to maestro-bot → keep watching
+      ],
+    });
+    const { ctx } = buildContext({ adapter, workspace: ws });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.labelOps).toEqual([{ iid: 70, set: [], unset: [ctx.settings.labels.todo] }]);
+  });
+});
+
 // ── Part C — slot accounting through the daemon (§14) ─────────────────────────
 
 describe('C1 — global cap queues excess work across repos', () => {

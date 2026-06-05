@@ -395,7 +395,7 @@ describe('Slice 10 — ensureLabels', () => {
     const created = fake
       .callsTo('POST', '/labels')
       .map((c) => JSON.parse(c.opts?.input ?? '{}').name);
-    expect(created).toEqual(['maestro:in-review', 'maestro:blocked']);
+    expect(created).toEqual(['maestro:todo', 'maestro:in-review', 'maestro:blocked']); // todo added by #53
   });
 
   it('is fully idempotent when all present', async () => {
@@ -577,5 +577,41 @@ describe('Slice 15 — lastActor', () => {
     fake.onApi('GET', '/pulls', []);
     fake.onApi('GET', '/issues/42', rawIssue());
     expect((await a.getSnapshot(repo, 42)).issue.lastActor).toBeUndefined();
+  });
+});
+
+// --- Slice 12: listOpenIssuesByLabel (#53) ----------------------------------
+
+describe('Slice 12 — listOpenIssuesByLabel (#53)', () => {
+  it('queries open issues by label and drops PRs', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/issues', [
+      {
+        number: 9,
+        id: 9,
+        title: 'queued',
+        state: 'open',
+        assignees: [],
+        labels: [],
+        user: { login: 'r', id: 1 },
+        html_url: 'u',
+      },
+      {
+        number: 10,
+        id: 10,
+        title: 'a PR',
+        state: 'open',
+        assignees: [],
+        labels: [],
+        user: { login: 'r', id: 1 },
+        html_url: 'u',
+        pull_request: {},
+      },
+    ]);
+    const out = await a.listOpenIssuesByLabel(repo, 'maestro:todo');
+    expect(out.map((i) => i.iid)).toEqual([9]); // the PR row is dropped
+    const call = fake.callsTo('GET', '/issues')[0];
+    expect(call?.args.join(' ')).toContain('labels=maestro%3Atodo');
+    expect(call?.args.join(' ')).toContain('state=open');
   });
 });

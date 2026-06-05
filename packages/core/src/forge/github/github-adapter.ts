@@ -109,6 +109,15 @@ export class GithubAdapter implements ForgeAdapter {
     return raw.filter((i) => i.pull_request === undefined).map(normalizeIssue);
   }
 
+  async listOpenIssuesByLabel(repo: RepoRef, label: string): Promise<Issue[]> {
+    const raw = await this.#c.apiRequired<RawIssue[]>('GET', `${this.#base(repo)}/issues`, {
+      query: { labels: label, state: 'open', per_page: 100 },
+      paginate: true,
+    });
+    // GitHub's /issues list includes PRs (every PR is an issue) — drop them.
+    return raw.filter((i) => i.pull_request === undefined).map(normalizeIssue);
+  }
+
   async getSnapshot(repo: RepoRef, issueIid: number): Promise<IssueSnapshot> {
     return this.#snapMemo.get(`${repo.url}-${issueIid}`, () =>
       assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap),

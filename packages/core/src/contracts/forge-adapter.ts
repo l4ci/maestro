@@ -31,6 +31,9 @@ export interface ForgeAdapter {
   getSnapshot(repo: RepoRef, issueIid: number): Promise<IssueSnapshot>;
   /** State of ONE issue by iid regardless of open/closed — used by the cleanup sweep (§0.5). */
   getIssueState(repo: RepoRef, issueIid: number): Promise<'open' | 'closed' | 'missing'>;
+  /** Open issues carrying a label — the sweep uses it to retract stale maestro:todo
+   *  marks from issues whose bot assignment was removed (#53). */
+  listOpenIssuesByLabel(repo: RepoRef, label: string): Promise<Issue[]>;
 
   // --- mutation (all idempotent) ---
   createBranch(repo: RepoRef, name: string, fromRef: string): Promise<void>;
