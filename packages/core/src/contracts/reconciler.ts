@@ -53,6 +53,7 @@ export type Intent =
   | { kind: 'start-new'; branch: string; mrTitle: string }
   | { kind: 'run-define' } // backlog stage: refine the request into an AC draft (#29)
   | { kind: 'run-plan'; branch: string; mrTitle: string } // todo stage: plan, then branch+MR (#29)
+  | { kind: 'run-review'; rounds: number } // review:internal stage (#29 P3); rounds = prior fails
   | { kind: 'run-agent'; resume: boolean; feedback?: AgentFeedback; role?: AgentRole }
   | { kind: 'handoff' }
   | { kind: 'poll-review' }

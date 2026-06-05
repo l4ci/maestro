@@ -293,6 +293,7 @@ export interface BuiltContext {
   ws: WorkspaceFake;
   handoffSpy: ReturnType<typeof vi.fn>;
   proofHandoffSpy: ReturnType<typeof vi.fn>;
+  proofOnlySpy: ReturnType<typeof vi.fn>;
   slots: SlotAccountant;
   inFlight: InFlightSet;
 }
@@ -311,6 +312,7 @@ export function buildContext(
     inFlight?: InFlightSet;
     handoff?: ReturnType<typeof vi.fn>;
     proofAndHandoff?: ReturnType<typeof vi.fn>;
+    proofOnly?: ReturnType<typeof vi.fn>;
     rateGate?: RateLimitGate;
     log?: TickContext['log'];
     promptBody?: string;
@@ -324,12 +326,14 @@ export function buildContext(
   const inFlight = partial.inFlight ?? new InFlightSet();
   const handoffSpy = partial.handoff ?? vi.fn(async () => {});
   const proofHandoffSpy = partial.proofAndHandoff ?? vi.fn(async () => RECOVERED_PROOF);
+  const proofOnlySpy = partial.proofOnly ?? vi.fn(async () => RECOVERED_PROOF);
   const ctx: TickContext = {
     adapter: adapterRec.adapter,
     workspace: ws,
     runner: runnerSpy.runner,
     handoff: handoffSpy,
     proofAndHandoff: proofHandoffSpy,
+    proofOnly: proofOnlySpy,
     exec: { run: async () => ({ code: 0, stdout: '', stderr: '' }) } as never,
     settings,
     workflow: partial.workflow ?? defaultWorkflow(),
@@ -339,5 +343,15 @@ export function buildContext(
     rateGate: partial.rateGate ?? new RateLimitGate(),
     log: partial.log ?? silentLogger(),
   };
-  return { ctx, adapterRec, runnerSpy, ws, handoffSpy, proofHandoffSpy, slots, inFlight };
+  return {
+    ctx,
+    adapterRec,
+    runnerSpy,
+    ws,
+    handoffSpy,
+    proofHandoffSpy,
+    proofOnlySpy,
+    slots,
+    inFlight,
+  };
 }

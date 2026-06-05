@@ -59,6 +59,7 @@ import {
   inferForge,
   parseConfig,
   parseWorkflow,
+  proofAndComment,
   proofAndHandoff,
   requiredBinaries,
   selectAdapter,
@@ -281,6 +282,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
         runner,
         handoff,
         proofAndHandoff,
+        proofOnly: proofAndComment, // #29 P3 — review gate owns the handoff
         exec,
         settings: cell.settings,
         workflow: cell.frontMatter,

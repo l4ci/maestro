@@ -15,7 +15,12 @@ import type {
   RepoSettings,
   TriggerGuard,
 } from '../contracts/index.js';
-import { AC_DRAFT_SENTINEL } from '../contracts/index.js';
+import {
+  AC_DRAFT_SENTINEL,
+  DONE_SENTINEL,
+  REVIEW_FAIL_RE,
+  REVIEW_PASS_SENTINEL,
+} from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
 
 function assertNever(x: never): never {
@@ -113,6 +118,40 @@ function isBlocked(snapshot: IssueSnapshot, settings: RepoSettings): boolean {
   return snapshot.issue.labels.includes(settings.labels.blocked);
 }
 
+/**
+ * The internal-review sub-state of a draft MR (#29 P3), read-only from the thread:
+ *  - `implementing` — no proof comment yet, or the newest verdict after it is a fail
+ *    (the findings comment doubles as the next session's context).
+ *  - `review-due`  — proof posted, no verdict after it yet.
+ *  - `passed`      — pass marker after the proof → run the (idempotent) human handoff.
+ * `rounds` counts review-fail markers since the last HUMAN comment — the bounce-cap
+ * window resets by construction on any human action.
+ */
+export function analyzeReview(
+  snapshot: IssueSnapshot,
+  settings: RepoSettings,
+): { phase: 'implementing' | 'review-due' | 'passed'; rounds: number } {
+  const comments = snapshot.recentComments; // newest-first
+  const lastHumanAt = comments.find((c) => c.author.username !== settings.botUser)?.createdAt ?? '';
+  const rounds = comments.filter(
+    (c) => REVIEW_FAIL_RE.test(c.body) && c.createdAt > lastHumanAt,
+  ).length;
+
+  const doneAt = comments.find((c) => c.body.includes(DONE_SENTINEL))?.createdAt;
+  if (doneAt === undefined) return { phase: 'implementing', rounds };
+  const passAt = comments.find(
+    (c) => c.body.includes(REVIEW_PASS_SENTINEL) && c.createdAt > doneAt,
+  )?.createdAt;
+  const failAt = comments.find(
+    (c) => REVIEW_FAIL_RE.test(c.body) && c.createdAt > doneAt,
+  )?.createdAt;
+  if (passAt !== undefined && (failAt === undefined || passAt > failAt)) {
+    return { phase: 'passed', rounds };
+  }
+  if (failAt !== undefined) return { phase: 'implementing', rounds };
+  return { phase: 'review-due', rounds };
+}
+
 /** Stage → agent role (#29). review:human/done run no agent. */
 const STAGE_ROLE = { backlog: 'define', todo: 'plan', 'in-progress': 'implement' } as const;
 
@@ -144,10 +183,26 @@ function reconcilePipeline(input: ReconcileInput): Intent {
       if (!slotAvailable) return markQueuedOnce(snapshot, settings, 'todo queued: no slot');
       return { kind: 'run-plan', branch: branchName(issue), mrTitle: mrTitle(issue) };
 
-    case 'in-progress':
-      if (workComplete) return { kind: 'handoff' }; // crash-recovery (AM-1)
-      if (!slotAvailable) return markQueuedOnce(snapshot, settings, 'in-progress queued: no slot');
-      return { kind: 'run-agent', resume: true, role: 'implement' };
+    case 'in-progress': {
+      // The internal review gate (#29 P3) sits between "implementation done" (proof
+      // comment) and the human handoff. All signals are thread markers, so the whole
+      // sub-state machine is derivable read-only from the snapshot. workComplete
+      // (proof posted) is subsumed: passed → handoff, unreviewed → review-due.
+      const rv = analyzeReview(snapshot, settings);
+      switch (rv.phase) {
+        case 'implementing': // no proof yet, or the latest verdict after it was a fail
+          if (!slotAvailable)
+            return markQueuedOnce(snapshot, settings, 'in-progress queued: no slot');
+          return { kind: 'run-agent', resume: true, role: 'implement' };
+        case 'review-due':
+          if (!slotAvailable) return markQueuedOnce(snapshot, settings, 'review queued: no slot');
+          return { kind: 'run-review', rounds: rv.rounds };
+        case 'passed':
+          return { kind: 'handoff' }; // idempotent ordered sequence (M4) → review:human
+        default:
+          return assertNever(rv.phase);
+      }
+    }
 
     case 'review:human': {
       const ap = mr?.approvals;
