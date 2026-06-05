@@ -5,6 +5,7 @@
 import type { MergeStrategy } from './forge-adapter.js';
 import type { Comment, IssueSnapshot, LifecycleState, RepoRef } from './forge-model.js';
 import type { LabelNames } from './labels.js';
+import type { AgentRole } from './runner.js';
 
 export interface TriggerGuard {
   requireLabel: string | null;
@@ -37,6 +38,9 @@ export interface ReconcileInput {
   workspaceExists: boolean;
   /** crash-recovery: agent reached `done` but MR still draft / reviewer unassigned (AM-1). */
   workComplete: boolean;
+  /** Does the repo's WORKFLOW body declare `## role:` sections? Gates the #29 per-stage
+   *  pipeline; false (or absent) keeps the legacy generalist FSM. */
+  rolesDeclared?: boolean;
 }
 
 export interface AgentFeedback {
@@ -45,13 +49,15 @@ export interface AgentFeedback {
 
 export type Intent =
   | { kind: 'none'; reason: string }
-  | { kind: 'mark-todo' } // seen + queued, no slot yet — make it visible on the forge (#53)
+  | { kind: 'mark-queued' } // wants a slot, none free — make the queue visible (#53/#29)
   | { kind: 'start-new'; branch: string; mrTitle: string }
-  | { kind: 'run-agent'; resume: boolean; feedback?: AgentFeedback }
+  | { kind: 'run-define' } // backlog stage: refine the request into an AC draft (#29)
+  | { kind: 'run-plan'; branch: string; mrTitle: string } // todo stage: plan, then branch+MR (#29)
+  | { kind: 'run-agent'; resume: boolean; feedback?: AgentFeedback; role?: AgentRole }
   | { kind: 'handoff' }
   | { kind: 'poll-review' }
   | { kind: 'apply-changes-requested'; feedback: AgentFeedback }
-  | { kind: 'apply-unblock'; feedback: AgentFeedback }
+  | { kind: 'apply-unblock'; feedback: AgentFeedback; role?: AgentRole }
   | { kind: 'merge'; strategy: MergeStrategy; deleteSource: boolean }
   | { kind: 'cleanup' }
   | { kind: 'blocked-wait' }

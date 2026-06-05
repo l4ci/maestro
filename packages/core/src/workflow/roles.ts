@@ -4,8 +4,9 @@
 // workflow: every role falls back to the whole body, so existing repos behave exactly
 // as before and the per-stage pipeline (#29 P2) stays opt-in per repo.
 
-export const AGENT_ROLES = ['define', 'plan', 'implement', 'review'] as const;
-export type AgentRole = (typeof AGENT_ROLES)[number];
+import { AGENT_ROLES, type AgentRole } from '../contracts/runner.js';
+
+export type { AgentRole } from '../contracts/runner.js';
 
 const ROLE_HEADING = /^##\s*role:\s*([a-z]+)\s*$/im;
 

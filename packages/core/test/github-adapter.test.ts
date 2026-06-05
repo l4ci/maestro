@@ -395,7 +395,13 @@ describe('Slice 10 — ensureLabels', () => {
     const created = fake
       .callsTo('POST', '/labels')
       .map((c) => JSON.parse(c.opts?.input ?? '{}').name);
-    expect(created).toEqual(['maestro:todo', 'maestro:in-review', 'maestro:blocked']); // todo added by #53
+    expect(created).toEqual([
+      'maestro:backlog',
+      'maestro:todo',
+      'maestro:in-review',
+      'maestro:blocked',
+      'maestro:queued',
+    ]); // #53/#29 label set
   });
 
   it('is fully idempotent when all present', async () => {

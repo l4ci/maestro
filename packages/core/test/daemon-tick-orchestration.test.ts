@@ -114,8 +114,8 @@ describe('B4 — sweep keeps a workspace whose eviction is refused (#56)', () =>
   });
 });
 
-describe('B5 — stale todo marks are retracted when the bot is unassigned (#53)', () => {
-  it('unassigned todo issue loses the label; an assigned one keeps it', async () => {
+describe('B5 — stale queued marks are retracted when the bot is unassigned (#53)', () => {
+  it('unassigned queued issue loses the label; an assigned one keeps it', async () => {
     const ws = fakeWorkspace();
     const adapter = recordingAdapter({
       issues: [],
@@ -128,7 +128,7 @@ describe('B5 — stale todo marks are retracted when the bot is unassigned (#53)
 
     await tickRepo(repo, ctx);
 
-    expect(adapter.labelOps).toEqual([{ iid: 70, set: [], unset: [ctx.settings.labels.todo] }]);
+    expect(adapter.labelOps).toEqual([{ iid: 70, set: [], unset: [ctx.settings.labels.queued] }]);
   });
 });
 

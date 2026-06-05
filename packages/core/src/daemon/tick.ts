@@ -18,6 +18,7 @@
 //    so a restart loses nothing). Disk is bounded by the M3 WorkspaceManager LRU.
 
 import {
+  AC_DRAFT_SENTINEL,
   type AgentResult,
   DONE_SENTINEL,
   type Intent,
@@ -29,8 +30,9 @@ import {
   type RunnerInput,
 } from '../contracts/index.js';
 import type { ForgeAdapter } from '../contracts/index.js';
+import { branchName, mrTitle } from '../contracts/naming.js';
 import { reconcile } from '../reconciler/reconcile.js';
-import { type AgentRole, promptForRole } from '../workflow/roles.js';
+import { type AgentRole, declaresRoles, promptForRole } from '../workflow/roles.js';
 import type { TickContext, WorkspaceHandleLike } from './ports.js';
 import { repoKey } from './ports.js';
 
@@ -137,6 +139,7 @@ export async function evaluateLifecycle(
         slotAvailable,
         workspaceExists: ctx.workspace.workspaceExists(repo, iid),
         workComplete: detectWorkComplete(snapshot),
+        rolesDeclared: declaresRoles(ctx.promptBody), // #29 pipeline opt-in per repo
       });
       launched = beginIntent(intent, snapshot, ctx, key, slotAvailable);
       if (launched.active) active = true;
@@ -197,7 +200,26 @@ function beginIntent(
       const comments = intent.feedback?.reviewComments ?? snapshot.recentComments;
       return {
         active: true,
-        promise: guard(runAgent(snapshot, snapshot.mr, comments, ctx), ctx, meta, release),
+        promise: guard(
+          runAgent(snapshot, snapshot.mr, comments, ctx, intent.role ?? 'implement'),
+          ctx,
+          meta,
+          release,
+        ),
+      };
+    }
+    case 'run-define': {
+      const release = ctx.slots.acquire(key);
+      return {
+        active: true,
+        promise: guard(runDefine(snapshot, ctx), ctx, meta, release),
+      };
+    }
+    case 'run-plan': {
+      const release = ctx.slots.acquire(key);
+      return {
+        active: true,
+        promise: guard(runPlan(intent, snapshot, ctx), ctx, meta, release),
       };
     }
     case 'apply-changes-requested': {
@@ -227,13 +249,13 @@ function beginIntent(
         promise: guard(runApplyUnblock(intent, snapshot, ctx), ctx, meta, release),
       };
     }
-    case 'mark-todo':
-      // Seen + queued (#53): one cheap label write, no slot, not "active" (the issue is
-      // waiting, not worked). Visible on the forge as maestro:todo until a slot frees.
+    case 'mark-queued':
+      // Wants a slot, none free (#53/#29): one cheap label write, no slot, not "active"
+      // (the issue is waiting, not worked). Visible as maestro:queued until a slot frees.
       return {
         active: false,
         promise: guard(
-          ctx.adapter.setIssueLabels(repo, issue.iid, [ctx.settings.labels.todo], []),
+          ctx.adapter.setIssueLabels(repo, issue.iid, [ctx.settings.labels.queued], []),
           ctx,
           meta,
         ),
@@ -258,6 +280,8 @@ function beginIntent(
 /** The intents that launch a Claude agent — the ones a rate-limit pause gates (#47). */
 const SPAWNING_INTENTS: ReadonlySet<Intent['kind']> = new Set([
   'start-new',
+  'run-define',
+  'run-plan',
   'run-agent',
   'apply-changes-requested',
   'apply-unblock',
@@ -348,7 +372,7 @@ async function runStartNew(
     repo,
     issue.iid,
     [ctx.settings.labels.inProgress],
-    [ctx.settings.labels.todo],
+    [ctx.settings.labels.queued],
   );
   await ctx.adapter.commentIssue(repo, issue.iid, startWorkComment(intent.branch, mr));
   const result = await ctx.runner.run(
@@ -369,13 +393,99 @@ async function runAgent(
   mr: MergeRequest | undefined,
   comments: IssueSnapshot['recentComments'],
   ctx: TickContext,
+  role: AgentRole = 'implement',
 ): Promise<void> {
   const fromRef = mr?.sourceBranch ?? ctx.settings.git.target;
   const handle = await ctx.workspace.ensureWorkspace(snapshot.repo, snapshot.issue.iid, fromRef);
   warnIfRescued(handle, ctx);
-  const result = await ctx.runner.run(buildRunnerInput(handle.dir, snapshot, mr, comments, ctx));
+  const result = await ctx.runner.run(
+    buildRunnerInput(handle.dir, snapshot, mr, comments, ctx, role),
+  );
   if (mr) await ctx.workspace.pushBranch(handle, mr.sourceBranch);
   await applyAgentResult(result, snapshot, mr, handle.dir, ctx);
+}
+
+/** Backlog stage (#29): the define agent refines the request into an AC draft. No
+ *  branch, no MR — its only output is the draft comment the human gate approves.
+ *  needs_input routes through the normal blocked path (applyAgentResult). */
+async function runDefine(snapshot: IssueSnapshot, ctx: TickContext): Promise<void> {
+  const { repo, issue } = snapshot;
+  const handle = await ctx.workspace.ensureWorkspace(repo, issue.iid, ctx.settings.git.target);
+  warnIfRescued(handle, ctx);
+  const result = await ctx.runner.run(
+    buildRunnerInput(handle.dir, snapshot, undefined, snapshot.recentComments, ctx, 'define'),
+  );
+  if (result.rateLimit || result.status === 'needs_input') {
+    await applyAgentResult(result, snapshot, undefined, handle.dir, ctx);
+    return;
+  }
+  // done = "AC draft ready" (there is no proof/handoff at this stage). The draft rides
+  // the #48 planComment channel; the sentinel makes the gate check and re-posts cheap.
+  if (result.status === 'done' && result.planComment) {
+    const alreadyDrafted = snapshot.recentComments.some((c) => c.body.includes(AC_DRAFT_SENTINEL));
+    if (!alreadyDrafted) {
+      await ctx.adapter.commentIssue(
+        repo,
+        issue.iid,
+        `### 📋 Acceptance criteria (draft)\n\n${result.planComment}\n\n_Approve by applying the \`${ctx.settings.labels.todo}\` label or replying \`/maestro approve\`._\n\n${AC_DRAFT_SENTINEL}`,
+      );
+    }
+    await ctx.adapter.setIssueLabels(
+      repo,
+      issue.iid,
+      [ctx.settings.labels.backlog],
+      [ctx.settings.labels.queued],
+    );
+  }
+  // in_progress (ran out of turns) → resume next tick; done without a draft → retry.
+}
+
+/** Todo stage (#29): the plan agent produces the plan FIRST; only then does the daemon
+ *  create the branch + draft MR carrying it (the #48 channel made durable from birth),
+ *  flip labels to in-progress, and post the structured start comment. */
+async function runPlan(
+  intent: Extract<Intent, { kind: 'run-plan' }>,
+  snapshot: IssueSnapshot,
+  ctx: TickContext,
+): Promise<void> {
+  const { repo, issue } = snapshot;
+  const target = ctx.settings.git.target;
+  const handle = await ctx.workspace.ensureWorkspace(repo, issue.iid, target);
+  warnIfRescued(handle, ctx);
+  const result = await ctx.runner.run(
+    buildRunnerInput(handle.dir, snapshot, undefined, snapshot.recentComments, ctx, 'plan'),
+  );
+  if (result.rateLimit || result.status === 'needs_input') {
+    await applyAgentResult(result, snapshot, undefined, handle.dir, ctx);
+    return;
+  }
+  if (result.status !== 'done') return; // out of turns — re-plan next tick (no MR yet)
+
+  await ctx.workspace.prepareBranch(handle, intent.branch);
+  await ctx.adapter.createBranch(repo, intent.branch, target);
+  await ctx.workspace.seedBranch(handle, intent.branch); // PR-able head before createDraftMR (#14)
+  const mr = await ctx.adapter.createDraftMR(repo, {
+    sourceBranch: intent.branch,
+    targetBranch: target,
+    title: intent.mrTitle,
+    description: withClosesTrailer(result.mrDescription ?? `Closes #${issue.iid}`, issue.iid),
+    draft: true,
+    assignToBot: true,
+  });
+  await ctx.adapter.setIssueLabels(
+    repo,
+    issue.iid,
+    [ctx.settings.labels.inProgress],
+    [ctx.settings.labels.todo, ctx.settings.labels.backlog, ctx.settings.labels.queued],
+  );
+  await ctx.adapter.commentIssue(repo, issue.iid, startWorkComment(intent.branch, mr));
+  if (result.planComment) {
+    await ctx.adapter.commentIssue(
+      repo,
+      issue.iid,
+      `### 🎼 Plan\n\n${result.planComment}\n\n${PLAN_COMMENT_SENTINEL}`,
+    );
+  }
 }
 
 /** Review asked for changes: flip in-review→in-progress, then run the agent with the
@@ -403,13 +513,29 @@ async function runApplyUnblock(
   snapshot: IssueSnapshot,
   ctx: TickContext,
 ): Promise<void> {
+  const role = intent.role ?? 'implement';
+  // Only implementation restores in-progress; define/plan stages carry their own
+  // labels already (#29) — the artifacts, not this flip, decide the stage.
   await ctx.adapter.setIssueLabels(
     snapshot.repo,
     snapshot.issue.iid,
-    [ctx.settings.labels.inProgress],
+    role === 'implement' ? [ctx.settings.labels.inProgress] : [],
     [ctx.settings.labels.blocked],
   );
-  await runAgent(snapshot, snapshot.mr, intent.feedback.reviewComments, ctx);
+  // The human's answer is in recentComments — each stage handler reads it from there.
+  if (role === 'define') return runDefine(snapshot, ctx);
+  if (role === 'plan') {
+    return runPlan(
+      {
+        kind: 'run-plan',
+        branch: branchName(snapshot.issue),
+        mrTitle: mrTitle(snapshot.issue),
+      },
+      snapshot,
+      ctx,
+    );
+  }
+  await runAgent(snapshot, snapshot.mr, intent.feedback.reviewComments, ctx, role);
 }
 
 /** §0.9 runner-result → lifecycle mapping — the mapping the daemon OWNS. */
@@ -549,12 +675,12 @@ async function runRecoveryHandoff(snapshot: IssueSnapshot, ctx: TickContext): Pr
  *  list call per repo per sweep. Failures are logged and retried next sweep. */
 async function retractStaleTodos(repo: RepoRef, ctx: TickContext): Promise<void> {
   try {
-    const marked = await ctx.adapter.listOpenIssuesByLabel(repo, ctx.settings.labels.todo);
+    const marked = await ctx.adapter.listOpenIssuesByLabel(repo, ctx.settings.labels.queued);
     for (const issue of marked) {
       const assignedToBot = issue.assignees.some((a) => a.username === ctx.settings.botUser);
       if (assignedToBot) continue;
-      await ctx.adapter.setIssueLabels(repo, issue.iid, [], [ctx.settings.labels.todo]);
-      ctx.log.info('todo retracted: bot unassigned — no longer watching (#53)', {
+      await ctx.adapter.setIssueLabels(repo, issue.iid, [], [ctx.settings.labels.queued]);
+      ctx.log.info('queued mark retracted: bot unassigned — no longer watching (#53)', {
         repo: repoKey(repo),
         iid: issue.iid,
       });

@@ -35,14 +35,15 @@ export interface OnboardResult {
 
 export async function onboard(repo: RepoRef, deps: OnboardDeps): Promise<OnboardResult> {
   const { adapter } = deps;
-  const labels: Label[] = labelNames(repo.forge)
-    .all()
-    .map((name) => ({ name }));
+  const names = labelNames(repo.forge);
+  const labels: Label[] = names.all().map((name) => ({ name }));
+  // The queued capacity marker is a label but not a lifecycle column (#29).
+  const boardLabels: Label[] = names.board().map((name) => ({ name }));
 
   // §11 setup — idempotent, uses the EXISTING adapter methods (no new surface).
   await adapter.ensureLabels(repo, labels);
   if (repo.forge === 'gitlab' && (deps.manageBoard ?? true) && adapter.ensureBoard) {
-    await adapter.ensureBoard(repo, labels);
+    await adapter.ensureBoard(repo, boardLabels);
   }
 
   if (deps.hasWorkflow) return { openedIssue: false, reason: 'has-workflow' };
