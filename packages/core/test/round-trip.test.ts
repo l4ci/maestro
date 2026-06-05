@@ -53,7 +53,7 @@ describe('templates/WORKFLOW.md round-trips through WorkflowSchema', () => {
 
   it('applies defaults and keeps declared values', () => {
     const wf = WorkflowSchema.parse(raw);
-    expect(wf.proof.type).toBe('playwright');
+    expect(wf.proof[0]?.type).toBe('playwright');
     expect(wf.git.merge_strategy).toBe('squash');
     expect(wf.trigger.require_label).toBeNull();
     expect(wf.claude.max_turns).toBe(40);

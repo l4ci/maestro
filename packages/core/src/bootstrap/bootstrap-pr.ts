@@ -56,7 +56,7 @@ export async function openBootstrapWorkflowPr(
   const target = seed.frontMatter.git.target;
 
   // 3. Branch off the default, drop the seed file, commit + push (authenticated).
-  const branch = `maestro/${issueIid}-define-workflow`;
+  const branch = `maestro/issue-${issueIid}-define-workflow`;
   await deps.workspace.prepareBranch(handle, branch);
   writeFile(join(handle.dir, 'WORKFLOW.md'), seed.text);
   await deps.workspace.commitAndPush(handle, {

@@ -7,7 +7,7 @@ trigger:
   assignee: bot # issue must be assigned to bot_user
   require_label: null # optional extra gate: a maintainer-added label (perms-gated)
   allowed_actors: [] # optional allowlist; recommended ON for PUBLIC repos
-proof:
+proof: # one strategy, or a list — every listed strategy must pass at handoff (#12)
   type: playwright # playwright | test-output | diff-summary | none
   command: "npx playwright test --reporter=line"
 git:

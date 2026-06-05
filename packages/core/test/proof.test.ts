@@ -6,7 +6,12 @@ import type {
   ProofInput,
   SpawnHandle,
 } from '../src/contracts/index.js';
-import { ProofConfigError, generateProof, selectProofStrategy } from '../src/proof/strategies.js';
+import {
+  ProofConfigError,
+  generateProof,
+  generateProofs,
+  selectProofStrategy,
+} from '../src/proof/strategies.js';
 
 type RunHandler = (cmd: string, args: string[], n: number) => ExecResult;
 
@@ -205,5 +210,36 @@ describe('Slice 4 — playwright', () => {
     ).rejects.toBeInstanceOf(ProofConfigError);
     expect(exec.runCalls).toHaveLength(0);
     expect(exec.spawnCalls).toHaveLength(0);
+  });
+});
+
+// --- Slice 5: generateProofs — multiple strategies (#12) --------------------
+
+describe('Slice 5 — generateProofs runs every strategy in config order (#12)', () => {
+  it('one result per strategy, in config order, sequentially', async () => {
+    const exec = new ProofExec((_cmd, _args, n) => ({ code: 0, stdout: `run ${n}`, stderr: '' }));
+    const { workflowProof: _single, ...base } = input({ exec });
+    const results = await generateProofs(base, [
+      { type: 'diff-summary' },
+      { type: 'test-output', command: 'npm test' },
+    ]);
+    expect(results.map((r) => r.kind)).toEqual(['diff-summary', 'test-output']);
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(exec.runCalls).toHaveLength(2);
+    expect(exec.runCalls[0]?.cmd).toBe('git'); // diff-summary ran first
+  });
+
+  it('a failing strategy yields ok:false without stopping later strategies', async () => {
+    const exec = new ProofExec((cmd) =>
+      cmd === 'git'
+        ? { code: 1, stdout: '', stderr: 'boom' }
+        : { code: 0, stdout: 'all green', stderr: '' },
+    );
+    const { workflowProof: _single, ...base } = input({ exec });
+    const results = await generateProofs(base, [
+      { type: 'diff-summary' },
+      { type: 'test-output', command: 'npm test' },
+    ]);
+    expect(results.map((r) => r.ok)).toEqual([false, true]);
   });
 });

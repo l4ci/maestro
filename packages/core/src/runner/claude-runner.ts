@@ -168,28 +168,48 @@ interface StreamLine {
   subtype?: string;
   result?: unknown;
   is_error?: boolean;
+  message?: { content?: Array<{ type?: string; text?: unknown }> };
 }
 
 /**
- * Extract the §10 status from the terminal `type:"result"` line. The agent emits
- * `{status, summary}` in its final message text (§9/§10), which lands in the result
- * object's `result` string. Any failure to find a valid status → safe `in_progress`.
+ * Extract the §10 status from the stream-json transcript. The happy path is the
+ * terminal `type:"result"` line, whose `result` string is the agent's final message
+ * text (§9/§10). But emission is nondeterministic (#4): real Claude sometimes omits
+ * the `{status, summary}` block from its LITERAL final message even though it emitted
+ * it earlier in the turn. So we scan EVERY assistant message plus the result line in
+ * stream order and keep the LAST valid `{status}` block. The result line is last, so
+ * a correctly-emitted final status still wins (done-safe — never a false `done` from
+ * recovery); earlier assistant messages are the fallback when the final one lacks it.
+ * Any failure to find a valid status → safe `in_progress` (daemon re-runs next tick).
  */
 export function parseAgentResult(lines: string[], exitCode: number): AgentResult {
   const objs = lines.map(tryParse).filter((o): o is StreamLine => o !== null);
   const resultLine = [...objs].reverse().find((o) => o.type === 'result');
 
+  let status: AgentResult | null = null;
+  for (const o of objs) {
+    const text = o.type === 'result' ? o.result : assistantText(o);
+    const found = extractStatus(text);
+    if (found) status = found; // last valid block in stream order wins
+  }
+  if (status) return status;
+
   if (!resultLine) {
     return { status: 'in_progress', summary: `no result line (exit ${exitCode}); will retry` };
   }
-  const status = extractStatus(resultLine.result);
-  if (!status) {
-    return {
-      status: 'in_progress',
-      summary: 'result line had no parseable {status} block; will retry',
-    };
-  }
-  return status;
+  return {
+    status: 'in_progress',
+    summary: 'no parseable {status} block in transcript; will retry',
+  };
+}
+
+/** Concatenated text of an assistant message's text content blocks (transcript scan). */
+function assistantText(o: StreamLine): string {
+  if (o.type !== 'assistant' || !Array.isArray(o.message?.content)) return '';
+  return o.message.content
+    .filter((b): b is { type?: string; text: string } => typeof b?.text === 'string')
+    .map((b) => b.text)
+    .join('\n');
 }
 
 function extractStatus(result: unknown): AgentResult | null {

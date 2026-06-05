@@ -95,7 +95,7 @@ function recorder(snap: IssueSnapshot, opts: { assignLands?: boolean } = {}) {
   return { adapter: adapter as ForgeAdapter, calls, assigned, comments };
 }
 
-const proof: ProofResult = { ok: true, kind: 'test-output', summary: 'all green' };
+const proof: ProofResult[] = [{ ok: true, kind: 'test-output', summary: 'all green' }];
 
 function hin(adapter: ForgeAdapter, over: Partial<HandoffInput> = {}): HandoffInput {
   return {
@@ -139,7 +139,7 @@ describe('Slice 5 — strict ordering (§7 guarantee)', () => {
       ...hin(adapter),
       proofInput: {
         workspaceDir: '/ws',
-        workflowProof: { type: 'none' },
+        strategies: [{ type: 'none' }],
         environment: {},
         git: { target: 'main' },
         exec: adapter as never,
@@ -255,10 +255,39 @@ describe('Slice 8 — proof failure does not block handoff', () => {
     };
     await handoff(
       hin(adapter as ForgeAdapter, {
-        proof: { ok: false, kind: 'playwright', summary: 'boot failed' },
+        proof: [{ ok: false, kind: 'playwright', summary: 'boot failed' }],
       }),
     );
     expect(bodies[0]).toMatch(/failed/i);
     expect(bodies[0]).toContain('boot failed');
+  });
+});
+
+// --- Slice 9: multi-proof comment folding (#12) -----------------------------
+
+describe('Slice 9 — multi-proof comment folding (#12)', () => {
+  it('labels each strategy; header is all-must-pass (one failure → warning)', async () => {
+    const { adapter, comments } = recorder(snapshot());
+    await handoff(
+      hin(adapter, {
+        proof: [
+          { ok: true, kind: 'diff-summary', summary: 'diff ok' },
+          { ok: false, kind: 'playwright', summary: 'boot failed' },
+        ],
+      }),
+    );
+    const proofComment = comments[0] ?? '';
+    expect(proofComment).toContain('⚠️ Proof (failed');
+    expect(proofComment).toContain('#### ✅ diff-summary');
+    expect(proofComment).toContain('#### ❌ playwright');
+  });
+
+  it('a single strategy renders flat, preserving the original comment shape', async () => {
+    const { adapter, comments } = recorder(snapshot());
+    await handoff(hin(adapter));
+    const proofComment = comments[0] ?? '';
+    expect(proofComment).toContain('### ✅ Proof');
+    expect(proofComment).toContain('all green');
+    expect(proofComment).not.toContain('####');
   });
 });
