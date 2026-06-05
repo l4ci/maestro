@@ -155,6 +155,52 @@ export const DASHBOARD_HTML = `<!doctype html>
   .avatar.reviewer { margin-left: 4px; outline: 1px solid var(--accent-ring); }
   .empty { color: var(--muted); padding: 16px; }
   .err { color: var(--down); padding: 12px 16px; font-size: 13px; word-break: break-word; }
+  /* Per-issue drill-down (#41): the clickable issue row + the inline detail panel that
+     expands beneath it. The panel is a full-width cell that lazy-loads its JSON on first
+     open; everything inside references the themed palette vars, never a literal hex. */
+  tr.issue { cursor: pointer; }
+  tr.issue:hover td { background: var(--line-soft); }
+  tr.issue.open td { background: var(--line-soft); }
+  td.detail { padding: 0; }
+  td.detail[hidden] { display: none; }
+  .panel { padding: 14px 16px; border-top: 1px solid var(--accent-line); background: var(--surface); }
+  .panel section { margin-bottom: 14px; }
+  .panel section:last-child { margin-bottom: 0; }
+  .panel h3 {
+    margin: 0 0 8px; font-size: 11px; letter-spacing: .5px; text-transform: uppercase;
+    color: var(--muted);
+  }
+  .panel .loading, .panel .none { color: var(--muted); font-size: 13px; }
+  .progress-meter {
+    height: 6px; border-radius: 999px; background: var(--surface-2);
+    overflow: hidden; margin: 6px 0 10px;
+  }
+  .progress-meter > i { display: block; height: 100%; background: var(--up); }
+  .progress-count { color: var(--muted); font-size: 12px; margin-left: 8px; }
+  ul.plan { list-style: none; margin: 0; padding: 0; }
+  ul.plan li { display: flex; gap: 8px; padding: 2px 0; font-size: 13px; }
+  ul.plan li .box { color: var(--muted); }
+  ul.plan li.checked .box { color: var(--up); }
+  ul.plan li.checked .text { color: var(--muted); text-decoration: line-through; }
+  .mr-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px;
+    background: var(--surface-2); color: var(--fg); border: 1px solid var(--border-soft);
+  }
+  .pill.ready { background: var(--s-done-bg); color: var(--s-done-fg); }
+  .pill.draft { background: var(--s-new-bg); color: var(--s-new-fg); }
+  .pill.approved { background: var(--s-done-bg); color: var(--s-done-fg); }
+  .pill.changes { background: var(--s-blocked-bg); color: var(--s-blocked-fg); }
+  ul.logs { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+  ul.logs li { padding: 2px 0; color: var(--fg); white-space: pre-wrap; word-break: break-word; }
+  ul.logs li .lvl { color: var(--muted-2); margin-right: 8px; }
+  ul.logs li.warn .lvl { color: var(--s-in-progress-fg); }
+  ul.logs li.error .lvl { color: var(--down); }
+  ul.comments { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  ul.comments li { padding: 4px 0; border-top: 1px solid var(--line-soft); }
+  ul.comments li:first-child { border-top: none; }
+  ul.comments li .who { color: var(--accent); margin-right: 6px; }
+  ul.comments li .body { color: var(--fg); white-space: pre-wrap; word-break: break-word; }
   #msg { min-height: 20px; color: var(--down); font-size: 13px; margin-bottom: 12px; }
   /* Narrow screens (#44): a 390px phone must not scroll sideways. Cut paddings, let the
      header wrap, drop the fixed iid/state/people column widths so the title cell takes the
@@ -474,10 +520,17 @@ function updateRepoCard(card, r) {
   // while leaving every other row in its incoming LifecycleState order (§11). Stable so the
   // keyed reconcile moves (never rebuilds) rows on the rare reorder.
   const ordered = sortIssuesByBlocked(r.issues || []);
+  // Each issue contributes TWO keyed rows: the clickable summary row and a detail row that
+  // holds the drill-down panel (#41), hidden until the summary is clicked. Pairing them as
+  // adjacent keyed siblings lets the reconcile preserve the panel node (and its fetched-once
+  // content + open/closed state) across the 5s poll, exactly like every other keyed row.
   const rows = r.error
     ? [{ key: '~error', error: r.error }]
     : (ordered.length
-        ? ordered.map((i) => ({ key: r.repo.url + '#' + i.iid, issue: i, forge: r.repo.forge }))
+        ? ordered.flatMap((i) => [
+            { key: r.repo.url + '#' + i.iid, issue: i, forge: r.repo.forge, repoId: r.repo.url },
+            { key: r.repo.url + '#' + i.iid + '~detail', detail: true },
+          ])
         : [{ key: '~empty' }]);
   reconcile(card.querySelector('tbody'), rows, (x) => x.key, createRow, updateRow);
 }
@@ -502,19 +555,36 @@ function createRow(x) {
     cell.colSpan = 4;
     if (x.key === '~empty') cell.textContent = 'no open issues assigned to the bot';
     tr.append(cell);
+  } else if (x.detail) {
+    // The drill-down panel row (#41): one full-width cell, hidden until its summary row is
+    // clicked. The panel itself is built lazily on first open, so a collapsed board renders
+    // (and polls) without ever fetching a single detail payload.
+    const cell = td('detail');
+    cell.colSpan = 4;
+    cell.hidden = true;
+    cell.append(panelEl());
+    tr.append(cell);
   } else {
+    tr.className = 'issue';
     const iid = td('iid');
     iid.append(link('', '', '')); // forge issue link; text + href filled in updateRow
     const state = td('state');
     state.append(badge(x.issue.state));
     // People cell: author (+ reviewer once handed off) as round avatars, filled in updateRow.
     tr.append(iid, state, td(''), td('people'));
+    // Click anywhere on the summary row (except the forge links, which open in a new tab)
+    // toggles its detail row open/closed and lazy-loads it once. The detail row is the
+    // immediate next sibling, by construction of the paired keyed rows above.
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('a')) return; // let the issue/MR links do their thing
+      toggleDetail(tr, x.repoId, x.issue.iid, x.forge);
+    });
   }
   return tr;
 }
 
 function updateRow(tr, x) {
-  if (x.key === '~empty') return;
+  if (x.key === '~empty' || x.detail) return;
   if (x.key === '~error') {
     tr.firstElementChild.textContent = '⚠ ' + x.error;
     return;
@@ -544,6 +614,139 @@ function updateRow(tr, x) {
   if (x.issue.author) avatars.push(avatar('author', x.issue.author));
   if (x.issue.reviewer) avatars.push(avatar('reviewer', x.issue.reviewer));
   people.replaceChildren(...avatars);
+}
+
+// --- Per-issue drill-down (#41) ---------------------------------------------------------
+// Toggle the detail row that follows a summary row. On the FIRST open we fetch the issue
+// view from GET /repos/<encoded repoId>/issues/<iid> — the route fixed in this change — and
+// render it into the panel; subsequent opens just re-show the already-loaded node (no second
+// fetch, the keyed reconcile keeps it alive across polls). Detail fetches happen on expand
+// ONLY, never folded into the 5s dashboard poll, so the collapsed payload stays small.
+function panelEl() {
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  return panel;
+}
+
+function toggleDetail(summaryRow, repoId, iid, forge) {
+  const detailRow = summaryRow.nextElementSibling;
+  const cell = detailRow && detailRow.firstElementChild;
+  if (!cell) return;
+  const opening = cell.hidden;
+  cell.hidden = !opening;
+  summaryRow.classList.toggle('open', opening);
+  if (opening && !cell.dataset.loaded) loadDetail(cell, repoId, iid, forge);
+}
+
+async function loadDetail(cell, repoId, iid, forge) {
+  cell.dataset.loaded = '1'; // fetch-once guard; cleared on error so a retry can re-fetch
+  const panel = cell.firstElementChild;
+  panel.replaceChildren(span('loading', 'loading…'));
+  try {
+    const url = '/repos/' + encodeURIComponent(repoId) + '/issues/' + iid;
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error('detail returned ' + res.status);
+    renderDetail(panel, await res.json(), forge);
+  } catch (err) {
+    cell.dataset.loaded = '';
+    const e = span('none', 'could not load detail: ' + err.message);
+    panel.replaceChildren(e);
+  }
+}
+
+// Build the detail panel from an IssueView (#41): plan progress, MR status, recent logs,
+// recent comments. Every forge-controlled string (plan item text, log messages, comment
+// bodies, usernames) lands via textContent — inert, never innerHTML (§13.1).
+function renderDetail(panel, view, forge) {
+  const sections = [];
+  const planSec = planSection(view.plan);
+  if (planSec) sections.push(planSec);
+  const mrSec = mrSection(view, forge);
+  if (mrSec) sections.push(mrSec);
+  sections.push(logsSection(view.recentLogs || []));
+  const commentsSec = commentsSection(view.recentComments || []);
+  if (commentsSec) sections.push(commentsSec);
+  panel.replaceChildren(...sections);
+}
+
+function sectionEl(heading) {
+  const sec = document.createElement('section');
+  const h = document.createElement('h3');
+  h.textContent = heading;
+  sec.append(h);
+  return sec;
+}
+
+function planSection(plan) {
+  if (!plan || !plan.total) return null;
+  const sec = sectionEl('Plan');
+  const meter = document.createElement('div');
+  meter.className = 'progress-meter';
+  const fill = document.createElement('i');
+  const pct = Math.round((plan.done / plan.total) * 100);
+  fill.style.width = pct + '%';
+  meter.append(fill);
+  const head = document.createElement('div');
+  head.append(document.createTextNode(plan.done + '/' + plan.total + ' tasks'));
+  const list = document.createElement('ul');
+  list.className = 'plan';
+  for (const item of plan.items) {
+    const li = document.createElement('li');
+    if (item.checked) li.className = 'checked';
+    li.append(span('box', item.checked ? '☑' : '☐'), span('text', item.text));
+    list.append(li);
+  }
+  sec.append(head, meter, list);
+  return sec;
+}
+
+function mrSection(view, forge) {
+  if (!view.mrUrl) return null;
+  const noun = forge === 'github' ? 'PR' : 'MR';
+  const sec = sectionEl(noun + ' status');
+  const row = document.createElement('div');
+  row.className = 'mr-status';
+  // Posture pills, derived from the same flags the board reads. Draft and "changes
+  // requested" are the two "needs work" states; approved/ready are the green ones.
+  if (view.isDraft) row.append(span('pill draft', 'draft'));
+  else row.append(span('pill ready', 'ready for review'));
+  if (view.changesRequested) row.append(span('pill changes', 'changes requested'));
+  else if (view.approved) row.append(span('pill approved', 'approved'));
+  row.append(link('mr', noun + ' ↗', view.mrUrl));
+  sec.append(row);
+  return sec;
+}
+
+function logsSection(logs) {
+  const sec = sectionEl('Recent activity');
+  if (logs.length === 0) {
+    sec.append(span('none', 'no agent logs yet'));
+    return sec;
+  }
+  const list = document.createElement('ul');
+  list.className = 'logs';
+  for (const line of logs) {
+    const li = document.createElement('li');
+    if (line.level === 'warn' || line.level === 'error') li.className = line.level;
+    li.append(span('lvl', '[' + line.level + ']'), document.createTextNode(line.msg));
+    list.append(li);
+  }
+  sec.append(list);
+  return sec;
+}
+
+function commentsSection(comments) {
+  if (comments.length === 0) return null;
+  const sec = sectionEl('Latest comments');
+  const list = document.createElement('ul');
+  list.className = 'comments';
+  for (const c of comments) {
+    const li = document.createElement('li');
+    li.append(span('who', '@' + (c.author ? c.author.username : '?')), span('body', c.body || ''));
+    list.append(li);
+  }
+  sec.append(list);
+  return sec;
 }
 
 async function refresh() {

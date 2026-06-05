@@ -30,8 +30,12 @@ export function renderStatus(view: IssueView): string {
   const lines = [`#${view.iid} ${view.title}`, `  state: ${view.state}`];
   if (view.mrUrl) {
     const flags = [view.isDraft ? 'draft' : 'ready', view.approved ? 'approved' : 'not-approved'];
+    if (view.changesRequested) flags.push('changes-requested');
     lines.push(`  mr: ${view.mrUrl} (${flags.join(', ')})`);
   }
+  // The parsed checkbox plan off the MR description (#41): a one-line tally for the CLI, the
+  // dashboard renders the full checklist. Absent when the MR has no task list.
+  if (view.plan) lines.push(`  plan: ${view.plan.done}/${view.plan.total} tasks`);
   if (view.lastLog) lines.push(`  last: ${view.lastLog}`);
   return lines.join('\n');
 }

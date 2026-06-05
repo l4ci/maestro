@@ -63,11 +63,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     // when writes are off (and a token-less reader never sees an input it can't use).
     return sendJson(res, 200, { ...(await deps.loadDashboard()), writesEnabled });
   }
-  const issue = path.match(/^\/repos\/([^/]+)$/);
-  if (method === 'GET' && issue?.[1]) {
-    const repoId = issue[1];
-    const iid = Number(repoId);
-    if (!Number.isInteger(iid)) return sendJson(res, 400, { error: 'invalid issue id' });
+  // Per-issue drill-down (#41). The repo id (`group/repo`) is its OWN segment, distinct from
+  // the issue iid — the old `/repos/:id` route conflated the two and 400'd for every real
+  // repo whose id wasn't an integer. The repoId rides URL-encoded so a slash inside it stays
+  // one segment; we decode it before handing it to the read-only loadIssue seam.
+  const issue = path.match(/^\/repos\/([^/]+)\/issues\/([^/]+)$/);
+  if (method === 'GET' && issue?.[1] && issue[2]) {
+    const repoId = decodeURIComponent(issue[1]);
+    const iid = Number(issue[2]);
+    if (!Number.isInteger(iid) || iid <= 0)
+      return sendJson(res, 400, { error: 'invalid issue id' });
     return sendJson(res, 200, await deps.loadIssue(repoId, iid));
   }
 

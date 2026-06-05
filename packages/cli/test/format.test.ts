@@ -68,6 +68,31 @@ describe('renderStatus (C2)', () => {
     const out = renderStatus(view);
     expect(out).toContain('new');
   });
+
+  it('shows the plan tally and a changes-requested flag when present (#41)', () => {
+    const view: IssueView = {
+      iid: 9,
+      title: 'Add OAuth',
+      state: 'in-review',
+      issueUrl: 'https://gitlab.com/g/r/-/issues/9',
+      mrUrl: 'https://gitlab.com/g/r/-/merge_requests/9',
+      isDraft: false,
+      approved: false,
+      changesRequested: true,
+      plan: {
+        done: 1,
+        total: 3,
+        items: [
+          { checked: true, text: 'design' },
+          { checked: false, text: 'build' },
+          { checked: false, text: 'test' },
+        ],
+      },
+    };
+    const out = renderStatus(view);
+    expect(out).toContain('plan: 1/3 tasks');
+    expect(out).toMatch(/changes-requested/);
+  });
 });
 
 describe('renderLogs (C3)', () => {

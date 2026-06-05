@@ -751,7 +751,9 @@ describe('blocked visibility — sort, title, favicon (#43)', () => {
     ];
     repo.counts = { ...zero, 'in-progress': 1, blocked: 1, new: 1 };
     w.render(v);
-    const keys = [...(repoCards(w)[0]?.querySelectorAll('tr[data-key]') ?? [])].map((r) =>
+    // Each issue also emits a hidden `~detail` drill-down row (#41); filter to the summary
+    // rows so the assertion is about issue ordering, not the panel rows interleaved with them.
+    const keys = [...(repoCards(w)[0]?.querySelectorAll('tr.issue[data-key]') ?? [])].map((r) =>
       (r as HTMLElement).getAttribute('data-key'),
     );
     expect(keys).toEqual(['gitlab.com/g/api#2', 'gitlab.com/g/api#1', 'gitlab.com/g/api#3']);
@@ -916,5 +918,233 @@ describe('collapsible repo cards (#34)', () => {
     w.render(v);
     header(w, 'github.com/o/web').click();
     expect(header(w, 'github.com/o/web').textContent).toContain('unreachable');
+  });
+});
+
+describe('per-issue drill-down (#41)', () => {
+  // The summary row is `tr.issue[data-key="<url>#<iid>"]`; its detail panel rides the very
+  // next keyed row `<url>#<iid>~detail`, a full-width <td.detail> that starts hidden and
+  // lazy-fetches GET /repos/<encoded repoId>/issues/<iid> on first expand.
+  const summary = (w: PageWindow, key: string) =>
+    w.document.querySelector(`tr.issue[data-key="${key}"]`) as HTMLElement;
+  const detailCell = (w: PageWindow, key: string) =>
+    w.document.querySelector(`tr[data-key="${key}~detail"] td.detail`) as HTMLElement;
+  const panel = (w: PageWindow, key: string) => detailCell(w, key).querySelector('.panel');
+
+  // A canned IssueView the stubbed detail endpoint returns. `flush()` lets the awaited
+  // fetch + render microtasks settle before assertions.
+  type DetailView = Record<string, unknown>;
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  function withDetail(detail: DetailView): { w: PageWindow; calls: string[] } {
+    const w = loadPage();
+    const calls: string[] = [];
+    w.fetch = (async (url: string) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => detail };
+    }) as unknown as typeof fetch;
+    w.render(view());
+    return { w, calls };
+  }
+
+  it('emits a hidden detail row per issue; the collapsed board fetches nothing', () => {
+    const { w, calls } = withDetail({});
+    expect(detailCell(w, 'gitlab.com/g/api#1')).toBeTruthy();
+    expect(detailCell(w, 'gitlab.com/g/api#1').hidden).toBe(true);
+    // No detail payload is pulled until a row is actually expanded.
+    expect(calls).toHaveLength(0);
+  });
+
+  it('clicking a row expands its panel and lazy-fetches the encoded issue route', async () => {
+    const { w, calls } = withDetail({ iid: 1, recentLogs: [] });
+    summary(w, 'gitlab.com/g/api#1').click();
+    expect(detailCell(w, 'gitlab.com/g/api#1').hidden).toBe(false);
+    await flush();
+    // repoId is URL-encoded so the slash in group/api stays one path segment.
+    expect(calls).toEqual(['/repos/gitlab.com%2Fg%2Fapi/issues/1']);
+  });
+
+  it('clicking again collapses without a second fetch (loaded once, kept alive)', async () => {
+    const { w, calls } = withDetail({ iid: 1, recentLogs: [] });
+    const row = summary(w, 'gitlab.com/g/api#1');
+    row.click();
+    await flush();
+    row.click(); // collapse
+    expect(detailCell(w, 'gitlab.com/g/api#1').hidden).toBe(true);
+    row.click(); // re-open
+    await flush();
+    expect(calls).toHaveLength(1); // still just the one fetch
+  });
+
+  it('renders plan progress: n/m tasks, a meter, and the checklist', async () => {
+    const { w } = withDetail({
+      iid: 1,
+      plan: {
+        done: 1,
+        total: 2,
+        items: [
+          { checked: true, text: 'scaffold' },
+          { checked: false, text: 'write tests' },
+        ],
+      },
+      recentLogs: [],
+    });
+    summary(w, 'gitlab.com/g/api#1').click();
+    await flush();
+    const p = panel(w, 'gitlab.com/g/api#1');
+    expect(p?.textContent).toContain('1/2 tasks');
+    expect(p?.querySelector('.progress-meter i')).toBeTruthy();
+    const items = [...(p?.querySelectorAll('ul.plan li') ?? [])];
+    expect(items).toHaveLength(2);
+    expect(items[0]?.className).toContain('checked');
+    expect(items[0]?.textContent).toContain('scaffold');
+    expect(items[1]?.className).not.toContain('checked');
+  });
+
+  it('renders MR status pills and a link, labelled MR on GitLab / PR on GitHub', async () => {
+    const { w } = withDetail({
+      iid: 1,
+      mrUrl: 'https://gitlab.com/g/api/-/merge_requests/9',
+      isDraft: false,
+      approved: true,
+      changesRequested: false,
+      recentLogs: [],
+    });
+    summary(w, 'gitlab.com/g/api#1').click();
+    await flush();
+    const p = panel(w, 'gitlab.com/g/api#1');
+    expect(p?.textContent).toContain('MR status');
+    expect(p?.querySelector('.pill.approved')).toBeTruthy();
+    const mrLink = p?.querySelector('a.mr') as HTMLAnchorElement | null;
+    expect(mrLink?.getAttribute('href')).toBe('https://gitlab.com/g/api/-/merge_requests/9');
+    expect(mrLink?.rel).toBe('noopener noreferrer');
+  });
+
+  it('marks a changes-requested MR distinctly from an approved one', async () => {
+    const { w } = withDetail({
+      iid: 1,
+      mrUrl: 'https://gitlab.com/g/api/-/merge_requests/9',
+      isDraft: false,
+      approved: false,
+      changesRequested: true,
+      recentLogs: [],
+    });
+    summary(w, 'gitlab.com/g/api#1').click();
+    await flush();
+    const p = panel(w, 'gitlab.com/g/api#1');
+    expect(p?.querySelector('.pill.changes')).toBeTruthy();
+    expect(p?.querySelector('.pill.approved')).toBeNull();
+  });
+
+  it('renders recent log lines with their level class', async () => {
+    const { w } = withDetail({
+      iid: 1,
+      recentLogs: [
+        { ts: 't1', repo: 'g/api', issueIid: 1, level: 'info', msg: 'cloned workspace' },
+        { ts: 't2', repo: 'g/api', issueIid: 1, level: 'error', msg: 'build failed' },
+      ],
+    });
+    summary(w, 'gitlab.com/g/api#1').click();
+    await flush();
+    const logs = [...(panel(w, 'gitlab.com/g/api#1')?.querySelectorAll('ul.logs li') ?? [])];
+    expect(logs).toHaveLength(2);
+    expect(logs[0]?.textContent).toContain('cloned workspace');
+    expect(logs[1]?.className).toContain('error');
+    expect(logs[1]?.textContent).toContain('build failed');
+  });
+
+  it('shows an empty-activity note when there are no logs', async () => {
+    const { w } = withDetail({ iid: 1, recentLogs: [] });
+    summary(w, 'gitlab.com/g/api#1').click();
+    await flush();
+    expect(panel(w, 'gitlab.com/g/api#1')?.textContent).toContain('no agent logs yet');
+  });
+
+  it('renders the latest issue comments with author handles', async () => {
+    const { w } = withDetail({
+      iid: 1,
+      recentLogs: [],
+      recentComments: [
+        { id: 'c1', author: { username: 'alice', id: '1' }, body: 'looks good', createdAt: 't' },
+      ],
+    });
+    summary(w, 'gitlab.com/g/api#1').click();
+    await flush();
+    const p = panel(w, 'gitlab.com/g/api#1');
+    expect(p?.textContent).toContain('@alice');
+    expect(p?.textContent).toContain('looks good');
+  });
+
+  it('keeps panel content inert: an injection in a log/comment is literal text (§13.1)', async () => {
+    const { w } = withDetail({
+      iid: 1,
+      recentLogs: [
+        { ts: 't', repo: 'g/api', issueIid: 1, level: 'info', msg: '<img src=x onerror=alert(1)>' },
+      ],
+      recentComments: [
+        { id: 'c1', author: { username: 'x' }, body: '<script>boom</script>', createdAt: 't' },
+      ],
+      plan: { done: 0, total: 1, items: [{ checked: false, text: '<b>todo</b>' }] },
+    });
+    summary(w, 'gitlab.com/g/api#1').click();
+    await flush();
+    const p = panel(w, 'gitlab.com/g/api#1');
+    expect(p?.querySelector('img')).toBeNull();
+    expect(p?.querySelector('script')).toBeNull();
+    expect(p?.textContent).toContain('<img src=x onerror=alert(1)>');
+    expect(p?.textContent).toContain('<script>boom</script>');
+    expect(p?.textContent).toContain('<b>todo</b>');
+  });
+
+  it('surfaces a fetch failure in the panel and allows a retry', async () => {
+    const w = loadPage();
+    let attempts = 0;
+    w.fetch = (async () => {
+      attempts += 1;
+      if (attempts === 1) return { ok: false, status: 500, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({ iid: 1, recentLogs: [] }) };
+    }) as unknown as typeof fetch;
+    w.render(view());
+    const row = summary(w, 'gitlab.com/g/api#1');
+    row.click();
+    await flush();
+    expect(panel(w, 'gitlab.com/g/api#1')?.textContent).toContain('could not load detail');
+    // The failed open cleared the once-guard, so collapsing and re-opening re-fetches.
+    row.click(); // collapse
+    row.click(); // re-open → second attempt succeeds
+    await flush();
+    expect(attempts).toBe(2);
+    expect(panel(w, 'gitlab.com/g/api#1')?.textContent).toContain('no agent logs yet');
+  });
+
+  it('a forge link inside the row does not toggle the panel', () => {
+    const { w } = withDetail({ iid: 1, recentLogs: [] });
+    const link = summary(w, 'gitlab.com/g/api#1').querySelector('td.iid a') as HTMLElement;
+    link.click();
+    // Clicking the issue link must not expand the drill-down (it opens the forge in a new tab).
+    expect(detailCell(w, 'gitlab.com/g/api#1').hidden).toBe(true);
+  });
+
+  it('the panel node survives a poll re-render (keyed identity)', async () => {
+    const { w } = withDetail({ iid: 1, recentLogs: [] });
+    const row = summary(w, 'gitlab.com/g/api#1');
+    row.click();
+    await flush();
+    const node = panel(w, 'gitlab.com/g/api#1');
+    expect(node?.textContent).toContain('no agent logs yet');
+    w.render(view()); // poll
+    expect(panel(w, 'gitlab.com/g/api#1')).toBe(node); // same node, content preserved
+    expect(detailCell(w, 'gitlab.com/g/api#1').hidden).toBe(false); // stays open
+  });
+});
+
+describe('drill-down panel CSS is themed, not hardcoded (#41/#44)', () => {
+  const css = DASHBOARD_HTML;
+  it('paints the panel and pills off palette vars', () => {
+    expect(css).toContain('.panel {');
+    expect(css).toContain('background: var(--surface)');
+    expect(css).toContain(
+      '.progress-meter > i { display: block; height: 100%; background: var(--up); }',
+    );
+    expect(css).toContain('.pill.changes { background: var(--s-blocked-bg)');
   });
 });

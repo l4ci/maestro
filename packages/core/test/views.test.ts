@@ -5,7 +5,12 @@ import type {
   ReadOnlyForgeAdapter,
   RepoRef,
 } from '../src/contracts/index.js';
-import { assembleDashboard, assembleIssue, lastActivityOf } from '../src/views/assemble.js';
+import {
+  assembleDashboard,
+  assembleIssue,
+  lastActivityOf,
+  parsePlan,
+} from '../src/views/assemble.js';
 import { defaultSettings, labels, makeSnapshot, repo } from './helpers/daemon.js';
 
 const repoB: RepoRef = { ...repo, project: 'group/web', url: 'gitlab.com/group/web' };
@@ -203,6 +208,151 @@ describe('assembleIssue — single issue view for status', () => {
     const view = await assembleIssue(repo, 8, deps(new Map([[repo.url, rec.adapter]])));
 
     expect(view.reviewer).toBeUndefined();
+  });
+});
+
+describe('parsePlan — checkbox plan off an MR description (#41)', () => {
+  it('counts done/total and returns items in source order', () => {
+    const plan = parsePlan('intro\n- [ ] scaffold\n- [x] write tests\n- [X] ship\noutro');
+    expect(plan).toEqual({
+      done: 2,
+      total: 3,
+      items: [
+        { checked: false, text: 'scaffold' },
+        { checked: true, text: 'write tests' },
+        { checked: true, text: 'ship' },
+      ],
+    });
+  });
+
+  it('accepts *, + and indented bullets', () => {
+    const plan = parsePlan('* [ ] a\n+ [x] b\n  - [ ] c');
+    expect(plan?.total).toBe(3);
+    expect(plan?.done).toBe(1);
+  });
+
+  it('returns undefined when the description carries no checkboxes', () => {
+    expect(parsePlan('Closes #42\n\nJust prose, no task list.')).toBeUndefined();
+  });
+
+  it('ignores a bare dash list with no checkbox', () => {
+    expect(parsePlan('- not a task\n- still not')).toBeUndefined();
+  });
+});
+
+describe('assembleIssue — drill-down detail enrichment (#41)', () => {
+  const logsOf = (lines: Partial<LogLine>[]) => ({
+    readIssueLog: async (_r: RepoRef, _iid: number, limit?: number): Promise<LogLine[]> => {
+      const full: LogLine[] = lines.map((l, i) => ({
+        ts: `t${i}`,
+        repo: 'group/api',
+        issueIid: 7,
+        level: 'info',
+        msg: `line ${i}`,
+        ...l,
+      }));
+      return full.slice(-(limit ?? full.length));
+    },
+  });
+
+  it('parses the MR description plan and exposes changesRequested + the log window', async () => {
+    const snaps = new Map([
+      [
+        7,
+        makeSnapshot({
+          issue: { iid: 7 },
+          mr: {
+            description: '- [x] design\n- [ ] build',
+            approvals: { approved: false, approvedBy: [], changesRequested: true },
+          },
+          comments: ['first', 'second'],
+        }),
+      ],
+    ]);
+    const rec = roAdapter(snaps);
+    const logs = logsOf([{ msg: 'a' }, { msg: 'b' }, { msg: 'c' }]);
+
+    const view = await assembleIssue(repo, 7, deps(new Map([[repo.url, rec.adapter]]), logs));
+
+    expect(view.plan).toEqual({
+      done: 1,
+      total: 2,
+      items: [
+        { checked: true, text: 'design' },
+        { checked: false, text: 'build' },
+      ],
+    });
+    expect(view.changesRequested).toBe(true);
+    expect(view.recentLogs?.map((l) => l.msg)).toEqual(['a', 'b', 'c']);
+    expect(view.recentComments?.map((c) => c.body)).toEqual(['first', 'second']);
+  });
+
+  it('omits the plan when the MR description has no checkboxes', async () => {
+    const snaps = new Map([
+      [7, makeSnapshot({ issue: { iid: 7 }, mr: { description: 'Closes #7' } })],
+    ]);
+    const rec = roAdapter(snaps);
+
+    const view = await assembleIssue(repo, 7, deps(new Map([[repo.url, rec.adapter]])));
+
+    expect(view.plan).toBeUndefined();
+  });
+
+  it('omits the plan entirely when there is no MR', async () => {
+    const snaps = new Map([[7, makeSnapshot({ issue: { iid: 7 }, mr: null })]]);
+    const rec = roAdapter(snaps);
+
+    const view = await assembleIssue(repo, 7, deps(new Map([[repo.url, rec.adapter]])));
+
+    expect(view.plan).toBeUndefined();
+    expect(view.mrUrl).toBeUndefined();
+  });
+
+  it('asks the log reader for a window, not a single line, in detail mode', async () => {
+    const seen: (number | undefined)[] = [];
+    const logs = {
+      readIssueLog: async (_r: RepoRef, _iid: number, limit?: number): Promise<LogLine[]> => {
+        seen.push(limit);
+        return [];
+      },
+    };
+    const snaps = new Map([[7, makeSnapshot({ issue: { iid: 7 } })]]);
+    const rec = roAdapter(snaps);
+
+    await assembleIssue(repo, 7, deps(new Map([[repo.url, rec.adapter]]), logs));
+
+    expect(seen[0]).toBeGreaterThan(1); // a window of recent lines, not just the newest
+  });
+});
+
+describe('assembleDashboard keeps the collapsed payload lean (#41)', () => {
+  it('the dashboard list never carries the heavy detail fields', async () => {
+    const snaps = new Map([
+      [
+        7,
+        makeSnapshot({
+          issue: { iid: 7, labels: [labels.inProgress] },
+          mr: { description: '- [x] a\n- [ ] b' },
+          comments: ['hello'],
+        }),
+      ],
+    ]);
+    const rec = roAdapter(snaps);
+    const logs = {
+      readIssueLog: async (): Promise<LogLine[]> => [
+        { ts: 't', repo: 'group/api', issueIid: 7, level: 'info' as const, msg: 'x' },
+      ],
+    };
+
+    const view = await assembleDashboard([repo], deps(new Map([[repo.url, rec.adapter]]), logs));
+    const issue = view.repos[0]?.issues[0];
+
+    // Detail-only fields stay off the board so the polled payload is no bigger than before.
+    expect(issue?.plan).toBeUndefined();
+    expect(issue?.recentLogs).toBeUndefined();
+    expect(issue?.recentComments).toBeUndefined();
+    // The lean fields it has always carried are still present.
+    expect(issue?.lastLog).toBe('x');
   });
 });
 

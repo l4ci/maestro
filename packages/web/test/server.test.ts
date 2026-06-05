@@ -124,12 +124,35 @@ describe('F1 — GET routes serialize assembled views, never mutate', () => {
     expect(JSON.parse(res.body)).toEqual({ ...cannedDashboard, writesEnabled: false });
   });
 
-  it('GET /repos/:id returns the issue view as JSON with 200', async () => {
+  it('GET /repos/:repoId/issues/:iid returns the issue view as JSON with 200 (#41)', async () => {
     const loadIssue = vi.fn(async () => cannedIssue);
-    const res = await call(fakeDeps({ loadIssue }), 'GET', '/repos/42');
+    const res = await call(fakeDeps({ loadIssue }), 'GET', '/repos/g%2Fr/issues/42');
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body)).toEqual(cannedIssue);
-    expect(loadIssue).toHaveBeenCalledWith(expect.anything(), 42);
+    // repoId is its own URL-encoded segment, decoded before the seam; iid is the second.
+    expect(loadIssue).toHaveBeenCalledWith('g/r', 42);
+  });
+
+  it('decodes a slashed repoId so group/repo survives as one segment (#41)', async () => {
+    const loadIssue = vi.fn(async () => cannedIssue);
+    const res = await call(fakeDeps({ loadIssue }), 'GET', '/repos/group%2Fapi/issues/7');
+    expect(res.status).toBe(200);
+    expect(loadIssue).toHaveBeenCalledWith('group/api', 7);
+  });
+
+  it('400s a non-integer iid rather than handing garbage to the seam (#41)', async () => {
+    const loadIssue = vi.fn(async () => cannedIssue);
+    const res = await call(fakeDeps({ loadIssue }), 'GET', '/repos/g%2Fr/issues/abc');
+    expect(res.status).toBe(400);
+    expect(loadIssue).not.toHaveBeenCalled();
+  });
+
+  it('404s the old conflated /repos/:id shape, which no real repo id could satisfy', async () => {
+    // The dead route matched `/repos/(\\d+)` and reused that segment as BOTH repo id and iid;
+    // a real `group/repo` id is not an integer, so it 400'd for every meaningful call. The
+    // single-segment shape no longer routes at all.
+    const res = await call(fakeDeps(), 'GET', '/repos/42');
+    expect(res.status).toBe(404);
   });
 
   it('GET handlers only receive read deps — no addRepo reachable from a GET', async () => {
@@ -263,7 +286,7 @@ describe('F2-disabled — writes are off unless a token is configured', () => {
   });
 
   it('GET routes are unaffected when writes are disabled', async () => {
-    const res = await call(fakeDeps({ writeToken: undefined }), 'GET', '/repos/42');
+    const res = await call(fakeDeps({ writeToken: undefined }), 'GET', '/repos/g%2Fr/issues/42');
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body)).toEqual(cannedIssue);
   });
