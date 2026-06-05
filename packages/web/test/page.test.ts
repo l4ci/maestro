@@ -299,7 +299,7 @@ describe('daemon heartbeat indicator (#40)', () => {
   });
 });
 
-describe('add-repo form tracks the server write-capability flag (#9)', () => {
+describe('add-repo button tracks the server write-capability flag (#9)', () => {
   // Drive the page's own refresh() against a stubbed read-model. The auto-start refresh()
   // and the 5s setInterval are parked on a never-resolving fetch (as in loadPage) so the
   // only resolving call is the one we await here — no callback fires post-close.
@@ -314,20 +314,46 @@ describe('add-repo form tracks the server write-capability flag (#9)', () => {
     return w;
   }
 
-  it('hides the form by default before any refresh', () => {
+  it('hides the button by default before any refresh', () => {
     const w = loadPage();
-    // Shipped markup is hidden by default — no flash of an unusable form on a read-only host.
-    expect(w.document.getElementById('addForm')?.hasAttribute('hidden')).toBe(true);
+    // Shipped markup is hidden by default — no flash of an unusable button on a read-only host.
+    expect(w.document.getElementById('addBtn')?.hasAttribute('hidden')).toBe(true);
   });
 
-  it('shows the form when the read-model reports writesEnabled:true', async () => {
+  it('shows the button when the read-model reports writesEnabled:true', async () => {
     const w = await refreshWith({ ...view(), writesEnabled: true });
-    expect((w.document.getElementById('addForm') as HTMLElement).hidden).toBe(false);
+    expect((w.document.getElementById('addBtn') as HTMLElement).hidden).toBe(false);
   });
 
-  it('keeps the form hidden when the read-model reports writesEnabled:false', async () => {
+  it('keeps the button hidden when the read-model reports writesEnabled:false', async () => {
     const w = await refreshWith({ ...view(), writesEnabled: false });
-    expect((w.document.getElementById('addForm') as HTMLElement).hidden).toBe(true);
+    expect((w.document.getElementById('addBtn') as HTMLElement).hidden).toBe(true);
+  });
+});
+
+describe('add-repo dialog opens from the button, closes on cancel', () => {
+  const dialog = (w: PageWindow) => w.document.getElementById('addDialog') as HTMLDialogElement;
+
+  it('ships closed; the Add Repo button opens it as a modal', () => {
+    const w = loadPage();
+    expect(dialog(w).open).toBe(false);
+    (w.document.getElementById('addBtn') as HTMLElement).click();
+    expect(dialog(w).open).toBe(true);
+  });
+
+  it('the cancel button closes it', () => {
+    const w = loadPage();
+    (w.document.getElementById('addBtn') as HTMLElement).click();
+    (w.document.getElementById('addCancel') as HTMLElement).click();
+    expect(dialog(w).open).toBe(false);
+  });
+
+  it('opening clears a stale error message from a previous attempt', () => {
+    const w = loadPage();
+    const msg = w.document.getElementById('addMsg') as HTMLElement;
+    msg.textContent = 'token rejected';
+    (w.document.getElementById('addBtn') as HTMLElement).click();
+    expect(msg.textContent).toBe('');
   });
 });
 
@@ -838,9 +864,8 @@ describe('themed palette + responsive layout (#44)', () => {
     // Fixed iid/state column widths collapse so the title cell takes the slack — no overflow.
     expect(narrow).toContain('td.iid { width: auto; }');
     expect(narrow).toContain('td.state { width: auto; }');
-    // The add form stacks so token/url/button stay usable on a phone.
-    expect(narrow).toContain('form.add input { flex: 1 1 100%; }');
-    expect(narrow).toContain('form.add button { flex: 1 1 100%; }');
+    // The add form already stacks inside its dialog; the opener button goes full width.
+    expect(narrow).toContain('#addBtn { width: 100%; }');
   });
 
   it('keeps the favicon dot and message colors themable (read from --down/--up)', () => {

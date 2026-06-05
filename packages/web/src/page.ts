@@ -92,11 +92,27 @@ export const DASHBOARD_HTML = `<!doctype html>
   #daemon.down { color: var(--down); }
   #updated { color: var(--muted); font-size: 12px; }
   main { padding: 24px; max-width: 1000px; margin: 0 auto; }
-  form.add {
-    display: flex; gap: 8px; margin-bottom: 24px;
+  /* Add-repo entry point: a single button on the board; the token/url form lives in a
+     native <dialog> it opens, so the inputs never crowd the read view. Dialog padding is
+     0 (the form carries it) so a click that targets the dialog element itself can only be
+     the backdrop — that's the light-dismiss test in the click handler. */
+  #addBtn {
+    padding: 8px 16px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--btn-bg); color: var(--btn-fg); font: inherit; cursor: pointer;
+    margin-bottom: 24px;
   }
+  dialog#addDialog {
+    padding: 0; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); color: var(--fg);
+    width: min(440px, calc(100vw - 32px));
+  }
+  dialog#addDialog::backdrop { background: rgba(0, 0, 0, .5); }
+  form.add {
+    display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 20px;
+  }
+  form.add h3 { margin: 0 0 2px; font-size: 14px; }
   form.add input {
-    flex: 1; min-width: 0; padding: 8px 12px; border-radius: 6px;
+    min-width: 0; padding: 8px 12px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--surface); color: var(--fg); font: inherit;
   }
   form.add button {
@@ -104,6 +120,10 @@ export const DASHBOARD_HTML = `<!doctype html>
     background: var(--btn-bg); color: var(--btn-fg); font: inherit; cursor: pointer;
   }
   form.add button:disabled { opacity: .5; cursor: default; }
+  form.add .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  form.add button.cancel { background: var(--surface); color: var(--fg); }
+  #addMsg { min-height: 0; color: var(--down); font-size: 13px; }
+  #addMsg:empty { display: none; }
   .repo { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 16px; }
   .repo h2 {
     margin: 0; padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--line);
@@ -204,14 +224,13 @@ export const DASHBOARD_HTML = `<!doctype html>
   #msg { min-height: 20px; color: var(--down); font-size: 13px; margin-bottom: 12px; }
   /* Narrow screens (#44): a 390px phone must not scroll sideways. Cut paddings, let the
      header wrap, drop the fixed iid/state/people column widths so the title cell takes the
-     slack, and keep the add form usable by stacking the token/url inputs above the button. */
+     slack. The add form already stacks (it's a column inside the dialog); the opener button
+     just goes full width. */
   @media (max-width: 600px) {
     header { padding: 14px 16px; flex-wrap: wrap; gap: 6px 10px; }
     #daemon { flex-basis: 100%; margin-left: 0; }
     main { padding: 16px; }
-    form.add { flex-wrap: wrap; }
-    form.add input { flex: 1 1 100%; }
-    form.add button { flex: 1 1 100%; }
+    #addBtn { width: 100%; }
     .repo h2 { padding: 10px 12px; }
     td { padding: 8px 12px; }
     td.iid { width: auto; }
@@ -229,11 +248,19 @@ export const DASHBOARD_HTML = `<!doctype html>
   <span id="updated"></span>
 </header>
 <main>
-  <form class="add" id="addForm" hidden>
-    <input id="token" name="token" type="password" placeholder="dashboard token" autocomplete="off" />
-    <input id="url" name="url" placeholder="add a repo — e.g. gitlab.com/group/api" autocomplete="off" />
-    <button type="submit">add</button>
-  </form>
+  <button id="addBtn" type="button" hidden>Add Repo</button>
+  <dialog id="addDialog">
+    <form class="add" id="addForm">
+      <h3>Add a repo</h3>
+      <input id="token" name="token" type="password" placeholder="dashboard token" autocomplete="off" />
+      <input id="url" name="url" placeholder="add a repo — e.g. gitlab.com/group/api" autocomplete="off" />
+      <div id="addMsg"></div>
+      <div class="actions">
+        <button type="button" class="cancel" id="addCancel">cancel</button>
+        <button type="submit">add</button>
+      </div>
+    </form>
+  </dialog>
   <div id="msg"></div>
   <div id="repos"><div class="empty">loading…</div></div>
 </main>
@@ -754,16 +781,40 @@ async function refresh() {
     const res = await fetch('/', { headers: { Accept: 'application/json' } });
     if (!res.ok) throw new Error('dashboard returned ' + res.status);
     const view = await res.json();
-    // The add-repo form only exists when the server says writes are enabled; a read-only
-    // host (no token configured) never shows an input that would just 404 on submit.
-    el('addForm').hidden = !view.writesEnabled;
+    // The add-repo button only exists when the server says writes are enabled; a read-only
+    // host (no token configured) never shows an entry point that would just 404 on submit.
+    el('addBtn').hidden = !view.writesEnabled;
     render(view);
     el('msg').textContent = '';
     el('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (err) {
+    el('msg').style.color = cssVar('--down', '#f47067');
     el('msg').textContent = 'could not load dashboard: ' + err.message;
   }
 }
+
+// The add form lives in a modal <dialog> behind the Add Repo button: showModal() gives
+// focus trapping and Esc-to-close for free. The dialog itself has no padding (the form
+// carries it), so a click whose target is the dialog element can only land on the
+// backdrop — that's the whole light-dismiss test. The method calls feature-detect because
+// jsdom only reflects the open property, not show/showModal/close (e.g. our page tests);
+// there the modal degrades to a plain open/close toggle.
+function openDialog(d) {
+  if (d.showModal) d.showModal();
+  else d.open = true;
+}
+function closeDialog(d) {
+  if (d.close) d.close();
+  else d.open = false;
+}
+el('addBtn').addEventListener('click', () => {
+  el('addMsg').textContent = '';
+  openDialog(el('addDialog'));
+});
+el('addCancel').addEventListener('click', () => closeDialog(el('addDialog')));
+el('addDialog').addEventListener('click', (e) => {
+  if (e.target === el('addDialog')) closeDialog(el('addDialog'));
+});
 
 el('addForm').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -772,7 +823,7 @@ el('addForm').addEventListener('submit', async (e) => {
   const token = el('token').value.trim();
   if (!url) return;
   btn.disabled = true;
-  el('msg').style.color = cssVar('--down', '#f47067');
+  el('addMsg').textContent = '';
   try {
     // The token never leaves the browser except as the Bearer header on this write call;
     // the server compares it in constant time and never echoes it back.
@@ -785,21 +836,25 @@ el('addForm').addEventListener('submit', async (e) => {
       body: new URLSearchParams({ url }).toString(),
     });
     if (res.status === 401 || res.status === 403) {
-      el('msg').textContent =
+      el('addMsg').textContent =
         res.status === 401 ? 'a dashboard token is required to add a repo' : 'token rejected';
       return;
     }
     const data = await res.json();
     if (data.added) {
+      // Success closes the dialog and reports on the board; the token field keeps its
+      // value so adding several repos in a row only asks for the secret once.
       el('url').value = '';
+      closeDialog(el('addDialog'));
+      // Refresh FIRST: its success path clears #msg, so the confirmation has to land after.
+      await refresh();
       el('msg').style.color = cssVar('--up', '#57ab5a');
       el('msg').textContent = 'added ' + (data.repo?.project ?? url);
-      await refresh();
     } else {
-      el('msg').textContent = 'could not add: ' + (data.reason ?? 'unknown');
+      el('addMsg').textContent = 'could not add: ' + (data.reason ?? 'unknown');
     }
   } catch (err) {
-    el('msg').textContent = 'add failed: ' + err.message;
+    el('addMsg').textContent = 'add failed: ' + err.message;
   } finally {
     btn.disabled = false;
   }
