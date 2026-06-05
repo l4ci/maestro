@@ -5,6 +5,7 @@
 // internally use the READ-ONLY-narrowed adapter), so a mutating forge call is unreachable from
 // any GET path. The single write path is POST /repos → the SAME addRepo `maestro add` calls.
 
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createServer as httpCreateServer } from 'node:http';
 import type { AddResult, DashboardView, IssueView } from '@maestro/core';
@@ -17,6 +18,13 @@ export interface ServerDeps {
   loadIssue: (repoId: string, iid: number) => Promise<IssueView>;
   /** The ONLY write path — wraps core addRepo (commit:true default). */
   addRepo: (url: string) => Promise<AddResult>;
+  /**
+   * Bearer token that POST /repos must present. Writes are DISABLED unless this is set
+   * (fail closed: no token configured → the write path is unreachable, returns 404). When
+   * present, a request must carry a matching `Authorization: Bearer <token>` header,
+   * compared in constant time. Read-only GETs are never gated by this.
+   */
+  writeToken?: string;
 }
 
 export function createServer(deps: ServerDeps): Server {
@@ -33,8 +41,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
   const method = req.method ?? 'GET';
   const path = (req.url ?? '/').split('?')[0] ?? '/';
 
+  const writesEnabled = Boolean(deps.writeToken);
+
   // --- write path (the single forge mutation reachable from the web) ---
   if (method === 'POST' && path === '/repos') {
+    // Fail closed: with no token configured the write surface does not exist (404), so a
+    // shared-network reader can't even tell the route is there. When enabled, the request
+    // must authenticate (401 missing / 403 wrong) before any forge-mutating call runs.
+    if (!writesEnabled) return sendJson(res, 404, { error: 'not found' });
+    const authz = checkAuth(req, deps.writeToken);
+    if (authz) return sendJson(res, authz.status, { error: authz.error });
     return postRepos(req, res, deps);
   }
 
@@ -43,7 +59,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     // A browser (Accept: text/html) gets the dashboard page; everything else — API
     // clients, the page's own data fetch, the unit tests — gets the JSON read-model.
     if (wantsHtml(req)) return sendHtml(res, 200, DASHBOARD_HTML);
-    return sendJson(res, 200, await deps.loadDashboard());
+    // The read-model carries the write-capability flag so the UI hides the add-repo form
+    // when writes are off (and a token-less reader never sees an input it can't use).
+    return sendJson(res, 200, { ...(await deps.loadDashboard()), writesEnabled });
   }
   const issue = path.match(/^\/repos\/([^/]+)$/);
   if (method === 'GET' && issue?.[1]) {
@@ -70,6 +88,27 @@ async function postRepos(
   if (result.added) return sendJson(res, 200, { added: true, repo: result.repo });
   // A typed reason (e.g. already-watched / unknown-forge), never a 500 stacktrace.
   sendJson(res, 400, { added: false, reason: result.reason });
+}
+
+/**
+ * Validate the bearer token on a write request. Returns undefined on success, or the
+ * status+message to reject with: 401 when no/!bearer Authorization header is present,
+ * 403 when a token is present but doesn't match. The comparison hashes both sides to a
+ * fixed-length digest first so timingSafeEqual gets equal-length buffers (it throws
+ * otherwise) and so token *length* never leaks through the equal-length requirement.
+ */
+function checkAuth(
+  req: IncomingMessage,
+  expected: string | undefined,
+): { status: number; error: string } | undefined {
+  const header = req.headers.authorization ?? '';
+  const match = header.match(/^Bearer (.+)$/);
+  if (!match?.[1]) return { status: 401, error: 'authentication required' };
+  if (!expected) return { status: 403, error: 'forbidden' };
+  const a = createHash('sha256').update(match[1]).digest();
+  const b = createHash('sha256').update(expected).digest();
+  if (!timingSafeEqual(a, b)) return { status: 403, error: 'forbidden' };
+  return undefined;
 }
 
 /** Accept either a JSON body `{url}` or a form-encoded `url=...`. */

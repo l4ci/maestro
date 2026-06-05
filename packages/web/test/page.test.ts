@@ -66,7 +66,8 @@ function view(): View {
   };
 }
 
-type PageWindow = Window & typeof globalThis & { render: (v: View) => void };
+type PageWindow = Window &
+  typeof globalThis & { render: (v: View) => void; refresh: () => Promise<void> };
 
 let windows: Array<{ close(): void }> = [];
 
@@ -202,6 +203,38 @@ describe('degraded states stay on the same card node', () => {
     w.render(view());
     expect(repoCards(w)).toHaveLength(2);
     expect(rows(w).length).toBeGreaterThan(0);
+  });
+});
+
+describe('add-repo form tracks the server write-capability flag (#9)', () => {
+  // Drive the page's own refresh() against a stubbed read-model. The auto-start refresh()
+  // and the 5s setInterval are parked on a never-resolving fetch (as in loadPage) so the
+  // only resolving call is the one we await here — no callback fires post-close.
+  async function refreshWith(v: View & { writesEnabled?: boolean }): Promise<PageWindow> {
+    const w = loadPage(); // fetch parked forever
+    w.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => v,
+    })) as unknown as typeof fetch;
+    await w.refresh();
+    return w;
+  }
+
+  it('hides the form by default before any refresh', () => {
+    const w = loadPage();
+    // Shipped markup is hidden by default — no flash of an unusable form on a read-only host.
+    expect(w.document.getElementById('addForm')?.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('shows the form when the read-model reports writesEnabled:true', async () => {
+    const w = await refreshWith({ ...view(), writesEnabled: true });
+    expect((w.document.getElementById('addForm') as HTMLElement).hidden).toBe(false);
+  });
+
+  it('keeps the form hidden when the read-model reports writesEnabled:false', async () => {
+    const w = await refreshWith({ ...view(), writesEnabled: false });
+    expect((w.document.getElementById('addForm') as HTMLElement).hidden).toBe(true);
   });
 });
 

@@ -475,6 +475,23 @@ Override the bind address with `MAESTRO_WEB_HOST` / `MAESTRO_WEB_PORT`. The same
 endpoint also serves the raw read-model as JSON to any non-browser client (handy
 for scripting), so `curl localhost:4000` gives you the data the page renders.
 
+**Adding repos from the dashboard is off by default.** The `GET` paths are
+read-only and always open, but `POST /repos` (the "add a repo" form) mutates your
+config and creates labels plus a bootstrap issue/PR on the forge — so it stays
+disabled unless you opt in by setting `MAESTRO_DASHBOARD_TOKEN`:
+
+```sh
+MAESTRO_DASHBOARD_TOKEN="$(openssl rand -hex 32)" node packages/web/dist/main.js
+```
+
+With no token set the write path doesn't exist (a `POST /repos` returns `404`) and
+the add-repo form is hidden. With a token set, the form appears and each add must
+carry it as `Authorization: Bearer <token>` (compared in constant time); a missing
+header is `401`, a wrong token `403`. This keeps a read-only dashboard safe to
+expose on a shared tailnet/LAN while gating the one write path behind a secret. On
+an untrusted network, still prefer binding `127.0.0.1` and fronting it with
+`tailscale serve` + ACLs.
+
 ---
 
 ## How the daemon decides what to work on

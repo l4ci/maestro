@@ -81,7 +81,8 @@ export const DASHBOARD_HTML = `<!doctype html>
   <span id="updated"></span>
 </header>
 <main>
-  <form class="add" id="addForm">
+  <form class="add" id="addForm" hidden>
+    <input id="token" name="token" type="password" placeholder="dashboard token" autocomplete="off" />
     <input id="url" name="url" placeholder="add a repo — e.g. gitlab.com/group/api" autocomplete="off" />
     <button type="submit">add</button>
   </form>
@@ -256,7 +257,11 @@ async function refresh() {
   try {
     const res = await fetch('/', { headers: { Accept: 'application/json' } });
     if (!res.ok) throw new Error('dashboard returned ' + res.status);
-    render(await res.json());
+    const view = await res.json();
+    // The add-repo form only exists when the server says writes are enabled; a read-only
+    // host (no token configured) never shows an input that would just 404 on submit.
+    el('addForm').hidden = !view.writesEnabled;
+    render(view);
     el('msg').textContent = '';
     el('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (err) {
@@ -268,15 +273,26 @@ el('addForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = e.target.querySelector('button');
   const url = el('url').value.trim();
+  const token = el('token').value.trim();
   if (!url) return;
   btn.disabled = true;
   el('msg').style.color = '#f47067';
   try {
+    // The token never leaves the browser except as the Bearer header on this write call;
+    // the server compares it in constant time and never echoes it back.
     const res = await fetch('/repos', {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        ...(token ? { Authorization: 'Bearer ' + token } : {}),
+      },
       body: new URLSearchParams({ url }).toString(),
     });
+    if (res.status === 401 || res.status === 403) {
+      el('msg').textContent =
+        res.status === 401 ? 'a dashboard token is required to add a repo' : 'token rejected';
+      return;
+    }
     const data = await res.json();
     if (data.added) {
       el('url').value = '';
