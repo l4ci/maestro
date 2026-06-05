@@ -75,9 +75,13 @@ conventions](#repo-specific-conventions)).
 
 ## The lifecycle: how a ticket becomes a merge
 
-Every ticket moves through the same set of stages. The stage is stored as a label
-on the ticket (`maestro::in-progress`, `maestro::in-review`, and so on), so you
-can see it at a glance on your board.
+Every ticket moves through the same set of stages. The stage is visible as a label
+on the ticket (`maestro:in-progress`, `maestro:in-review`, and so on — on GitLab
+they appear scoped, as `maestro::in-progress`), so you can see it at a glance on
+your board. This is the default single-agent flow; a
+repo can opt into a longer pipeline with separate define, plan, implement, and
+review agents — see [Per-role prompts and the stage
+pipeline](#per-role-prompts-and-the-stage-pipeline-29) below.
 
 ```mermaid
 stateDiagram-v2
@@ -156,8 +160,8 @@ sequenceDiagram
 ```
 
 The only thing the daemon ever hears back from Claude is a tiny status:
-`done`, `needs_input`, or `in_progress`. Everything else it learns by reading the
-forge on the next tick.
+`done`, `needs_input`, or `in_progress` (a review session adds its pass/fail
+verdict). Everything else it learns by reading the forge on the next tick.
 
 ---
 
@@ -327,16 +331,69 @@ Produce the implementation plan and the checkbox todo.
 
 ## role: implement
 Execute the plan, one atomic commit per step.
+
+## role: review
+Judge the diff against the plan. Block on real problems, not taste.
 ```
 
-Declaring roles opts the repo into the staged pipeline: new issues enter **backlog**,
-where the define agent drafts acceptance criteria as an issue comment. A human approves
-by applying the `maestro:todo` label (or replying `/maestro approve`) — applying the
-label at creation skips definition entirely. The plan agent then produces the plan, and
-only after that does maestro create the branch and draft MR (which carries the plan from
-birth). Implementation proceeds as before. A repo **without** role sections keeps the
-original single-agent flow unchanged. The `maestro:queued` label marks any issue waiting
-for a free concurrency slot.
+Text above the first role heading is shared by every agent. A repo **without**
+role sections keeps the original single-agent flow unchanged — roles are opt-in
+per repo.
+
+Declaring roles replaces the single generalist agent with a staged pipeline,
+where each stage runs a cold session with only its own instructions:
+
+```mermaid
+flowchart LR
+    B["backlog<br/>define agent drafts<br/>acceptance criteria"] -->|"human applies maestro:todo<br/>or replies /maestro approve"| T["todo<br/>plan agent writes<br/>the plan"]
+    T -->|"branch + draft MR,<br/>plan from birth"| I["in progress<br/>implement agent,<br/>atomic commits"]
+    I -->|"done, proof posted"| R{"internal review:<br/>a fresh agent<br/>judges the diff"}
+    R -->|pass| H["handoff —<br/>human review"]
+    R -->|"fail, round n"| I
+    R -->|"bounce cap hit"| BL["blocked —<br/>over to you"]
+```
+
+- **Backlog** — new issues land here. The define agent refines the request into
+  acceptance criteria and posts them as an issue comment. Then it waits for a
+  human: apply the `maestro:todo` label (the daemon never sets that label itself,
+  so its presence proves a person signed off) or reply `/maestro approve`.
+  Labelling the issue `maestro:todo` at creation skips definition entirely.
+- **Todo** — the plan agent writes the implementation plan. Only after that does
+  Maestro create the branch and draft MR, so the MR carries the plan from its
+  first second.
+- **In progress** — implementation, as before. But when the agent says "done",
+  you are not pinged yet.
+- **Internal review** — Maestro posts the proof, then starts a *separate* cold
+  session whose only job is to judge the diff. Pass → the normal handoff: you're
+  assigned, the MR is marked ready. Fail → the findings land as an issue comment
+  ("round 1", "round 2", …) and the implement agent picks them up next tick.
+  After `review.max_rounds` consecutive fails (default 3, configurable in the
+  front matter), Maestro stops bouncing and flips the ticket to blocked with a
+  summary — it never auto-merges and never silently drops work. Any comment from
+  you resets the round count and resumes the loop.
+
+The labels you'll see on a roled repo, in board order:
+
+| Label | Meaning | Who sets it |
+|---|---|---|
+| `maestro:backlog` | being defined | daemon |
+| `maestro:todo` | definition approved, awaiting plan | **a human** — this is the approval gate |
+| `maestro:in-progress` | plan landed, implementation underway | daemon |
+| `maestro:in-review` | proof posted; internal then human review | daemon |
+| `maestro:blocked` | a question (or the bounce cap) needs a human | daemon |
+| `maestro:queued` | wants a slot, none free | daemon |
+
+`maestro:queued` is a capacity marker, not a stage: it can sit alongside any of
+the others, means only "waiting for a free concurrency slot", and is retracted
+when work actually starts (or when you unassign the bot). On GitLab the labels
+are scoped (`maestro::backlog`), so they exclude each other automatically.
+
+One design note worth knowing: in a roled repo the labels are *projections* for
+your board, not the daemon's memory. The stage is re-derived every tick from
+artifacts — does an MR exist, is it still a draft, was the AC draft approved —
+so a crashed daemon, a stripped label, or an unblocked ticket all recover to
+exactly the right place. The one exception is `maestro:todo`, which is itself an
+artifact: a human put it there.
 
 ## A walkthrough of the default `WORKFLOW.md`
 
@@ -415,14 +472,14 @@ commits + diff, and the repo conventions below.
 1. Orient — read the issue, the MR description, recent commits + diff, and the
    conventions in this file.
 2. First session only — gather context. If the task is ambiguous, post a comment
-   with questions, set maestro::blocked, and stop. Otherwise, write a plan +
+   with questions, set maestro:blocked, and stop. Otherwise, write a plan +
    checkbox todo list into the MR description.
 3. Work the next unchecked item — one atomic commit per meaningful step.
 4. After each step — tick the box in the MR description; post a short progress
    comment if notable.
 5. Done — all boxes checked + definition-of-done met → emit done.
 6. Blocked anytime — need a human decision → comment the question, label
-   maestro::blocked, stop.
+   maestro:blocked, stop.
 
 ## Repo-specific conventions
 
@@ -537,10 +594,11 @@ flowchart LR
     S -->|no| Wait["Queued"]
 ```
 
-If more tickets are ready than you have slots, the extras simply queue. Nothing
-breaks — throughput is just capped. The right number of slots depends on your
-machine's RAM, since each active worker runs Claude plus possibly a browser for
-proof. On a 4 GB box, 1–2 is sensible.
+If more tickets are ready than you have slots, the extras simply queue — and get
+the `maestro:queued` label, so the queue is visible on the forge instead of
+looking like silence. Nothing breaks — throughput is just capped. The right
+number of slots depends on your machine's RAM, since each active worker runs
+Claude plus possibly a browser for proof. On a 4 GB box, 1–2 is sensible.
 
 To scale up, you don't add daemons — you add **machines**, each running its own
 single daemon watching a few repos. They never coordinate with each other; the
