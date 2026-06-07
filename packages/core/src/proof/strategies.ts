@@ -32,12 +32,13 @@ export interface PlaywrightTuning {
   sleepMs?: number; // delay between health probes (default 500)
 }
 
-/** Whitespace-split a WORKFLOW command string into cmd + args. Dumb by design — no
- *  shell, no quotes (documented limitation); keeps it off a shell interpreter. */
-export function parseCommand(command: string): { cmd: string; args: string[] } {
-  const parts = command.trim().split(/\s+/);
-  const cmd = parts[0] ?? '';
-  return { cmd, args: parts.slice(1) };
+/** Run a WORKFLOW command string through the host shell. These commands are
+ *  operator-authored and already run unsandboxed on the host (§13), so `sh -c` adds
+ *  no new trust — it adds the shell features real workflows need (`&&`, quotes, env
+ *  vars). The previous whitespace-split fed `npm install && npm test` to npm as
+ *  literal args (`Invalid tag name "&&"`). */
+export function shellCommand(command: string): { cmd: string; args: string[] } {
+  return { cmd: 'sh', args: ['-c', command.trim()] };
 }
 
 function cap(s: string): { text: string; truncated: boolean } {
@@ -50,7 +51,7 @@ function fenced(title: string, body: string): string {
 }
 
 async function probeHealthy(exec: Exec, healthCheck: string, cwd: string): Promise<boolean> {
-  const { cmd, args } = parseCommand(healthCheck);
+  const { cmd, args } = shellCommand(healthCheck);
   const r = await exec.run(cmd, args, { cwd });
   return r.code === 0;
 }
@@ -84,7 +85,7 @@ const testOutputStrategy = {
     if (!input.workflowProof.command) {
       throw new ProofConfigError("proof.type 'test-output' requires proof.command");
     }
-    const { cmd, args } = parseCommand(input.workflowProof.command);
+    const { cmd, args } = shellCommand(input.workflowProof.command);
     const r = await input.exec.run(cmd, args, { cwd: input.workspaceDir });
     const ok = r.code === 0;
     const { text, truncated } = cap(`${r.stdout}\n${r.stderr}`);
@@ -133,10 +134,10 @@ class PlaywrightStrategy {
             summary: 'instance not running and no start_command configured',
           };
         }
-        const sc = parseCommand(env.start_command);
+        const sc = shellCommand(env.start_command);
         started = input.exec.spawn(sc.cmd, sc.args, { cwd }); // long-lived; we own teardown
         if (env.seed_command) {
-          const seed = parseCommand(env.seed_command);
+          const seed = shellCommand(env.seed_command);
           await input.exec.run(seed.cmd, seed.args, { cwd });
         }
         const healthy = await this.#pollHealth(input.exec, env.health_check, cwd);
@@ -149,7 +150,7 @@ class PlaywrightStrategy {
         }
       }
 
-      const pc = parseCommand(input.workflowProof.command);
+      const pc = shellCommand(input.workflowProof.command);
       const r = await input.exec.run(pc.cmd, pc.args, { cwd });
       const ok = r.code === 0;
       const { text, truncated } = cap(`${r.stdout}\n${r.stderr}`);
