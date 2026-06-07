@@ -18,6 +18,7 @@ import type {
   MergeStrategy,
   RepoRef,
 } from '../../contracts/index.js';
+import { MAESTRO_COMMAND_RE } from '../../contracts/index.js';
 import { ForgeCli } from '../cli.js';
 import { ForgeError } from '../errors.js';
 import { type ForgePrimitives, assembleSnapshot } from '../snapshot.js';
@@ -66,6 +67,7 @@ interface RawDiscussion {
     id: number | string;
     author: RawUser;
     created_at: string;
+    body?: string;
     resolvable?: boolean;
     resolved?: boolean;
     system?: boolean;
@@ -371,8 +373,11 @@ export class GitlabAdapter implements ForgeAdapter {
     return normalizeApprovals(raw);
   }
 
-  /** Newest unresolved non-bot blocking discussion timestamp (§0.3 edge-trigger half).
-   *  The shared algorithm compares this against the last bot push (snapshot.ts). */
+  /** Newest unresolved blocking discussion timestamp (§0.3 edge-trigger half). A non-bot
+   *  resolvable thread is the normal signal. The shared-account escape hatch (bot account
+   *  == operator account): a bot-authored note whose body STARTS with `/maestro` counts
+   *  too — resolvable not required, since plain MR notes never are; the edge still clears
+   *  via the last-bot-push comparison in the shared algorithm (snapshot.ts). */
   async #blockingThreadAt(repo: RepoRef, mrIid: number): Promise<string | undefined> {
     const pid = this.#pid(repo);
     const bot = this.#c.botUser;
@@ -387,9 +392,10 @@ export class GitlabAdapter implements ForgeAdapter {
         (n): n is RawDiscussion['notes'][number] =>
           !!n &&
           !n.system &&
-          n.resolvable === true &&
           n.resolved !== true &&
-          n.author.username !== bot,
+          (n.author.username !== bot
+            ? n.resolvable === true
+            : MAESTRO_COMMAND_RE.test(n.body ?? '')),
       )
       .map((n) => n.created_at)
       .sort()

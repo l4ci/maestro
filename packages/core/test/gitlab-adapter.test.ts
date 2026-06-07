@@ -448,7 +448,14 @@ describe('Slice 13 — ApprovalState normalization', () => {
 
 // --- Slice 14: changesRequested edge-trigger ------------------------------
 
-function wireChanges(fake: FakeExec, opts: { discussionAt?: string; botCommitAt?: string }) {
+function wireChanges(
+  fake: FakeExec,
+  opts: {
+    discussionAt?: string;
+    botCommitAt?: string;
+    notes?: Record<string, unknown>[]; // explicit discussion first-notes (override discussionAt)
+  },
+) {
   fake.onApi('GET', '/issues/42/resource_label_events', []);
   fake.onApi('GET', '/issues/42/related_merge_requests', [rawMr()]);
   fake.onApi('GET', '/issues/42/notes', []);
@@ -467,25 +474,23 @@ function wireChanges(fake: FakeExec, opts: { discussionAt?: string; botCommitAt?
         ]
       : [],
   );
+  const notes =
+    opts.notes ??
+    (opts.discussionAt
+      ? [
+          {
+            id: 1,
+            author: user(5, 'maintainer'),
+            created_at: opts.discussionAt,
+            resolvable: true,
+            resolved: false,
+          },
+        ]
+      : []);
   fake.onApi(
     'GET',
     '/merge_requests/7/discussions',
-    opts.discussionAt
-      ? [
-          {
-            id: 'd1',
-            notes: [
-              {
-                id: 1,
-                author: user(5, 'maintainer'),
-                created_at: opts.discussionAt,
-                resolvable: true,
-                resolved: false,
-              },
-            ],
-          },
-        ]
-      : [],
+    notes.map((n, i) => ({ id: `d${i + 1}`, notes: [n] })),
   );
   fake.onApi('GET', '/issues/42', rawIssue());
 }
@@ -512,6 +517,76 @@ describe('Slice 14 — changesRequested edge-trigger (§0.3)', () => {
   it('no blocking discussion → false', async () => {
     const { a, fake } = mk();
     wireChanges(fake, { botCommitAt: '2026-06-01T00:00:00Z' });
+    expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
+  });
+
+  // Shared-account escape hatch: bot account == operator account, so the operator's
+  // MR feedback arrives bot-authored — a body-start /maestro note must count.
+  it('a bot-authored body-start /maestro note AFTER last bot push → true', async () => {
+    const { a, fake } = mk();
+    wireChanges(fake, {
+      botCommitAt: '2026-06-01T00:00:00Z',
+      notes: [
+        {
+          id: 1,
+          author: user(1, 'maestro-bot'),
+          created_at: '2026-06-02T00:00:00Z',
+          body: '/maestro make the badges greener',
+          resolvable: false, // plain MR notes are never resolvable
+        },
+      ],
+    });
+    expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(true);
+  });
+
+  it('a bot-authored note WITHOUT the /maestro prefix stays invisible', async () => {
+    const { a, fake } = mk();
+    wireChanges(fake, {
+      botCommitAt: '2026-06-01T00:00:00Z',
+      notes: [
+        {
+          id: 1,
+          author: user(1, 'maestro-bot'),
+          created_at: '2026-06-02T00:00:00Z',
+          body: '### 🎼 Plan\n\n/maestro mid-body must not count',
+          resolvable: false,
+        },
+      ],
+    });
+    expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
+  });
+
+  it('a /maestro note OLDER than the last bot push is already addressed → false', async () => {
+    const { a, fake } = mk();
+    wireChanges(fake, {
+      botCommitAt: '2026-06-03T00:00:00Z',
+      notes: [
+        {
+          id: 1,
+          author: user(1, 'maestro-bot'),
+          created_at: '2026-06-02T00:00:00Z',
+          body: '/maestro make the badges greener',
+          resolvable: false,
+        },
+      ],
+    });
+    expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
+  });
+
+  it('a non-bot plain (non-resolvable) comment still does not block', async () => {
+    const { a, fake } = mk();
+    wireChanges(fake, {
+      botCommitAt: '2026-06-01T00:00:00Z',
+      notes: [
+        {
+          id: 1,
+          author: user(5, 'maintainer'),
+          created_at: '2026-06-02T00:00:00Z',
+          body: 'nice work so far',
+          resolvable: false,
+        },
+      ],
+    });
     expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
   });
 });

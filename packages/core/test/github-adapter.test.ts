@@ -116,6 +116,7 @@ function wireSnapshot(fake: FakeExec, opts: { pr?: boolean; closed?: boolean } =
   ]);
   if (opts.pr) {
     fake.onApi('GET', '/pulls/7/reviews', []);
+    fake.onApi('GET', '/issues/7/comments', []); // PR-conversation read (shared-account /maestro)
     fake.onApi('GET', '/pulls', [rawPr()]);
   } else {
     fake.onApi('GET', '/pulls', []);
@@ -472,6 +473,7 @@ describe('Slice 13 — ApprovalState from PR reviews', () => {
         submitted_at: '2026-06-02T00:00:00Z',
       },
     ]);
+    fake.onApi('GET', '/issues/7/comments', []);
     fake.onApi('GET', '/pulls', [rawPr()]);
     fake.onApi('GET', '/issues/42', rawIssue());
     const snap = await a.getSnapshot(repo, 42);
@@ -504,6 +506,7 @@ describe('Slice 13 — ApprovalState from PR reviews', () => {
       },
     ]);
     fake.onApi('GET', '/pulls/7/commits', []);
+    fake.onApi('GET', '/issues/7/comments', []);
     fake.onApi('GET', '/pulls', [rawPr()]);
     fake.onApi('GET', '/issues/42', rawIssue());
     expect((await a.getSnapshot(repo, 42)).mr?.approvals.approved).toBe(false);
@@ -512,8 +515,12 @@ describe('Slice 13 — ApprovalState from PR reviews', () => {
 
 // --- Slice 14: changesRequested edge-trigger ------------------------------
 
-function wireReviews(fake: FakeExec, opts: { reviewAt?: string; botCommitAt?: string }) {
+function wireReviews(
+  fake: FakeExec,
+  opts: { reviewAt?: string; botCommitAt?: string; prComments?: Record<string, unknown>[] },
+) {
   fake.onApi('GET', '/issues/42/timeline', []);
+  fake.onApi('GET', '/issues/7/comments', opts.prComments ?? []);
   fake.onApi('GET', '/issues/42/comments', []);
   fake.onApi(
     'GET',
@@ -564,6 +571,74 @@ describe('Slice 14 — changesRequested edge-trigger (§0.3)', () => {
     const { a, fake } = mk();
     wireReviews(fake, { botCommitAt: '2026-06-01T00:00:00Z' });
     expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
+  });
+
+  // Shared-account escape hatch: the bot/operator account cannot file a
+  // CHANGES_REQUESTED review on its own PR — a body-start /maestro PR-conversation
+  // comment counts as the blocking signal instead.
+  it('a bot-authored body-start /maestro PR comment AFTER last bot push → true', async () => {
+    const { a, fake } = mk();
+    wireReviews(fake, {
+      botCommitAt: '2026-06-01T00:00:00Z',
+      prComments: [
+        {
+          id: 31,
+          user: user(1, 'maestro-bot'),
+          body: '/maestro tighten the error handling',
+          created_at: '2026-06-02T00:00:00Z',
+        },
+      ],
+    });
+    expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(true);
+  });
+
+  it('a bot-authored PR comment without the body-start prefix stays invisible', async () => {
+    const { a, fake } = mk();
+    wireReviews(fake, {
+      botCommitAt: '2026-06-01T00:00:00Z',
+      prComments: [
+        {
+          id: 31,
+          user: user(1, 'maestro-bot'),
+          body: '### 🎼 Plan\n\n/maestro mid-body must not count',
+          created_at: '2026-06-02T00:00:00Z',
+        },
+      ],
+    });
+    expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
+  });
+
+  it('a /maestro PR comment OLDER than the last bot push is already addressed → false', async () => {
+    const { a, fake } = mk();
+    wireReviews(fake, {
+      botCommitAt: '2026-06-03T00:00:00Z',
+      prComments: [
+        {
+          id: 31,
+          user: user(1, 'maestro-bot'),
+          body: '/maestro tighten the error handling',
+          created_at: '2026-06-02T00:00:00Z',
+        },
+      ],
+    });
+    expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
+  });
+
+  it('the newest of review vs /maestro comment wins the blocking timestamp', async () => {
+    const { a, fake } = mk();
+    wireReviews(fake, {
+      botCommitAt: '2026-06-02T12:00:00Z',
+      reviewAt: '2026-06-01T00:00:00Z', // already addressed by the push…
+      prComments: [
+        {
+          id: 31,
+          user: user(1, 'maestro-bot'),
+          body: '/maestro one more thing',
+          created_at: '2026-06-03T00:00:00Z', // …but the newer command is not
+        },
+      ],
+    });
+    expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(true);
   });
 });
 

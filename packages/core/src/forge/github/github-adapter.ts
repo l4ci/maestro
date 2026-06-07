@@ -25,6 +25,7 @@ import type {
   MergeStrategy,
   RepoRef,
 } from '../../contracts/index.js';
+import { MAESTRO_COMMAND_RE } from '../../contracts/index.js';
 import { labelNames } from '../../contracts/labels.js';
 import { TtlMemoizer } from '../../utils/ttl-memo.js';
 import { ForgeCli } from '../cli.js';
@@ -336,9 +337,35 @@ export class GithubAdapter implements ForgeAdapter {
         return open.map((p) => normalizeMergeRequest(p));
       },
       approvalBase: (mrIid) => this.#approvalBase(repo, mrIid),
-      blockingThreadAt: async (mrIid) => changesRequestedSince(await this.#reviews(repo, mrIid)),
+      blockingThreadAt: async (mrIid) => {
+        const reviewAt = changesRequestedSince(await this.#reviews(repo, mrIid));
+        const commandAt = await this.#maestroCommandAt(repo, mrIid);
+        return [reviewAt, commandAt]
+          .filter((t): t is string => t !== undefined)
+          .sort()
+          .at(-1);
+      },
       lastBotPushAt: (mr) => this.#lastBotPushAt(repo, mr.iid),
     };
+  }
+
+  /** Shared-account escape hatch (mirror of the GitLab adapter's): the bot/operator
+   *  account cannot file a CHANGES_REQUESTED review on its own PR, so a bot-authored
+   *  PR-conversation comment whose body STARTS with `/maestro` counts as the blocking
+   *  signal instead. Newest such timestamp; the edge still clears via the
+   *  last-bot-push comparison in the shared algorithm (snapshot.ts). */
+  async #maestroCommandAt(repo: RepoRef, prNumber: number): Promise<string | undefined> {
+    const bot = this.#c.botUser;
+    const comments =
+      (await this.#c.api<RawComment[]>('GET', `${this.#base(repo)}/issues/${prNumber}/comments`, {
+        query: { per_page: 100 },
+        paginate: true,
+      })) ?? [];
+    return comments
+      .filter((c) => c.user?.login === bot && MAESTRO_COMMAND_RE.test(c.body))
+      .map((c) => c.created_at)
+      .sort()
+      .at(-1);
   }
 
   /** PR reviews for a PR (paginated). Read for both the approval base and the blocking
