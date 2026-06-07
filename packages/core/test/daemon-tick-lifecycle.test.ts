@@ -9,6 +9,7 @@ import {
   recordingAdapter,
   repo,
   scriptedRunner,
+  silentLogger,
   user,
 } from './helpers/daemon.js';
 
@@ -228,6 +229,38 @@ describe('A5 — non-acting intents are pure no-ops', () => {
     await tickRepo(repo, ctx);
     expect(adapter.labelOps).toHaveLength(1);
     expect(runnerSpy.inputs).toHaveLength(0);
+  });
+});
+
+// A5b — the intent log: acting intents leave one journal line; recurring no-ops stay
+// quiet. Previously a fired apply-changes-requested was invisible in the journal —
+// label flips and agent spawns could only be verified on the forge.
+describe('A5b — acting intents log one `reconcile intent` line', () => {
+  it('an acting intent logs kind + repo + iid', async () => {
+    const adapter = recordingAdapter({ snapshot: makeSnapshot() }); // new → start-new
+    const log = silentLogger();
+    const { ctx } = buildContext({ adapter, log });
+
+    await tickRepo(repo, ctx);
+
+    expect(log.info).toHaveBeenCalledWith(
+      'reconcile intent',
+      expect.objectContaining({ intent: 'start-new', iid: 42 }),
+    );
+  });
+
+  it('recurring no-op intents stay quiet (no per-tick flood)', async () => {
+    const snap = makeSnapshot({
+      issue: { labels: [labels.inReview] },
+      mr: { approvals: { approved: false, approvedBy: [], changesRequested: false } },
+    }); // → poll-review every tick
+    const adapter = recordingAdapter({ snapshot: snap });
+    const log = silentLogger();
+    const { ctx } = buildContext({ adapter, log });
+
+    await tickRepo(repo, ctx);
+
+    expect(log.info).not.toHaveBeenCalledWith('reconcile intent', expect.anything());
   });
 });
 

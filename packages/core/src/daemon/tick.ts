@@ -189,6 +189,12 @@ function beginIntent(
     }
   }
 
+  // One info line per ACTING intent, so the journal tells the story (label flips and
+  // agent spawns were previously only visible on the forge). The recurring no-op kinds
+  // (poll-review / blocked-wait / none / skip-untrusted / cleanup) stay quiet — they
+  // fire every tick and would flood the log.
+  if (!QUIET_INTENTS.has(intent.kind)) ctx.log.info('reconcile intent', meta);
+
   switch (intent.kind) {
     case 'start-new': {
       const release = ctx.slots.acquire(key);
@@ -285,6 +291,15 @@ function beginIntent(
       return { active: false };
   }
 }
+
+/** The intents that recur every tick without acting — excluded from the intent log. */
+const QUIET_INTENTS: ReadonlySet<Intent['kind']> = new Set([
+  'poll-review',
+  'blocked-wait',
+  'none',
+  'skip-untrusted',
+  'cleanup',
+]);
 
 /** The intents that launch a Claude agent — the ones a rate-limit pause gates (#47). */
 const SPAWNING_INTENTS: ReadonlySet<Intent['kind']> = new Set([
