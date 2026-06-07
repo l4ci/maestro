@@ -38,6 +38,13 @@ export interface AgentResult {
   rateLimit?: { resetAt?: number };
 }
 
+/** Body-start `/maestro` — the only comment shape provably typed by a human when the
+ *  bot account IS the operator account (shared-account convention): the agent cannot
+ *  touch the forge (§13.1) and every daemon comment template leads with a heading.
+ *  Anchored, deliberately NOT multiline: agent-returned text rides mid-body inside
+ *  daemon comments, so a smuggled `/maestro` line must never count. */
+export const MAESTRO_COMMAND_RE = /^\/maestro\b/;
+
 /** Idempotency marker the daemon embeds in the one-time plan-summary issue comment,
  *  so a resumed/re-run tick never double-posts it (#48). */
 export const PLAN_COMMENT_SENTINEL = '<!-- maestro:plan -->';

@@ -118,7 +118,12 @@ In words:
   matters: you're pinged last, when there's actually something to look at.
 - **In review** — Maestro waits. If you approve, it merges using that repo's own
   git rules and the ticket auto-closes. If you request changes, it flips back to
-  in-progress and feeds your feedback to the agent.
+  in-progress and feeds your feedback to the agent. Three channels count as
+  "changes requested": a formal review (GitHub "Request changes" / an unresolved
+  GitLab review thread), an MR/PR comment starting with `/maestro` (the
+  shared-account escape hatch — the bot account can't review its own MR), and
+  an issue comment starting with `/maestro` (any author — the explicit prefix is
+  what keeps ordinary review chatter from spinning up agents).
 - **Blocked** — The agent hit something it can't decide on its own. It posts the
   question and waits for a human. No slot is consumed while it waits.
   Maestro recognises your answer by its author: any reply from an account other

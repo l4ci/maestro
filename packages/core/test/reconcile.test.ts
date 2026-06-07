@@ -333,6 +333,77 @@ describe('In-review row (§7)', () => {
     );
     expect(out.kind).toBe('merge');
   });
+
+  // A15 — the issue-thread rework edge: explicit body-start /maestro feedback during
+  // review, the only rework channel a shared account (bot == operator) has.
+  const reviewComment = (author: string, body: string, createdAt: string): Comment => ({
+    id: `c-${createdAt}`,
+    author: user(author),
+    body,
+    createdAt,
+  });
+
+  it('A15 a body-start /maestro issue comment newer than the newest bot comment → rework', () => {
+    const cmd = reviewComment(BOT, '/maestro Must green, Should amber', '2026-06-05T12:00:00Z');
+    const out = reconcile(
+      buildInput({
+        snapshot: snapshot({
+          issue: inReviewIssue(),
+          mr: mr(),
+          recentComments: [cmd, reviewComment(BOT, '### ⚠️ Proof', '2026-06-05T11:00:00Z')],
+        }),
+      }),
+    );
+    expect(out.kind).toBe('apply-changes-requested');
+    if (out.kind === 'apply-changes-requested') {
+      expect(out.feedback.reviewComments).toEqual([cmd]);
+    }
+  });
+
+  it('A15b plain review chatter (any author, no /maestro) does NOT spin a rework agent', () => {
+    const out = reconcile(
+      buildInput({
+        snapshot: snapshot({
+          issue: inReviewIssue(),
+          mr: mr(),
+          recentComments: [
+            reviewComment('reviewer', 'colors look too strong', '2026-06-05T12:00:00Z'),
+            reviewComment(BOT, '### ⚠️ Proof', '2026-06-05T11:00:00Z'),
+          ],
+        }),
+      }),
+    );
+    expect(out.kind).toBe('poll-review');
+  });
+
+  it('A15c /maestro feedback older than the newest bot comment is already answered → poll', () => {
+    const out = reconcile(
+      buildInput({
+        snapshot: snapshot({
+          issue: inReviewIssue(),
+          mr: mr(),
+          recentComments: [
+            reviewComment(BOT, '### ⚠️ Proof (rework)', '2026-06-05T13:00:00Z'),
+            reviewComment(BOT, '/maestro Must green', '2026-06-05T12:00:00Z'),
+          ],
+        }),
+      }),
+    );
+    expect(out.kind).toBe('poll-review');
+  });
+
+  it('A15d no bot comment at all → fail-safe poll (no marker, no edge)', () => {
+    const out = reconcile(
+      buildInput({
+        snapshot: snapshot({
+          issue: inReviewIssue(),
+          mr: mr(),
+          recentComments: [reviewComment(BOT, '/maestro Must green', '2026-06-05T12:00:00Z')],
+        }),
+      }),
+    );
+    expect(out.kind).toBe('poll-review');
+  });
 });
 
 // --- A14 Blocked ----------------------------------------------------------
@@ -669,6 +740,19 @@ describe('P — #29 stage pipeline (only when the WORKFLOW declares roles)', () 
     expect(ready({}).kind).toBe('poll-review');
     expect(ready({ approved: true }).kind).toBe('merge');
     expect(ready({ changesRequested: true }).kind).toBe('apply-changes-requested');
+  });
+
+  it('P7b /maestro issue feedback during review:human → apply-changes-requested', () => {
+    const cmd = comment(BOT, '/maestro tweak the badge colors', '2026-06-05T12:00:00Z');
+    const snap = snapshot({
+      mr: mr({ isDraft: false }),
+      recentComments: [cmd, comment(BOT, '### ⚠️ Proof', '2026-06-05T11:00:00Z')],
+    });
+    const out = reconcile(pin({ snapshot: snap }));
+    expect(out.kind).toBe('apply-changes-requested');
+    if (out.kind === 'apply-changes-requested') {
+      expect(out.feedback.reviewComments).toEqual([cmd]);
+    }
   });
 
   it('P8 blocked is a modifier: reply resumes the STAGE role, not implementation', () => {

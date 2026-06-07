@@ -104,16 +104,27 @@ describe('Slice 2 — diff-summary', () => {
 // --- Slice 3: test-output --------------------------------------------------
 
 describe('Slice 3 — test-output', () => {
-  it('runs proof.command with cwd; ok reflects exit; long output truncated', async () => {
+  it('runs proof.command through the shell with cwd; ok reflects exit; long output truncated', async () => {
     const big = 'x'.repeat(9000);
     const exec = new ProofExec(() => ({ code: 0, stdout: big, stderr: '' }));
     const r = await generateProof(
       input({ workflowProof: { type: 'test-output', command: 'npm test' }, exec }),
     );
-    expect(exec.runCalls[0]).toMatchObject({ cmd: 'npm', args: ['test'] });
+    expect(exec.runCalls[0]).toMatchObject({ cmd: 'sh', args: ['-c', 'npm test'] });
     expect(exec.runCalls[0]?.opts?.cwd).toBe('/ws/group__repo/42');
     expect(r.ok).toBe(true);
     expect(r.summary).toContain('truncated');
+  });
+
+  it('a compound command (&&) reaches the shell verbatim, not split into argv', async () => {
+    // Regression: `npm install && npm test` was whitespace-split and fed to npm as
+    // literal args — npm died with `Invalid tag name "&&"` before any test ran.
+    const exec = new ProofExec(() => ({ code: 0, stdout: 'ok', stderr: '' }));
+    const r = await generateProof(
+      input({ workflowProof: { type: 'test-output', command: 'npm install && npm test' }, exec }),
+    );
+    expect(exec.runCalls[0]).toMatchObject({ cmd: 'sh', args: ['-c', 'npm install && npm test'] });
+    expect(r.ok).toBe(true);
   });
 
   it('missing command → ProofConfigError before any Exec call', async () => {
@@ -137,9 +148,9 @@ const pwEnv = {
 describe('Slice 4 — playwright', () => {
   it('a. already-running: skips start_command, runs proof.command', async () => {
     // curl(health) returns 0 immediately; playwright test returns 0
-    const exec = new ProofExec((cmd) => ({
+    const exec = new ProofExec((_cmd, args) => ({
       code: 0,
-      stdout: cmd === 'curl' ? 'ok' : 'passed',
+      stdout: args[1]?.startsWith('curl') ? 'ok' : 'passed',
       stderr: '',
     }));
     const r = await generateProof(
@@ -156,8 +167,8 @@ describe('Slice 4 — playwright', () => {
 
   it('b. cold-boot: boots, seeds, polls health, then runs; c. tears down after', async () => {
     let healthProbes = 0;
-    const exec = new ProofExec((cmd) => {
-      if (cmd === 'curl') {
+    const exec = new ProofExec((_cmd, args) => {
+      if (args[1]?.startsWith('curl')) {
         healthProbes++;
         return { code: healthProbes >= 3 ? 0 : 1, stdout: '', stderr: '' }; // healthy on 3rd probe
       }
@@ -171,15 +182,15 @@ describe('Slice 4 — playwright', () => {
       }),
       fastPw,
     );
-    expect(exec.spawnCalls.map((c) => c.cmd)).toContain('npm'); // start_command spawned
-    expect(exec.runCalls.some((c) => c.args.includes('db:seed'))).toBe(true); // seeded
+    expect(exec.spawnCalls.map((c) => c.args[1])).toContain('npm run dev'); // start_command spawned
+    expect(exec.runCalls.some((c) => c.args.some((a) => a.includes('db:seed')))).toBe(true); // seeded
     expect(r.ok).toBe(true);
     expect(exec.killCount).toBe(1); // teardown of what we started
   });
 
   it('c. teardown happens even when proof.command fails', async () => {
-    const exec = new ProofExec((cmd) => {
-      if (cmd === 'curl') return { code: 1, stdout: '', stderr: '' }; // never healthy via probe...
+    const exec = new ProofExec((_cmd, args) => {
+      if (args[1]?.startsWith('curl')) return { code: 1, stdout: '', stderr: '' }; // never healthy via probe...
       return { code: 0, stdout: '', stderr: '' };
     });
     // health never passes → bounded give-up, but a start was spawned → must tear down
