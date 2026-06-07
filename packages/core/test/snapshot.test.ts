@@ -174,6 +174,45 @@ describe('findMaestroMr', () => {
     expect(lastBotPushAt).not.toHaveBeenCalled(); // hot-path optimization preserved
     expect(found?.activityAt).toBeUndefined(); // push never read → no cheap MR signal
   });
+
+  // The issue-thread /maestro signal folds into the SAME edge as the MR thread, so the
+  // shared-account rework request self-clears on a bot push (the loop fix).
+  it('an issue /maestro command with no MR thread blocks, and triggers the push read', async () => {
+    const lastBotPushAt = vi.fn(async () => undefined);
+    const found = await findMaestroMr(
+      42,
+      fakePrimitives({ openMergeRequests: async () => [mr()], lastBotPushAt }),
+      '2026-01-05', // issueBlockingAt — a standing /maestro command
+    );
+    expect(found?.mr.approvals.changesRequested).toBe(true);
+    expect(lastBotPushAt).toHaveBeenCalled(); // no longer short-circuited away
+  });
+
+  it('an issue /maestro command is RETIRED by a bot push that post-dates it', async () => {
+    const found = await findMaestroMr(
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr()],
+        blockingThreadAt: async () => undefined,
+        lastBotPushAt: async () => '2026-01-06', // agent pushed after the command
+      }),
+      '2026-01-05',
+    );
+    expect(found?.mr.approvals.changesRequested).toBe(false); // addressed → no loop
+  });
+
+  it('takes the later of an MR thread and an issue command as the blocking edge', async () => {
+    const found = await findMaestroMr(
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr()],
+        blockingThreadAt: async () => '2026-01-03',
+        lastBotPushAt: async () => '2026-01-04', // clears the thread…
+      }),
+      '2026-01-05', // …but the newer issue command still stands
+    );
+    expect(found?.mr.approvals.changesRequested).toBe(true);
+  });
 });
 
 describe('assembleSnapshot', () => {
@@ -220,5 +259,53 @@ describe('assembleSnapshot', () => {
     expect(withMr.mr?.iid).toBe(7);
     const without = await assembleSnapshot(repo, 42, fakePrimitives(), 50);
     expect(without.mr).toBeUndefined();
+  });
+
+  it('feeds the newest body-start /maestro issue comment into the MR changes-requested edge', async () => {
+    const cmt = (body: string, at: string): Comment => ({
+      id: at,
+      author: user('volker.otto'), // shared account: bot == operator
+      body,
+      createdAt: at,
+    });
+    // A standing /maestro command, no bot push since → rework requested.
+    const requested = await assembleSnapshot(
+      repo,
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr({ isDraft: false })],
+        comments: async () => [
+          cmt('/maestro make the badges greener', '2026-01-05'),
+          cmt('### ⚠️ Proof', '2026-01-04'),
+        ],
+      }),
+      50,
+    );
+    expect(requested.mr?.approvals.changesRequested).toBe(true);
+
+    // A bot push after the command retires it (self-clearing — the loop fix).
+    const cleared = await assembleSnapshot(
+      repo,
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr({ isDraft: false })],
+        lastBotPushAt: async () => '2026-01-06',
+        comments: async () => [cmt('/maestro make the badges greener', '2026-01-05')],
+      }),
+      50,
+    );
+    expect(cleared.mr?.approvals.changesRequested).toBe(false);
+
+    // A mid-body /maestro line (daemon comment echoing the agent) must NOT count.
+    const ignored = await assembleSnapshot(
+      repo,
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr({ isDraft: false })],
+        comments: async () => [cmt('### 🎼 Plan\n\n/maestro inside a heading', '2026-01-05')],
+      }),
+      50,
+    );
+    expect(ignored.mr?.approvals.changesRequested).toBe(false);
   });
 });

@@ -18,6 +18,14 @@ import type {
   MrActivity,
   RepoRef,
 } from '../contracts/index.js';
+import { MAESTRO_COMMAND_RE } from '../contracts/index.js';
+
+/** The later of two ISO timestamps; either may be undefined. */
+function laterOf(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return a > b ? a : b;
+}
 
 /**
  * The forge-specific fetches the snapshot algorithm composes. Everything returned is
@@ -64,6 +72,7 @@ export function computeChangesRequested(
 export async function findMaestroMr(
   issueIid: number,
   prim: ForgePrimitives,
+  issueBlockingAt?: string,
 ): Promise<{ mr: MergeRequest; activityAt?: MrActivity } | undefined> {
   const pool = await prim.openMergeRequests(issueIid);
   const prefix = `maestro/issue-${issueIid}-`;
@@ -73,20 +82,32 @@ export async function findMaestroMr(
   if (!candidate) return undefined;
 
   const base = await prim.approvalBase(candidate.iid);
-  const blockingAt = await prim.blockingThreadAt(candidate.iid);
-  // The push read stays short-circuited behind a blocking thread (the per-forge hot-path
-  // optimization the reconciler depends on): no blocking → no commit fetch. The dashboard's
-  // last-activity line (#39) therefore reports MR movement only from timestamps already on
-  // hand — "where cheap" (issue #39). A clean MR with just a recent push contributes nothing
-  // here and the line falls back to the issue/agent signals, which still move in that case.
+  // Two blocking surfaces, one edge: the MR's own review thread AND the issue thread's
+  // body-start `/maestro` feedback (the shared-account case — the operator replies on the
+  // issue, where the daemon posts everything, because their account IS the bot's, so they
+  // cannot file a non-bot MR review). Both are "changes requested" and BOTH clear the same
+  // way — a bot push that post-dates them (computeChangesRequested). Folding the issue
+  // signal in here (rather than as a separate reconciler edge) is what makes it self-clear:
+  // a separate edge keyed only on "newest daemon comment" never retired on a push and looped.
+  const threadAt = await prim.blockingThreadAt(candidate.iid);
+  const blockingAt = laterOf(threadAt, issueBlockingAt);
+  // The push read short-circuits when NOTHING blocks (the per-forge hot-path optimization the
+  // reconciler depends on): no thread and no issue command → no commit fetch. A standing
+  // /maestro command now DOES trigger the fetch, which is exactly what lets it clear on push.
   const lastBotPushAt = blockingAt === undefined ? undefined : await prim.lastBotPushAt(candidate);
-  const changesRequested =
-    blockingAt === undefined ? false : computeChangesRequested(blockingAt, lastBotPushAt);
+  const changesRequested = computeChangesRequested(blockingAt, lastBotPushAt);
   const activityAt = newestMrActivity(blockingAt, lastBotPushAt);
   return {
     mr: { ...candidate, approvals: { ...base, changesRequested } },
     ...(activityAt ? { activityAt } : {}),
   };
+}
+
+/** The newest body-start `/maestro` comment timestamp, or undefined. Any author: the daemon
+ *  leads every comment with a heading and the agent has no forge access (§13.1), so a
+ *  body-start command can only be a human keystroke. Comments are newest-first. */
+function issueCommandAt(recentComments: Comment[]): string | undefined {
+  return recentComments.find((c) => MAESTRO_COMMAND_RE.test(c.body))?.createdAt;
 }
 
 /** The newer of a blocking review thread vs. the last bot push, tagged with which it was.
@@ -117,11 +138,13 @@ export async function assembleSnapshot(
   const lastActor = await prim.lastActor(issueIid);
   const issueWithActor: Issue = lastActor ? { ...issue, lastActor } : issue;
 
-  const found = await findMaestroMr(issueIid, prim);
-
   const recentComments = (await prim.comments(issueIid))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, commentCap);
+
+  // Comments are read BEFORE the MR so the issue-thread /maestro signal can feed the MR's
+  // changes-requested edge (shared-account rework on the issue thread, self-clearing on push).
+  const found = await findMaestroMr(issueIid, prim, issueCommandAt(recentComments));
 
   return {
     repo,

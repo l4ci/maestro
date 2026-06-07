@@ -87,20 +87,6 @@ function repliesSinceBlock(recentComments: Comment[], botUser: string): Comment[
   return recentComments.filter((c) => isHumanComment(c, botUser) && c.createdAt > blockedAt);
 }
 
-/**
- * In-review rework edge on the ISSUE thread — the issue-side mirror of the MR's
- * changes-requested edge, and the only rework channel a shared account has (it cannot
- * open a non-bot MR review thread). Only explicit body-start `/maestro` comments count,
- * from ANY author: review chatter must not spin rework agents, and the MR review channel
- * already covers formal changes-requested. Marker discipline is repliesSinceBlock's
- * (comments newer than the newest daemon comment), so the edge retires when the daemon
- * answers: the label flip re-derives in-progress (legacy), and the rework's proof
- * comment becomes the new marker (pipeline).
- */
-function maestroCommandsSince(recentComments: Comment[], botUser: string): Comment[] {
-  return repliesSinceBlock(recentComments, botUser).filter((c) => MAESTRO_COMMAND_RE.test(c.body));
-}
-
 /** Idempotent capacity marker (#53/#29): one label write, then a stable no-op. */
 function markQueuedOnce(snapshot: IssueSnapshot, settings: RepoSettings, why: string): Intent {
   return snapshot.issue.labels.includes(settings.labels.queued)
@@ -252,11 +238,6 @@ function reconcilePipeline(input: ReconcileInput): Intent {
           feedback: { reviewComments: snapshot.recentComments },
         };
       }
-      // Issue-thread rework edge: explicit /maestro feedback during the human gate.
-      const commands = maestroCommandsSince(snapshot.recentComments, settings.botUser);
-      if (commands.length > 0) {
-        return { kind: 'apply-changes-requested', feedback: { reviewComments: commands } };
-      }
       return { kind: 'poll-review' };
     }
 
@@ -320,11 +301,6 @@ export function reconcile(input: ReconcileInput): Intent {
           kind: 'apply-changes-requested',
           feedback: { reviewComments: snapshot.recentComments },
         };
-      }
-      // Issue-thread rework edge: explicit /maestro feedback during review.
-      const commands = maestroCommandsSince(snapshot.recentComments, settings.botUser);
-      if (commands.length > 0) {
-        return { kind: 'apply-changes-requested', feedback: { reviewComments: commands } };
       }
       return { kind: 'poll-review' };
     }
