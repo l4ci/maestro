@@ -402,16 +402,19 @@ export class GitlabAdapter implements ForgeAdapter {
       .at(-1);
   }
 
-  /** Newest bot-authored commit timestamp on the source branch (§0.3 edge-trigger half). */
+  /** Newest commit timestamp on the source branch — author-AGNOSTIC (§0.3 edge-trigger half).
+   *  The daemon owns this branch, so any commit post-dating the blocking signal means the work
+   *  was redone; that is what retires the changes-requested edge (snapshot.ts). Deliberately
+   *  NOT filtered by bot_user: on a shared account (bot account == operator account) the agent's
+   *  commits carry the operator's own git identity, so an author filter stranded this timestamp
+   *  before the feedback and the issue bounced in-review↔in-progress forever (issue #5). */
   async #lastBotPushAt(repo: RepoRef, sourceBranch: string): Promise<string | undefined> {
     const pid = this.#pid(repo);
-    const bot = this.#c.botUser;
     const commits =
       (await this.#c.api<RawCommit[]>('GET', `/projects/${pid}/repository/commits`, {
         query: { ref_name: sourceBranch, per_page: 100 },
       })) ?? [];
     return commits
-      .filter((cm) => cm.author_name === bot || cm.author_email.split('@')[0] === bot)
       .map((cm) => cm.committed_date)
       .sort()
       .at(-1);

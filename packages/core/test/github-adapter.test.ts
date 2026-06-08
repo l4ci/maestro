@@ -517,7 +517,12 @@ describe('Slice 13 — ApprovalState from PR reviews', () => {
 
 function wireReviews(
   fake: FakeExec,
-  opts: { reviewAt?: string; botCommitAt?: string; prComments?: Record<string, unknown>[] },
+  opts: {
+    reviewAt?: string;
+    botCommitAt?: string;
+    commitAuthor?: { login: string; email: string }; // override commit identity (shared-account case)
+    prComments?: Record<string, unknown>[];
+  },
 ) {
   fake.onApi('GET', '/issues/42/timeline', []);
   fake.onApi('GET', '/issues/7/comments', opts.prComments ?? []);
@@ -536,6 +541,7 @@ function wireReviews(
         ]
       : [],
   );
+  const login = opts.commitAuthor?.login ?? 'maestro-bot';
   fake.onApi(
     'GET',
     '/pulls/7/commits',
@@ -543,9 +549,12 @@ function wireReviews(
       ? [
           {
             sha: 'c1',
-            commit: { committer: { date: opts.botCommitAt }, author: { date: opts.botCommitAt } },
-            author: user(1, 'maestro-bot'),
-            committer: user(1, 'maestro-bot'),
+            commit: {
+              committer: { date: opts.botCommitAt },
+              author: { date: opts.botCommitAt, email: opts.commitAuthor?.email ?? 'bot@x' },
+            },
+            author: user(1, login),
+            committer: user(1, login),
           },
         ]
       : [],
@@ -570,6 +579,18 @@ describe('Slice 14 — changesRequested edge-trigger (§0.3)', () => {
   it('no blocking review → false (no commits fetch needed)', async () => {
     const { a, fake } = mk();
     wireReviews(fake, { botCommitAt: '2026-06-01T00:00:00Z' });
+    expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
+  });
+
+  // Shared-account regression (issue #5, GitLab twin): a push under the operator's personal
+  // git identity (not bot_user) still retires the edge — the daemon owns the branch.
+  it('a push under the operator identity (not bot_user) AFTER feedback → false', async () => {
+    const { a, fake } = mk();
+    wireReviews(fake, {
+      botCommitAt: '2026-06-03T00:00:00Z',
+      reviewAt: '2026-06-02T00:00:00Z',
+      commitAuthor: { login: 'volker-otto', email: 'hello@volkerotto.net' },
+    });
     expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
   });
 

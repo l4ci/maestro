@@ -384,21 +384,18 @@ export class GithubAdapter implements ForgeAdapter {
     return normalizeReviews(await this.#reviews(repo, prNumber));
   }
 
-  /** Newest bot-authored commit timestamp on the PR (§0.3 edge-trigger half). */
+  /** Newest commit timestamp on the PR — author-AGNOSTIC (§0.3 edge-trigger half). The daemon
+   *  owns this branch, so any commit post-dating the blocking signal means the work was redone;
+   *  that is what retires the changes-requested edge (snapshot.ts). Deliberately NOT filtered by
+   *  bot_user: on a shared account the agent's commits carry the operator's own git identity, so
+   *  an author filter stranded this timestamp before the feedback and looped (issue #5, GitLab twin). */
   async #lastBotPushAt(repo: RepoRef, prNumber: number): Promise<string | undefined> {
-    const bot = this.#c.botUser;
     const commits =
       (await this.#c.api<RawCommit[]>('GET', `${this.#base(repo)}/pulls/${prNumber}/commits`, {
         query: { per_page: 100 },
         paginate: true,
       })) ?? [];
     return commits
-      .filter(
-        (cm) =>
-          cm.author?.login === bot ||
-          cm.committer?.login === bot ||
-          cm.commit.author?.email?.split('@')[0] === bot,
-      )
       .map((cm) => cm.commit.committer?.date ?? cm.commit.author?.date ?? '')
       .filter(Boolean)
       .sort()
