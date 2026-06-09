@@ -12,13 +12,22 @@
 
 import type { AgentResult, AgentStatus, Exec, Runner, RunnerInput } from '../contracts/index.js';
 
+export interface StallInfo {
+  attempt: number; // 0-based attempt that stalled
+  willRetry: boolean; // is another cold attempt coming?
+  timeoutMs: number; // the window that elapsed with no agent events
+}
+
 export interface ClaudeRunnerConfig {
-  stallTimeoutMs?: number; // no agent events past this → kill (default 120s)
+  stallTimeoutMs?: number; // fallback when RunnerInput omits one (default 120s)
   maxStallRetries?: number; // extra cold attempts after a stall (default 1)
   /** Env var NAMES scrubbed from the agent's environment — the forge token_env(s).
    *  §13.1: the agent must find no forge secret in its workspace env (blast-radius
    *  reduction). The daemon passes the configured token_env names here. */
   secretEnvKeys?: string[];
+  /** Called once per stall kill so the daemon can log it (false-positive kills during
+   *  long no-event tool calls were previously invisible). Never throws into the run. */
+  onStall?: (info: StallInfo) => void;
 }
 
 export class ClaudeRunner implements Runner {
@@ -26,12 +35,14 @@ export class ClaudeRunner implements Runner {
   readonly #stallTimeoutMs: number;
   readonly #maxStallRetries: number;
   readonly #secretEnvKeys: string[];
+  readonly #onStall: ((info: StallInfo) => void) | undefined;
 
   constructor(exec: Exec, cfg: ClaudeRunnerConfig = {}) {
     this.#exec = exec;
     this.#stallTimeoutMs = cfg.stallTimeoutMs ?? 120_000;
     this.#maxStallRetries = cfg.maxStallRetries ?? 1;
     this.#secretEnvKeys = cfg.secretEnvKeys ?? [];
+    this.#onStall = cfg.onStall;
   }
 
   /** The env handed to the agent: inherit the daemon env MINUS the forge secret(s).
@@ -41,11 +52,15 @@ export class ClaudeRunner implements Runner {
   }
 
   async run(input: RunnerInput): Promise<AgentResult> {
+    // Per-run window (from WORKFLOW.md), falling back to the construction default.
+    const stallTimeoutMs = input.claude.stallTimeoutMs ?? this.#stallTimeoutMs;
     let lastDiagnostic = 'no attempts ran';
     for (let attempt = 0; attempt <= this.#maxStallRetries; attempt++) {
-      const outcome = await this.#attempt(input); // each attempt is a fresh cold session
+      const outcome = await this.#attempt(input, stallTimeoutMs); // fresh cold session
       if (outcome.kind === 'result') return outcome.result;
       lastDiagnostic = outcome.diagnostic; // 'stalled' — try a fresh cold attempt
+      const willRetry = attempt < this.#maxStallRetries;
+      this.#onStall?.({ attempt, willRetry, timeoutMs: stallTimeoutMs });
     }
     return { status: 'in_progress', summary: lastDiagnostic };
   }
@@ -53,6 +68,7 @@ export class ClaudeRunner implements Runner {
   /** One cold invocation. Returns a parsed result, or signals a stall to retry. */
   async #attempt(
     input: RunnerInput,
+    stallTimeoutMs: number,
   ): Promise<{ kind: 'result'; result: AgentResult } | { kind: 'stall'; diagnostic: string }> {
     const controller = new AbortController();
     const lines: string[] = [];
@@ -64,7 +80,7 @@ export class ClaudeRunner implements Runner {
       watchdog = setTimeout(() => {
         stalled = true;
         controller.abort();
-      }, this.#stallTimeoutMs);
+      }, stallTimeoutMs);
     };
 
     arm();

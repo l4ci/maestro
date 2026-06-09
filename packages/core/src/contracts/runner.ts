@@ -72,7 +72,14 @@ export interface RunnerInput {
   workspaceDir: string;
   promptBody: string; // WORKFLOW.md body + operating protocol (§9)
   context: { issue: Issue; mr?: MergeRequest; recentComments: Comment[] };
-  claude: { command: string; maxTurns: number; permissionMode: string };
+  claude: {
+    command: string;
+    maxTurns: number;
+    permissionMode: string;
+    /** Per-run stall window (ms). No agent stream events past this → kill + retry once.
+     *  From WORKFLOW.md `claude.stall_timeout_seconds`; absent → the runner's default. */
+    stallTimeoutMs?: number;
+  };
 }
 
 export interface Runner {

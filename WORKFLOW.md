@@ -19,6 +19,9 @@ environment: {}
 claude:
   command: claude
   max_turns: 40
+  # Cold `pnpm install` + a full tsc build on this monorepo emit no agent stream
+  # events for minutes; 120s false-killed healthy agents mid-install. Size above that.
+  stall_timeout_seconds: 300
   permission_mode: bypassPermissions
 concurrency:
   max_active: 2

@@ -175,7 +175,17 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     ...(config.forges.gitlab ?? []).map((e) => e.token_env),
     ...(config.forges.github ?? []).map((e) => e.token_env),
   ];
-  const runner = new ClaudeRunner(exec, { secretEnvKeys });
+  const runner = new ClaudeRunner(exec, {
+    secretEnvKeys,
+    // Surface stall kills (previously invisible) so a false-positive kill during a long
+    // no-event tool call — e.g. a cold `pnpm install` — is diagnosable in the journal.
+    onStall: ({ attempt, willRetry, timeoutMs }) =>
+      log.warn('runner: stall watchdog fired — no agent output, killed', {
+        attempt,
+        willRetry,
+        timeoutMs,
+      }),
+  });
   const globalMax = config.defaults.concurrency.global_max;
   const slots = new SlotAccountant(globalMax);
   const heartbeat = new HeartbeatWriter(logsRoot); // liveness signal for the web dashboard (#40)
