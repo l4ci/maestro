@@ -144,7 +144,10 @@ export function buildClaudeArgs(input: RunnerInput): string[] {
 export function assemblePrompt(input: RunnerInput): string {
   const { issue, mr, recentComments } = input.context;
   const ctx = {
-    issue: { iid: issue.iid, title: issue.title, body: issue.body, webUrl: issue.webUrl },
+    // null for a command-MR run — that prompt carries the MR framing itself (§MR-command).
+    issue: issue
+      ? { iid: issue.iid, title: issue.title, body: issue.body, webUrl: issue.webUrl }
+      : null,
     mr: mr ? { iid: mr.iid, description: mr.description, isDraft: mr.isDraft } : null,
     recentComments: recentComments.map((c) => ({
       author: c.author.username,

@@ -18,11 +18,11 @@ import type {
 import {
   AC_DRAFT_SENTINEL,
   DONE_SENTINEL,
-  MAESTRO_COMMAND_RE,
   REVIEW_FAIL_RE,
   REVIEW_PASS_SENTINEL,
 } from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
+import { isHumanComment } from '../forge/comments.js';
 
 function assertNever(x: never): never {
   throw new Error(`unreachable lifecycle state: ${String(x)}`);
@@ -54,18 +54,6 @@ export function deriveState(snapshot: IssueSnapshot, settings: RepoSettings): Li
   if (issue.labels.includes(inReview)) return 'in-review';
   if (issue.labels.includes(inProgress)) return 'in-progress';
   return 'new';
-}
-
-/**
- * A comment provably written by a human. A different author is the normal proof. The
- * same-account escape hatch (bot account == operator account): a body STARTING with
- * `/maestro` — the agent cannot touch the forge (no token, §13.1) and every daemon
- * comment template leads with a heading, so a body-start command can only come from a
- * keyboard. Deliberately NOT multiline: agent-returned text rides mid-body inside daemon
- * comments, so a smuggled `/maestro` line must never count.
- */
-function isHumanComment(c: Comment, botUser: string): boolean {
-  return c.author.username !== botUser || MAESTRO_COMMAND_RE.test(c.body);
 }
 
 /**

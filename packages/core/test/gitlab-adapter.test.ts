@@ -649,3 +649,71 @@ describe('Slice 12 — listOpenIssuesByLabel (#53)', () => {
     expect(call?.args.join(' ')).toContain('state=opened');
   });
 });
+
+// --- MR-command: listAssignedOpenMergeRequests ------------------------------
+
+describe('MR-command — listAssignedOpenMergeRequests', () => {
+  it('filters by bot assignee + opened and normalizes iids/sourceBranch', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/merge_requests', [
+      rawMr(),
+      rawMr({ iid: 8, id: 8008, source_branch: 'feature/x', description: 'no issue here' }),
+    ]);
+    const mrs = await a.listAssignedOpenMergeRequests(repo);
+    const q = fake.calls[0]?.args.join(' ');
+    expect(q).toContain('assignee_username=maestro-bot');
+    expect(q).toContain('state=opened');
+    expect(mrs.map((m) => m.iid)).toEqual([7, 8]);
+    expect(mrs[1]?.sourceBranch).toBe('feature/x');
+    expect(mrs[1]?.closesIssueIid).toBeUndefined();
+  });
+});
+
+// --- MR-command: getMrComments ----------------------------------------------
+
+describe('MR-command — getMrComments', () => {
+  it('drops system notes and normalizes newest-first', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/merge_requests/7/notes', [
+      { id: 12, author: user(5, 'maintainer'), body: 'new', created_at: '2026-06-03T00:00:00Z' },
+      { id: 11, author: user(2, 'reporter'), body: 'old', created_at: '2026-06-01T00:00:00Z' },
+      {
+        id: 13,
+        author: user(0, 'system'),
+        body: 'changed label',
+        created_at: '2026-06-04T00:00:00Z',
+        system: true,
+      },
+    ]);
+    const out = await a.getMrComments(repo, 7);
+    expect(out.map((c) => c.body)).toEqual(['new', 'old']);
+    const q = fake.callsTo('GET', '/merge_requests/7/notes')[0]?.args.join(' ');
+    expect(q).toContain('sort=desc');
+  });
+});
+
+// --- MR-command: getMergeRequestState ---------------------------------------
+
+describe('MR-command — getMergeRequestState', () => {
+  it('maps opened/merged/closed/locked and 404→missing', async () => {
+    const open = mk();
+    open.fake.onApi('GET', '/merge_requests/7', rawMr({ state: 'opened' }));
+    expect(await open.a.getMergeRequestState(repo, 7)).toBe('open');
+
+    const merged = mk();
+    merged.fake.onApi('GET', '/merge_requests/7', rawMr({ state: 'merged' }));
+    expect(await merged.a.getMergeRequestState(repo, 7)).toBe('merged');
+
+    const closed = mk();
+    closed.fake.onApi('GET', '/merge_requests/7', rawMr({ state: 'closed' }));
+    expect(await closed.a.getMergeRequestState(repo, 7)).toBe('closed');
+
+    const locked = mk();
+    locked.fake.onApi('GET', '/merge_requests/7', rawMr({ state: 'locked' }));
+    expect(await locked.a.getMergeRequestState(repo, 7)).toBe('closed');
+
+    const gone = mk();
+    gone.fake.onApiError('GET', '/merge_requests/7', 1, '404 Not Found');
+    expect(await gone.a.getMergeRequestState(repo, 7)).toBe('missing');
+  });
+});

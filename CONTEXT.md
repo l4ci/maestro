@@ -34,3 +34,19 @@ Beneath that public interface, two shared modules carry what used to be duplicat
   work was redone. Filtering by author stranded the timestamp on shared accounts (bot account ==
   operator account: the agent's commits wear the operator's git identity) and the issue bounced
   in-review↔in-progress forever (issue #5). Do not re-add an author filter here.
+
+## Command MR
+
+A **command MR** is an open MR/PR assigned to the bot that has **no backing issue**, carrying a
+body-start `/maestro <instruction>` comment from an authorized human. It is the only non-issue
+trigger (spec `2026-06-09-mr-command-trigger-design.md`). The **command-MR pass**
+(`daemon/mr-command-pass.ts`) runs each tick beside the issue lifecycle: list bot-assigned MRs →
+keep only standalone ones (`isStandaloneMr` — not a `maestro/issue-*` branch, no `Closes #N`; the
+issue path owns the rest) → `decideMrCommand` (a pure edge, the MR-thread mirror of the issue
+reconciler) → run the agent on the one instruction → push iff it committed → **always reply**.
+
+The edge is **edge-triggered and self-clearing on the reply**: a command is pending iff the newest
+authorized `/maestro` comment post-dates the bot's newest reply (the comment carrying
+`MR_COMMAND_REPLY_SENTINEL`). The reply is posted on every terminal path, so the edge can never loop
+— stronger than the issue changes-requested edge, which clears on a push that might not happen (cf.
+issue #5). The issue reconciler stays free of all this (thesis guard in `mr-command-thesis.test.ts`).

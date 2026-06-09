@@ -53,6 +53,11 @@ export const PLAN_COMMENT_SENTINEL = '<!-- maestro:plan -->';
  *  is what the human definition gate approves (todo label or /maestro approve). */
 export const AC_DRAFT_SENTINEL = '<!-- maestro:ac-draft -->';
 
+/** Marks the bot's reply to an MR command (the standalone-MR `/maestro` trigger). Its
+ *  presence newer than a command comment retires the edge — the reply is posted on every
+ *  terminal path (success / no-op / needs_input / error), so the edge cannot loop. */
+export const MR_COMMAND_REPLY_SENTINEL = '<!-- maestro:mr-reply -->';
+
 /** Internal review verdict markers (#29 P3). Machine-readable HTML comments in the
  *  issue thread: durable across cold sessions/evictions, invisible to humans, and
  *  unspoofable by prose. The round number makes the bounce cap derivable read-only
@@ -66,7 +71,9 @@ export function reviewFailMarker(round: number): string {
 export interface RunnerInput {
   workspaceDir: string;
   promptBody: string; // WORKFLOW.md body + operating protocol (§9)
-  context: { issue: Issue; mr?: MergeRequest; recentComments: Comment[] };
+  // `issue` is absent for a command-MR run (a standalone MR has no backing issue, §MR-command);
+  // every issue-lifecycle run still supplies it.
+  context: { issue?: Issue; mr?: MergeRequest; recentComments: Comment[] };
   claude: {
     command: string;
     maxTurns: number;

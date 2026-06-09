@@ -1,7 +1,7 @@
 // Forge adapter interface (spec §0.3). The ONLY forge-aware seam. GitLab (M2) is
 // the reference impl; GitHub (M7) mirrors it. All mutations idempotent. FROZEN.
 
-import type { Issue, IssueSnapshot, Label, MergeRequest, RepoRef } from './forge-model.js';
+import type { Comment, Issue, IssueSnapshot, Label, MergeRequest, RepoRef } from './forge-model.js';
 
 export type MergeStrategy = 'squash' | 'merge' | 'rebase';
 
@@ -34,6 +34,16 @@ export interface ForgeAdapter {
   /** Open issues carrying a label — the sweep uses it to retract stale maestro:todo
    *  marks from issues whose bot assignment was removed (#53). */
   listOpenIssuesByLabel(repo: RepoRef, label: string): Promise<Issue[]>;
+  /** Open MRs/PRs assigned to bot_user. Drives the command-MR pass (the standalone-MR
+   *  `/maestro` trigger, §MR-command) — no backing issue. */
+  listAssignedOpenMergeRequests(repo: RepoRef): Promise<MergeRequest[]>;
+  /** Comments on an MR/PR thread, normalized + system-filtered, newest-first capped. */
+  getMrComments(repo: RepoRef, mrIid: number): Promise<Comment[]>;
+  /** MR/PR state for the cleanup sweep: a merged or closed MR is terminal (§0.5). */
+  getMergeRequestState(
+    repo: RepoRef,
+    mrIid: number,
+  ): Promise<'open' | 'closed' | 'merged' | 'missing'>;
 
   // --- mutation (all idempotent) ---
   createBranch(repo: RepoRef, name: string, fromRef: string): Promise<void>;

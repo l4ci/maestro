@@ -14,6 +14,7 @@
 
 import type {
   ApprovalState,
+  Comment,
   CreateIssueArgs,
   CreateMRArgs,
   Exec,
@@ -131,6 +132,47 @@ export class GithubAdapter implements ForgeAdapter {
       if (raw === null) return 'missing';
       return raw.state === 'closed' ? 'closed' : 'open';
     });
+  }
+
+  async listAssignedOpenMergeRequests(repo: RepoRef): Promise<MergeRequest[]> {
+    // GitHub has no PR-assignee filter; the issues endpoint carries PRs (every PR is an
+    // issue), so filter to PRs then fetch each as a PR to normalize branch/merged state.
+    const issues =
+      (await this.#c.api<RawIssue[]>('GET', `${this.#base(repo)}/issues`, {
+        query: { assignee: this.#c.botUser, state: 'open', per_page: 100 },
+        paginate: true,
+      })) ?? [];
+    const prs = issues.filter((i) => i.pull_request !== undefined);
+    return Promise.all(prs.map((i) => this.#getMergeRequest(repo, i.number)));
+  }
+
+  async getMrComments(repo: RepoRef, mrIid: number): Promise<Comment[]> {
+    const comments =
+      (await this.#c.api<RawComment[]>('GET', `${this.#base(repo)}/issues/${mrIid}/comments`, {
+        query: { per_page: this.#c.commentCap },
+        paginate: true,
+      })) ?? [];
+    return comments
+      .map(normalizeComment)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, this.#c.commentCap);
+  }
+
+  async getMergeRequestState(
+    repo: RepoRef,
+    mrIid: number,
+  ): Promise<'open' | 'closed' | 'merged' | 'missing'> {
+    const raw = await this.#c.api<RawPr>('GET', `${this.#base(repo)}/pulls/${mrIid}`);
+    if (raw === null) return 'missing';
+    if (raw.merged === true || (raw.merged_at != null && raw.merged_at !== '')) return 'merged';
+    return raw.state === 'closed' ? 'closed' : 'open';
+  }
+
+  /** Fetch one PR and normalize — shared by the command-MR pass. */
+  async #getMergeRequest(repo: RepoRef, prNumber: number): Promise<MergeRequest> {
+    return normalizeMergeRequest(
+      await this.#c.apiRequired<RawPr>('GET', `${this.#base(repo)}/pulls/${prNumber}`),
+    );
   }
 
   // --- mutation -----------------------------------------------------------

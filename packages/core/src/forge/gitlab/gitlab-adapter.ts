@@ -7,6 +7,7 @@
 
 import type {
   ApprovalState,
+  Comment,
   CreateIssueArgs,
   CreateMRArgs,
   Exec,
@@ -140,6 +141,38 @@ export class GitlabAdapter implements ForgeAdapter {
     );
     if (raw === null) return 'missing';
     return raw.state === 'closed' ? 'closed' : 'open';
+  }
+
+  async listAssignedOpenMergeRequests(repo: RepoRef): Promise<MergeRequest[]> {
+    const raw =
+      (await this.#c.api<RawMr[]>('GET', `/projects/${this.#pid(repo)}/merge_requests`, {
+        query: { state: 'opened', assignee_username: this.#c.botUser, per_page: 100 },
+      })) ?? [];
+    return raw.map((m) => normalizeMergeRequest(m));
+  }
+
+  async getMrComments(repo: RepoRef, mrIid: number): Promise<Comment[]> {
+    const notes =
+      (await this.#c.api<RawNote[]>(
+        'GET',
+        `/projects/${this.#pid(repo)}/merge_requests/${mrIid}/notes`,
+        { query: { sort: 'desc', order_by: 'created_at', per_page: this.#c.commentCap } },
+      )) ?? [];
+    return notes.filter((n) => !n.system).map(normalizeComment);
+  }
+
+  async getMergeRequestState(
+    repo: RepoRef,
+    mrIid: number,
+  ): Promise<'open' | 'closed' | 'merged' | 'missing'> {
+    const raw = await this.#c.api<RawMr>(
+      'GET',
+      `/projects/${this.#pid(repo)}/merge_requests/${mrIid}`,
+    );
+    if (raw === null) return 'missing';
+    if (raw.state === 'merged') return 'merged';
+    if (raw.state === 'closed' || raw.state === 'locked') return 'closed';
+    return 'open';
   }
 
   // --- mutation -----------------------------------------------------------
