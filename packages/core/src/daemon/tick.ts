@@ -867,6 +867,7 @@ function buildRunnerInput(
       command: ctx.workflow.claude.command,
       maxTurns: ctx.workflow.claude.max_turns,
       permissionMode: ctx.workflow.claude.permission_mode,
+      stallTimeoutMs: ctx.workflow.claude.stall_timeout_seconds * 1000,
     },
   };
 }
