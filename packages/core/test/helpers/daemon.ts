@@ -90,6 +90,7 @@ export interface AdapterRecorder {
   calls: string[];
   labelOps: { iid: number; set: string[]; unset: string[] }[];
   merges: { mrIid: number; strategy: string; deleteSource: boolean }[];
+  closes: { mrIid: number }[];
   issueComments: { iid: number; body: string }[];
   mrComments: { mrIid: number; body: string }[];
   mrDescriptions: { mrIid: number; body: string }[];
@@ -117,6 +118,7 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
     calls: [],
     labelOps: [],
     merges: [],
+    closes: [],
     issueComments: [],
     mrComments: [],
     mrDescriptions: [],
@@ -190,6 +192,11 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
       r.calls.push('mergeMR');
       maybeThrow('mergeMR');
       r.merges.push({ mrIid, strategy, deleteSource });
+    },
+    closeMR: async (_repo, mrIid) => {
+      r.calls.push('closeMR');
+      maybeThrow('closeMR');
+      r.closes.push({ mrIid });
     },
     setIssueLabels: async (_repo, iid, set, unset) => {
       r.calls.push('setIssueLabels');

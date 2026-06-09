@@ -254,6 +254,15 @@ export class GitlabAdapter implements ForgeAdapter {
     });
   }
 
+  async closeMR(repo: RepoRef, mrIid: number): Promise<void> {
+    const pid = this.#pid(repo);
+    const mr = await this.#c.apiRequired<RawMr>('GET', `/projects/${pid}/merge_requests/${mrIid}`);
+    if (mr.state === 'merged' || mr.state === 'closed') return; // idempotent — terminal already
+    await this.#c.api('PUT', `/projects/${pid}/merge_requests/${mrIid}`, {
+      body: { state_event: 'close' },
+    });
+  }
+
   async setIssueLabels(
     repo: RepoRef,
     issueIid: number,

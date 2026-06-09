@@ -289,6 +289,32 @@ describe('Slice 7 — mergeMR', () => {
   });
 });
 
+// --- Slice 7b: closeMR (#88) -----------------------------------------------
+
+describe('Slice 7b — closeMR', () => {
+  it('PUTs state_event=close on an open MR', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/merge_requests/7', rawMr({ state: 'opened' }));
+    fake.onApi('PUT', '/merge_requests/7', rawMr({ state: 'closed' }));
+    await a.closeMR(repo, 7);
+    expect(bodyOf(fake, 'PUT', '/merge_requests/7').state_event).toBe('close');
+  });
+
+  it('is idempotent — already-closed MR makes no PUT', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/merge_requests/7', rawMr({ state: 'closed' }));
+    await a.closeMR(repo, 7);
+    expect(fake.callsTo('PUT', '/merge_requests/7')).toHaveLength(0);
+  });
+
+  it('never closes a merged MR', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/merge_requests/7', rawMr({ state: 'merged' }));
+    await a.closeMR(repo, 7);
+    expect(fake.callsTo('PUT', '/merge_requests/7')).toHaveLength(0);
+  });
+});
+
 // --- Slice 8: setIssueLabels ----------------------------------------------
 
 describe('Slice 8 — setIssueLabels (scoped mutual exclusion is free)', () => {

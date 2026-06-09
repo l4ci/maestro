@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { Comment, MergeRequest } from '../src/contracts/index.js';
 import { MR_COMMAND_REPLY_SENTINEL } from '../src/contracts/index.js';
 import { evaluateMrCommands, isStandaloneMr } from '../src/daemon/mr-command-pass.js';
+import { RateLimitGate } from '../src/daemon/rate-limit-gate.js';
 import { cleanupSweep } from '../src/daemon/tick.js';
 import {
   buildContext,
@@ -126,6 +127,105 @@ describe('evaluateMrCommands', () => {
     expect(active).toBe(false);
     expect(runnerSpy.inputs).toEqual([]);
     expect(adapter.mrComments).toEqual([]);
+  });
+});
+
+describe('evaluateMrCommands — daemon-action meta-commands (#88)', () => {
+  it('/maestro merge merges via the adapter, replies once, and runs NO agent', async () => {
+    const adapter = recordingAdapter({
+      mrs: [mr()],
+      mrComments: new Map([[7, [cmd('/maestro merge', '2026-02-02')]]]),
+    });
+    const ws = fakeWorkspace();
+    const { ctx, runnerSpy } = buildContext({ adapter, workspace: ws });
+
+    await Promise.all((await evaluateMrCommands(repo, ctx)).pending);
+
+    expect(adapter.merges).toEqual([{ mrIid: 7, strategy: 'squash', deleteSource: true }]);
+    expect(runnerSpy.inputs).toEqual([]); // no agent run
+    expect(ws.mrEnsured).toEqual([]); // no workspace
+    expect(adapter.mrComments).toHaveLength(1);
+    expect(adapter.mrComments[0]?.body).toContain('Merged this MR');
+    expect(adapter.mrComments[0]?.body).toContain(MR_COMMAND_REPLY_SENTINEL);
+  });
+
+  it('/maestro merge on a DRAFT MR refuses to merge but still replies (sentinel)', async () => {
+    const adapter = recordingAdapter({
+      mrs: [mr({ isDraft: true })],
+      mrComments: new Map([[7, [cmd('/maestro merge', '2026-02-02')]]]),
+    });
+    const { ctx } = buildContext({ adapter });
+
+    await Promise.all((await evaluateMrCommands(repo, ctx)).pending);
+
+    expect(adapter.merges).toEqual([]);
+    expect(adapter.mrComments[0]?.body).toContain('still a draft');
+    expect(adapter.mrComments[0]?.body).toContain(MR_COMMAND_REPLY_SENTINEL);
+  });
+
+  it('/maestro close closes via the adapter and replies once, NO agent', async () => {
+    const adapter = recordingAdapter({
+      mrs: [mr()],
+      mrComments: new Map([[7, [cmd('/maestro close', '2026-02-02')]]]),
+    });
+    const { ctx, runnerSpy } = buildContext({ adapter });
+
+    await Promise.all((await evaluateMrCommands(repo, ctx)).pending);
+
+    expect(adapter.closes).toEqual([{ mrIid: 7 }]);
+    expect(runnerSpy.inputs).toEqual([]);
+    expect(adapter.mrComments[0]?.body).toContain('Closed this MR');
+    expect(adapter.mrComments[0]?.body).toContain(MR_COMMAND_REPLY_SENTINEL);
+  });
+
+  it('a failed merge still replies with the sentinel — the edge self-clears, never loops', async () => {
+    const adapter = recordingAdapter({
+      mrs: [mr()],
+      mrComments: new Map([[7, [cmd('/maestro merge', '2026-02-02')]]]),
+      fail: { mergeMR: () => new Error('merge conflict') },
+    });
+    const { ctx } = buildContext({ adapter });
+
+    await Promise.all((await evaluateMrCommands(repo, ctx)).pending);
+
+    expect(adapter.mrComments).toHaveLength(1);
+    expect(adapter.mrComments[0]?.body).toContain("Couldn't merge");
+    expect(adapter.mrComments[0]?.body).toContain('merge conflict');
+    expect(adapter.mrComments[0]?.body).toContain(MR_COMMAND_REPLY_SENTINEL);
+  });
+
+  it('a mixed "review then merge" routes to the agent unchanged (Q2a)', async () => {
+    const adapter = recordingAdapter({
+      mrs: [mr()],
+      mrComments: new Map([[7, [cmd('/maestro review then merge', '2026-02-02')]]]),
+    });
+    const ws = fakeWorkspace({ unpushed: 0 });
+    const { ctx, runnerSpy } = buildContext({
+      adapter,
+      workspace: ws,
+      runner: scriptedRunner({ status: 'done', summary: 'looks good' }),
+    });
+
+    await Promise.all((await evaluateMrCommands(repo, ctx)).pending);
+
+    expect(adapter.merges).toEqual([]);
+    expect(runnerSpy.inputs).toHaveLength(1); // agent ran
+    expect(ws.mrEnsured).toEqual([{ iid: 7, fromRef: 'feature/parser' }]);
+  });
+
+  it('merges even while Claude is rate-limited (#47) — no spawn needed', async () => {
+    const adapter = recordingAdapter({
+      mrs: [mr()],
+      mrComments: new Map([[7, [cmd('/maestro merge', '2026-02-02')]]]),
+    });
+    const rateGate = new RateLimitGate();
+    rateGate.trip(Date.now() + 60_000);
+    const { ctx } = buildContext({ adapter, rateGate });
+
+    await Promise.all((await evaluateMrCommands(repo, ctx)).pending);
+
+    expect(adapter.merges).toEqual([{ mrIid: 7, strategy: 'squash', deleteSource: true }]);
+    expect(adapter.mrComments[0]?.body).toContain(MR_COMMAND_REPLY_SENTINEL);
   });
 });
 
