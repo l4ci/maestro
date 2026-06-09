@@ -45,7 +45,10 @@ export interface ForgePrimitives {
   approvalBase(mrIid: number): Promise<ApprovalState>;
   /** Timestamp of the newest unresolved non-bot blocking thread, or undefined if none. */
   blockingThreadAt(mrIid: number): Promise<string | undefined>;
-  /** Timestamp of the newest bot commit on the MR's source branch, or undefined. */
+  /** Timestamp of the newest commit on the MR's source branch (author-AGNOSTIC), or undefined
+   *  if the branch carries no commits. NOT filtered by bot_user — on a shared account the
+   *  agent's commits wear the operator's git identity; the daemon owns the branch, so any
+   *  commit post-dating the blocking signal counts as the feedback being addressed (issue #5). */
   lastBotPushAt(mr: MergeRequest): Promise<string | undefined>;
 }
 
@@ -59,7 +62,7 @@ export function computeChangesRequested(
   lastBotPushAt: string | undefined,
 ): boolean {
   if (blockingAt === undefined) return false;
-  if (lastBotPushAt === undefined) return true; // unaddressed feedback, no bot push since
+  if (lastBotPushAt === undefined) return true; // unaddressed feedback, no commit on the branch since
   return blockingAt > lastBotPushAt;
 }
 

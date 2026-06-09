@@ -28,3 +28,9 @@ Beneath that public interface, two shared modules carry what used to be duplicat
   two edge-trigger timestamps (`blockingThreadAt`, `lastBotPushAt`). A third forge writes
   primitives, never an algorithm — this is the same property the spec §8 calls the GitHub
   milestone's "zero-change" headline, now extended below `getSnapshot`.
+
+  `lastBotPushAt` is the newest commit on the MR branch **author-agnostic** — _not_ filtered by
+  `bot_user`. The daemon owns the branch, so any commit post-dating the blocking signal means the
+  work was redone. Filtering by author stranded the timestamp on shared accounts (bot account ==
+  operator account: the agent's commits wear the operator's git identity) and the issue bounced
+  in-review↔in-progress forever (issue #5). Do not re-add an author filter here.

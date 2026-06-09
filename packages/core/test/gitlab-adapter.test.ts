@@ -453,6 +453,7 @@ function wireChanges(
   opts: {
     discussionAt?: string;
     botCommitAt?: string;
+    commitAuthor?: { name: string; email: string }; // override commit identity (shared-account case)
     notes?: Record<string, unknown>[]; // explicit discussion first-notes (override discussionAt)
   },
 ) {
@@ -468,8 +469,8 @@ function wireChanges(
           {
             id: 'c1',
             committed_date: opts.botCommitAt,
-            author_name: 'maestro-bot',
-            author_email: 'bot@x',
+            author_name: opts.commitAuthor?.name ?? 'maestro-bot',
+            author_email: opts.commitAuthor?.email ?? 'bot@x',
           },
         ]
       : [],
@@ -517,6 +518,20 @@ describe('Slice 14 — changesRequested edge-trigger (§0.3)', () => {
   it('no blocking discussion → false', async () => {
     const { a, fake } = mk();
     wireChanges(fake, { botCommitAt: '2026-06-01T00:00:00Z' });
+    expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
+  });
+
+  // Shared-account regression (issue #5): the daemon's pushes carry the operator's personal
+  // git identity (e.g. "Volker Otto <hello@volkerotto.net>"), NOT bot_user. The edge must
+  // still clear — the daemon owns the branch, so any commit post-dating the feedback means
+  // the work was redone. Author-filtering here stranded lastBotPushAt and looped forever.
+  it('a push under the operator identity (not bot_user) AFTER feedback → false', async () => {
+    const { a, fake } = mk();
+    wireChanges(fake, {
+      botCommitAt: '2026-06-03T00:00:00Z',
+      discussionAt: '2026-06-02T00:00:00Z',
+      commitAuthor: { name: 'Volker Otto', email: 'hello@volkerotto.net' },
+    });
     expect((await a.getSnapshot(repo, 42)).mr?.approvals.changesRequested).toBe(false);
   });
 
