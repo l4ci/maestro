@@ -60,6 +60,12 @@ export const WorkflowSchema = z.object({
     .object({
       command: z.string().default('claude'),
       max_turns: z.number().int().positive().default(40),
+      // Stall watchdog: kill the agent after this many seconds with NO stream events,
+      // then retry once (§13). Per-repo because the floor is the repo's slowest single
+      // no-event tool call — a cold `pnpm install` / full build emits nothing for
+      // minutes, so a too-short window false-kills a healthy agent mid-command. Size it
+      // ABOVE that floor; 120s suits a warm, fast repo.
+      stall_timeout_seconds: z.number().int().positive().default(120),
       // Constrained to Claude's real modes (no free string). bypassPermissions maps to
       // --dangerously-skip-permissions in the runner; the rest pass through verbatim.
       permission_mode: z
