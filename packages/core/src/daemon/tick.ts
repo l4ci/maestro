@@ -35,6 +35,7 @@ import type { ForgeAdapter } from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
 import { reconcile } from '../reconciler/reconcile.js';
 import { type AgentRole, declaresRoles, promptForRole } from '../workflow/roles.js';
+import { evaluateMrCommands } from './mr-command-pass.js';
 import type { TickContext, WorkspaceHandleLike } from './ports.js';
 import { repoKey } from './ports.js';
 
@@ -69,8 +70,10 @@ export async function tick(units: RepoUnit[]): Promise<Map<string, RepoTickResul
     try {
       const { pending, active } = await evaluateLifecycle(repo, ctx);
       allPending.push(...pending);
+      const mrPass = await evaluateMrCommands(repo, ctx); // standalone-MR /maestro trigger (§MR-command)
+      allPending.push(...mrPass.pending);
       await cleanupSweep(repo, ctx);
-      out.set(repoKey(repo), { active });
+      out.set(repoKey(repo), { active: active || mrPass.active });
     } catch (err) {
       ctx.log.error('tick: repo iteration failed', { repo: repoKey(repo), err: String(err) });
       out.set(repoKey(repo), { active: false });
@@ -94,9 +97,10 @@ function detectWorkComplete(snapshot: IssueSnapshot): boolean {
  *  here — a failed tick is caught, logged, and retried next tick (§13). */
 export async function tickRepo(repo: RepoRef, ctx: TickContext): Promise<RepoTickResult> {
   const { pending, active } = await evaluateLifecycle(repo, ctx);
+  const mrPass = await evaluateMrCommands(repo, ctx); // standalone-MR /maestro trigger (§MR-command)
   await cleanupSweep(repo, ctx);
-  await Promise.all(pending);
-  return { active };
+  await Promise.all([...pending, ...mrPass.pending]);
+  return { active: active || mrPass.active };
 }
 
 /**
@@ -843,6 +847,27 @@ export async function cleanupSweep(repo: RepoRef, ctx: TickContext): Promise<voi
       }
     } catch (err) {
       ctx.log.error('cleanup: sweep entry failed', { repo: repoKey(repo), iid, err: String(err) });
+    }
+  }
+  // Command-MR branch of the sweep (§MR-command / spec §7): `mr-<iid>` dirs are evicted once
+  // their MR is terminal (merged/closed) or gone — the mirror of the issue loop above.
+  for (const { dir, iid } of ctx.workspace.listMrWorkspaces(repo)) {
+    try {
+      const state = await ctx.adapter.getMergeRequestState(repo, iid);
+      if (state === 'merged' || state === 'closed' || state === 'missing') {
+        const evicted = await ctx.workspace.evict(dir);
+        if (!evicted)
+          ctx.log.warn('cleanup: command-MR workspace kept — unpushed commits (#56)', {
+            repo: repoKey(repo),
+            mr: iid,
+          });
+      }
+    } catch (err) {
+      ctx.log.error('cleanup: mr sweep entry failed', {
+        repo: repoKey(repo),
+        mr: iid,
+        err: String(err),
+      });
     }
   }
 }

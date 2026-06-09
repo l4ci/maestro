@@ -71,7 +71,9 @@ export function reviewFailMarker(round: number): string {
 export interface RunnerInput {
   workspaceDir: string;
   promptBody: string; // WORKFLOW.md body + operating protocol (§9)
-  context: { issue: Issue; mr?: MergeRequest; recentComments: Comment[] };
+  // `issue` is absent for a command-MR run (a standalone MR has no backing issue, §MR-command);
+  // every issue-lifecycle run still supplies it.
+  context: { issue?: Issue; mr?: MergeRequest; recentComments: Comment[] };
   claude: {
     command: string;
     maxTurns: number;

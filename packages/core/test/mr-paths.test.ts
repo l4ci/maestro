@@ -68,6 +68,8 @@ describe('WorkspaceManager.listMrWorkspaces', () => {
       { dir: mr9, iid: 9 },
     ]);
     // the issue sweep still ignores the MR dirs
-    expect(m.listWorkspaces(repo)).toEqual([{ dir: resolveWorkspacePath(root, repo, 42), iid: 42 }]);
+    expect(m.listWorkspaces(repo)).toEqual([
+      { dir: resolveWorkspacePath(root, repo, 42), iid: 42 },
+    ]);
   });
 });
