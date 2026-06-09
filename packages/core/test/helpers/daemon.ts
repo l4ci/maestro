@@ -91,6 +91,7 @@ export interface AdapterRecorder {
   labelOps: { iid: number; set: string[]; unset: string[] }[];
   merges: { mrIid: number; strategy: string; deleteSource: boolean }[];
   issueComments: { iid: number; body: string }[];
+  mrComments: { mrIid: number; body: string }[];
   mrDescriptions: { mrIid: number; body: string }[];
   branches: { name: string; fromRef: string }[];
   createdMRs: CreateMRArgs[];
@@ -104,6 +105,9 @@ export interface AdapterConfig {
   snapshots?: Map<number, IssueSnapshot>; // per-iid getSnapshot
   issueStates?: Map<number, 'open' | 'closed' | 'missing'>; // getIssueState
   createdMR?: MergeRequest; // createDraftMR return
+  mrs?: MergeRequest[]; // listAssignedOpenMergeRequests (command-MR pass)
+  mrComments?: Map<number, Comment[]>; // getMrComments per mrIid
+  mrStates?: Map<number, 'open' | 'closed' | 'merged' | 'missing'>; // getMergeRequestState
   fail?: Partial<Record<keyof ForgeAdapter, () => Error>>; // inject throws
 }
 
@@ -114,6 +118,7 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
     labelOps: [],
     merges: [],
     issueComments: [],
+    mrComments: [],
     mrDescriptions: [],
     branches: [],
     createdMRs: [],
@@ -126,6 +131,22 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
   };
   const a: ForgeAdapter = {
     kind: 'gitlab',
+    host: 'gitlab.com',
+    listAssignedOpenMergeRequests: async () => {
+      r.calls.push('listAssignedOpenMergeRequests');
+      maybeThrow('listAssignedOpenMergeRequests');
+      return cfg.mrs ?? [];
+    },
+    getMrComments: async (_repo, mrIid) => {
+      r.calls.push('getMrComments');
+      maybeThrow('getMrComments');
+      return cfg.mrComments?.get(mrIid) ?? [];
+    },
+    getMergeRequestState: async (_repo, mrIid) => {
+      r.calls.push('getMergeRequestState');
+      maybeThrow('getMergeRequestState');
+      return cfg.mrStates?.get(mrIid) ?? 'open';
+    },
     listAssignedOpenIssues: async () => {
       r.calls.push('listAssignedOpenIssues');
       maybeThrow('listAssignedOpenIssues');
@@ -178,7 +199,10 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
       r.calls.push('commentIssue');
       r.issueComments.push({ iid, body });
     },
-    commentMR: async () => void r.calls.push('commentMR'),
+    commentMR: async (_repo, mrIid, body) => {
+      r.calls.push('commentMR');
+      r.mrComments.push({ mrIid, body });
+    },
     ensureLabels: async () => void r.calls.push('ensureLabels'),
     createIssue: async () => {
       r.calls.push('createIssue');
@@ -215,28 +239,46 @@ export function scriptedRunner(results: AgentResult | AgentResult[]): RunnerSpy 
 export interface WorkspaceFake extends Workspace {
   evicted: string[];
   dirs: { dir: string; iid: number }[];
+  mrDirs: { dir: string; iid: number }[];
   ensured: { iid: number; fromRef: string }[]; // records ensureWorkspace(repo, iid, fromRef)
+  mrEnsured: { iid: number; fromRef: string }[]; // records ensureMrWorkspace(repo, iid, fromRef)
   pushed: { dir: string; branch: string }[]; // records pushBranch(handle, branch)
   seeded: { dir: string; branch: string }[]; // records seedBranch(handle, branch)
 }
 
 /** Fake workspace: configurable existing dirs; eviction removes from the list.
- *  `keep` lists dirs whose eviction is REFUSED (unpushed commits, #56). */
+ *  `keep` lists dirs whose eviction is REFUSED (unpushed commits, #56). `unpushed` is the
+ *  count `countUnpushedCommits` reports (the command-MR pass's "did the agent commit?"
+ *  signal, spec §5); default 0 (no change). */
 export function fakeWorkspace(
-  opts: { exists?: number[]; dirs?: { dir: string; iid: number }[]; keep?: string[] } = {},
+  opts: {
+    exists?: number[];
+    dirs?: { dir: string; iid: number }[];
+    mrDirs?: { dir: string; iid: number }[];
+    keep?: string[];
+    unpushed?: number;
+  } = {},
 ): WorkspaceFake {
   const dirs = opts.dirs ? [...opts.dirs] : [];
+  const mrDirs = opts.mrDirs ? [...opts.mrDirs] : [];
   const exists = new Set(opts.exists ?? []);
   const keep = new Set(opts.keep ?? []);
+  const unpushed = opts.unpushed ?? 0;
   const ws: WorkspaceFake = {
     evicted: [],
     dirs,
+    mrDirs,
     ensured: [],
+    mrEnsured: [],
     pushed: [],
     seeded: [],
     ensureWorkspace: async (r, iid, fromRef): Promise<WorkspaceHandleLike> => {
       ws.ensured.push({ iid, fromRef });
       return { dir: `/ws/${iid}`, repo: r, iid };
+    },
+    ensureMrWorkspace: async (r, iid, fromRef): Promise<WorkspaceHandleLike> => {
+      ws.mrEnsured.push({ iid, fromRef });
+      return { dir: `/ws/mr-${iid}`, repo: r, iid };
     },
     prepareBranch: async () => {},
     pushBranch: async (handle, branch) => void ws.pushed.push({ dir: handle.dir, branch }),
@@ -246,10 +288,14 @@ export function fakeWorkspace(
       ws.evicted.push(dir);
       const i = ws.dirs.findIndex((d) => d.dir === dir);
       if (i !== -1) ws.dirs.splice(i, 1);
+      const j = ws.mrDirs.findIndex((d) => d.dir === dir);
+      if (j !== -1) ws.mrDirs.splice(j, 1);
       return true;
     },
     workspaceExists: (_r, iid) => exists.has(iid),
     listWorkspaces: () => [...ws.dirs],
+    listMrWorkspaces: () => [...ws.mrDirs],
+    countUnpushedCommits: async () => unpushed,
   };
   return ws;
 }

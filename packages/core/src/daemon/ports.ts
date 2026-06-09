@@ -35,6 +35,9 @@ export interface WorkspaceHandleLike {
  */
 export interface Workspace {
   ensureWorkspace(repo: RepoRef, iid: number, fromRef: string): Promise<WorkspaceHandleLike>;
+  /** Materialize a command-MR workspace keyed `mr-<iid>` on its source branch (spec §7).
+   *  Distinct namespace from issues so the same number never shares a clone. */
+  ensureMrWorkspace(repo: RepoRef, mrIid: number, fromRef: string): Promise<WorkspaceHandleLike>;
   prepareBranch(handle: WorkspaceHandleLike, branchName: string): Promise<void>;
   /** Push the agent's local commits up to the MR branch. The agent's env has the forge
    *  token scrubbed (§13.1), so the DAEMON owns the push — without this the agent's work
@@ -48,6 +51,11 @@ export interface Workspace {
   evict(dir: string): Promise<boolean>;
   workspaceExists(repo: RepoRef, iid: number): boolean;
   listWorkspaces(repo: RepoRef): { dir: string; iid: number }[];
+  /** Command-MR workspace dirs (`mr-<iid>`) — the MR branch of the cleanup sweep (spec §7). */
+  listMrWorkspaces(repo: RepoRef): { dir: string; iid: number }[];
+  /** Commits on HEAD not yet on any origin ref — the command-MR pass pushes iff > 0 and
+   *  words its reply with the count (spec §5). */
+  countUnpushedCommits(handle: WorkspaceHandleLike): Promise<number>;
 }
 
 export interface Logger {

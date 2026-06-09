@@ -8,7 +8,12 @@ import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from
 import { basename, dirname, join } from 'node:path';
 import type { Exec, RepoRef } from '../contracts/index.js';
 import { type GitAuth, gitCloneAuth, persistedCredHelper } from './git-auth.js';
-import { assertInsideRoot, resolveWorkspacePath, slugifyProject } from './paths.js';
+import {
+  assertInsideRoot,
+  resolveMrWorkspacePath,
+  resolveWorkspacePath,
+  slugifyProject,
+} from './paths.js';
 
 /** Staging dir for atomic eviction (#56): rename in, then burn. Lives under root. */
 const TRASH_DIR = '.trash';
@@ -59,7 +64,22 @@ export class WorkspaceManager {
 
   /** Materialize (clone or reuse) the per-issue workspace and reset it to `fromRef`. */
   async ensureWorkspace(repo: RepoRef, iid: number, fromRef: string): Promise<WorkspaceHandle> {
-    const dir = resolveWorkspacePath(this.#root, repo, iid);
+    return this.#ensureAt(resolveWorkspacePath(this.#root, repo, iid), repo, iid, fromRef);
+  }
+
+  /** Materialize (clone or reuse) a command-MR workspace, keyed `mr-<iid>` (spec §7), and
+   *  reset it to the MR's source branch. Same clone/reuse machinery as the issue path;
+   *  only the on-disk key differs so the two namespaces never collide. */
+  async ensureMrWorkspace(repo: RepoRef, mrIid: number, fromRef: string): Promise<WorkspaceHandle> {
+    return this.#ensureAt(resolveMrWorkspacePath(this.#root, repo, mrIid), repo, mrIid, fromRef);
+  }
+
+  async #ensureAt(
+    dir: string,
+    repo: RepoRef,
+    iid: number,
+    fromRef: string,
+  ): Promise<WorkspaceHandle> {
     const auth = this.#cloneAuth(repo);
     let rescuedRef: string | undefined;
 
@@ -183,7 +203,9 @@ export class WorkspaceManager {
     return existsSync(join(resolveWorkspacePath(this.#root, repo, iid), '.git'));
   }
 
-  /** Per-repo workspace dirs mapped back to issue iids — drives the cleanup sweep (§0.5). */
+  /** Per-repo ISSUE workspace dirs (bare-number keys) mapped back to issue iids — drives
+   *  the issue cleanup sweep (§0.5). MR dirs (`mr-<iid>`) are not numbers, so they are
+   *  ignored here and swept separately via {@link listMrWorkspaces}. */
   listWorkspaces(repo: RepoRef): { dir: string; iid: number }[] {
     const repoDir = join(this.#root, slugifyProject(repo.project));
     if (!existsSync(repoDir)) return [];
@@ -194,6 +216,39 @@ export class WorkspaceManager {
       if (Number.isInteger(iid) && iid >= 0 && statSync(dir).isDirectory()) out.push({ dir, iid });
     }
     return out;
+  }
+
+  /** Per-repo COMMAND-MR workspace dirs (`mr-<iid>` keys) mapped back to MR iids — drives
+   *  the MR branch of the cleanup sweep (spec §7). The mirror of {@link listWorkspaces}. */
+  listMrWorkspaces(repo: RepoRef): { dir: string; iid: number }[] {
+    const repoDir = join(this.#root, slugifyProject(repo.project));
+    if (!existsSync(repoDir)) return [];
+    const out: { dir: string; iid: number }[] = [];
+    for (const name of readdirSync(repoDir)) {
+      const m = /^mr-(\d+)$/.exec(name);
+      const dir = join(repoDir, name);
+      if (m && statSync(dir).isDirectory()) out.push({ dir, iid: Number(m[1]) });
+    }
+    return out;
+  }
+
+  /** How many commits sit on HEAD that no origin ref has — i.e. work the agent committed
+   *  this run that still needs pushing. The command-MR pass reads this to decide whether to
+   *  push and how to word its reply (spec §5). An unanswerable probe counts as 0 (no push,
+   *  no false "pushed N" claim); the next command can retry. */
+  async countUnpushedCommits(handle: WorkspaceHandle): Promise<number> {
+    return this.#gitOut([
+      '-C',
+      handle.dir,
+      'rev-list',
+      '--count',
+      'HEAD',
+      '--not',
+      '--remotes=origin',
+    ]).then(
+      (count) => Number(count) || 0,
+      () => 0,
+    );
   }
 
   /** Evict LRU workspaces until total disk ≤ cap, never evicting a dir in `inUse`. */
