@@ -259,6 +259,13 @@ export class GithubAdapter implements ForgeAdapter {
     }
   }
 
+  async closeMR(repo: RepoRef, mrIid: number): Promise<void> {
+    const base = this.#base(repo);
+    const pr = await this.#c.apiRequired<RawPr>('GET', `${base}/pulls/${mrIid}`);
+    if (pr.merged === true || pr.state === 'closed') return; // idempotent — terminal already
+    await this.#c.api('PATCH', `${base}/pulls/${mrIid}`, { body: { state: 'closed' } });
+  }
+
   async setIssueLabels(
     repo: RepoRef,
     issueIid: number,

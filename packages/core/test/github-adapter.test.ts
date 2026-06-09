@@ -326,6 +326,32 @@ describe('Slice 7 — mergeMR', () => {
 
 // --- Slice 8: setIssueLabels (FLAT mutual exclusion — the key divergence) --
 
+// --- Slice 7b: closeMR (#88) -----------------------------------------------
+
+describe('Slice 7b — closeMR', () => {
+  it('PATCHes state=closed on an open PR', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/pulls/7', rawPr({ state: 'open', merged: false }));
+    fake.onApi('PATCH', '/pulls/7', rawPr({ state: 'closed' }));
+    await a.closeMR(repo, 7);
+    expect(bodyOf(fake, 'PATCH', '/pulls/7').state).toBe('closed');
+  });
+
+  it('is idempotent — already-closed PR makes no PATCH', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/pulls/7', rawPr({ state: 'closed' }));
+    await a.closeMR(repo, 7);
+    expect(fake.callsTo('PATCH', '/pulls/7')).toHaveLength(0);
+  });
+
+  it('never closes a merged PR', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/pulls/7', rawPr({ state: 'open', merged: true }));
+    await a.closeMR(repo, 7);
+    expect(fake.callsTo('PATCH', '/pulls/7')).toHaveLength(0);
+  });
+});
+
 describe('Slice 8 — setIssueLabels (flat mutual exclusion enforced in adapter)', () => {
   it('removes sibling maestro:* labels when setting one, leaves non-maestro untouched', async () => {
     const { a, fake } = mk();

@@ -57,6 +57,9 @@ export interface ForgeAdapter {
     strategy: MergeStrategy,
     deleteSource: boolean,
   ): Promise<void>;
+  /** Close an open MR/PR WITHOUT merging — the daemon-action `/maestro close` (#88).
+   *  Idempotent: a no-op on an already closed or merged MR. */
+  closeMR(repo: RepoRef, mrIid: number): Promise<void>;
 
   setIssueLabels(repo: RepoRef, issueIid: number, set: string[], unset: string[]): Promise<void>;
   commentIssue(repo: RepoRef, issueIid: number, body: string): Promise<void>;

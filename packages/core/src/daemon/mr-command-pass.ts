@@ -15,6 +15,7 @@ import type {
 } from '../contracts/index.js';
 import { MR_COMMAND_REPLY_SENTINEL } from '../contracts/index.js';
 import { decideMrCommand } from '../mr-command/decide.js';
+import { type MetaCommand, metaCommandOf } from '../mr-command/meta.js';
 import { buildMrCommandPrompt } from '../mr-command/prompt.js';
 import type { TickContext } from './ports.js';
 import { repoKey } from './ports.js';
@@ -62,6 +63,29 @@ export async function evaluateMrCommands(
       const thread = await ctx.adapter.getMrComments(repo, mr.iid);
       const intent = decideMrCommand(thread, ctx.settings.botUser, ctx.settings.trigger);
       if (intent.kind !== 'run-mr-command') continue;
+
+      // Daemon-action meta-command (#88): a forge mutation the token-scrubbed agent cannot do
+      // (§13.1). No agent run, no workspace, no slot, and — unlike the agent path — NOT gated on
+      // the Claude rate limit (#47), since no Claude spawn is needed. Still ALWAYS replies with
+      // the sentinel, so the same edge self-clears (issue #5 lesson).
+      const meta = metaCommandOf(intent.instruction);
+      if (meta) {
+        ctx.log.info('mr-command meta-action', { repo: key, mr: mr.iid, action: meta });
+        launched = runMetaCommand(repo, mr, meta, ctx)
+          .then(
+            () => {},
+            (err) =>
+              ctx.log.error('mr-command: meta-action failed', {
+                repo: key,
+                mr: mr.iid,
+                action: meta,
+                err: String(err),
+              }),
+          )
+          .finally(() => ctx.inFlight.delete(scope, mr.iid));
+        pending.push(launched);
+        continue;
+      }
 
       // Claude rate-limited (#47): a fresh spawn is doomed — no-op, the command stays pending.
       if (ctx.rateGate.pausedUntil() !== null) {
@@ -131,6 +155,58 @@ async function runMrCommand(
     pushed = unpushed;
   }
   await ctx.adapter.commentMR(repo, mr.iid, mrReply(result, pushed));
+}
+
+/** Perform a daemon-action meta-command directly via the adapter (#88), then ALWAYS reply with
+ *  the sentinel — success, draft-blocked, or error — so the edge self-clears and never loops.
+ *  Merge is blocked on a draft MR (it would fail at the forge anyway); both adapter mutations are
+ *  idempotent, so a reply that fails to post just retries the (no-op) mutation next tick. */
+async function runMetaCommand(
+  repo: RepoRef,
+  mr: MergeRequest,
+  action: MetaCommand,
+  ctx: TickContext,
+): Promise<void> {
+  if (action === 'merge' && mr.isDraft) {
+    await ctx.adapter.commentMR(
+      repo,
+      mr.iid,
+      metaReply('🚫 This MR is still a draft — mark it ready, then re-comment `/maestro merge`.'),
+    );
+    return;
+  }
+  try {
+    if (action === 'merge') {
+      await ctx.adapter.mergeMR(
+        repo,
+        mr.iid,
+        ctx.settings.git.mergeStrategy,
+        ctx.settings.git.deleteSourceBranch,
+      );
+      await ctx.adapter.commentMR(repo, mr.iid, metaReply('✅ Merged this MR.'));
+    } else {
+      await ctx.adapter.closeMR(repo, mr.iid);
+      await ctx.adapter.commentMR(repo, mr.iid, metaReply('✅ Closed this MR.'));
+    }
+  } catch (err) {
+    ctx.log.error(`mr-command: ${action} mutation failed`, {
+      repo: repoKey(repo),
+      mr: mr.iid,
+      err: String(err),
+    });
+    await ctx.adapter.commentMR(
+      repo,
+      mr.iid,
+      metaReply(
+        `❌ Couldn't ${action} this MR: ${String(err)}\n\nResolve it, then re-comment \`/maestro ${action}\`.`,
+      ),
+    );
+  }
+}
+
+/** The meta-action reply body — carries the sentinel like every command-MR reply. */
+function metaReply(head: string): string {
+  return `🎼 ${head}\n\n${MR_COMMAND_REPLY_SENTINEL}`;
 }
 
 function buildMrRunnerInput(
