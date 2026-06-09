@@ -21,14 +21,20 @@ describe('isHumanComment — shared-account rule (§13.1)', () => {
   });
 
   it('bot author with body-start /maestro is human', () => {
-    expect(isHumanComment(c({ author: { id: '1', username: 'bot' }, body: '/maestro do x' }), 'bot')).toBe(true);
+    expect(
+      isHumanComment(c({ author: { id: '1', username: 'bot' }, body: '/maestro do x' }), 'bot'),
+    ).toBe(true);
   });
 
   it('bot author, mid-body /maestro is NOT human', () => {
-    expect(isHumanComment(c({ author: { id: '1', username: 'bot' }, body: 'plan\n/maestro x' }), 'bot')).toBe(false);
+    expect(
+      isHumanComment(c({ author: { id: '1', username: 'bot' }, body: 'plan\n/maestro x' }), 'bot'),
+    ).toBe(false);
   });
 
   it('bot author, plain body is NOT human', () => {
-    expect(isHumanComment(c({ author: { id: '1', username: 'bot' }, body: 'just a note' }), 'bot')).toBe(false);
+    expect(
+      isHumanComment(c({ author: { id: '1', username: 'bot' }, body: 'just a note' }), 'bot'),
+    ).toBe(false);
   });
 });

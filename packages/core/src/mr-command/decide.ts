@@ -6,9 +6,7 @@ import type { Comment, TriggerGuard } from '../contracts/index.js';
 import { MAESTRO_COMMAND_RE, MR_COMMAND_REPLY_SENTINEL } from '../contracts/index.js';
 import { isHumanComment } from '../forge/comments.js';
 
-export type MrCommandIntent =
-  | { kind: 'run-mr-command'; instruction: string }
-  | { kind: 'none' };
+export type MrCommandIntent = { kind: 'run-mr-command'; instruction: string } | { kind: 'none' };
 
 /**
  * React-once, self-clearing: run the NEWEST authorized body-start `/maestro` command that
@@ -36,5 +34,8 @@ export function decideMrCommand(
     (c) => MAESTRO_COMMAND_RE.test(c.body) && authorized(c) && c.createdAt > lastReplyAt,
   );
   if (!command) return { kind: 'none' };
-  return { kind: 'run-mr-command', instruction: command.body.replace(MAESTRO_COMMAND_RE, '').trim() };
+  return {
+    kind: 'run-mr-command',
+    instruction: command.body.replace(MAESTRO_COMMAND_RE, '').trim(),
+  };
 }

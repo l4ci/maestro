@@ -34,18 +34,28 @@ const plain = (body: string, createdAt: string, author: string): Comment => ({
 describe('decideMrCommand — react-once self-clearing edge', () => {
   it('(a) command after no reply → run, instruction stripped of the leading token', () => {
     expect(
-      decideMrCommand([cmd('/maestro make sure this works', '2026-02-02', 'maintainer')], 'bot', guard),
+      decideMrCommand(
+        [cmd('/maestro make sure this works', '2026-02-02', 'maintainer')],
+        'bot',
+        guard,
+      ),
     ).toEqual({ kind: 'run-mr-command', instruction: 'make sure this works' });
   });
 
   it('(b) command OLDER than the last bot reply → none', () => {
     expect(
-      decideMrCommand([reply('2026-02-03'), cmd('/maestro x', '2026-02-02', 'maintainer')], 'bot', guard).kind,
+      decideMrCommand(
+        [reply('2026-02-03'), cmd('/maestro x', '2026-02-02', 'maintainer')],
+        'bot',
+        guard,
+      ).kind,
     ).toBe('none');
   });
 
   it('(c) no /maestro comment → none', () => {
-    expect(decideMrCommand([plain('just a note', '2026-02-02', 'maintainer')], 'bot', guard).kind).toBe('none');
+    expect(
+      decideMrCommand([plain('just a note', '2026-02-02', 'maintainer')], 'bot', guard).kind,
+    ).toBe('none');
   });
 
   it('(d) two stacked commands after last reply → newest wins', () => {
@@ -76,7 +86,9 @@ describe('decideMrCommand — react-once self-clearing edge', () => {
   });
 
   it('(f) shared account: bot-authored body-start /maestro counts as human', () => {
-    expect(decideMrCommand([cmdBy('/maestro x', '2026-02-02', 'bot')], 'bot', guard).kind).toBe('run-mr-command');
+    expect(decideMrCommand([cmdBy('/maestro x', '2026-02-02', 'bot')], 'bot', guard).kind).toBe(
+      'run-mr-command',
+    );
   });
 
   it('(g) a mid-body /maestro inside a bot comment is NOT a command', () => {

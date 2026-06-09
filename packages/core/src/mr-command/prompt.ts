@@ -41,8 +41,7 @@ export function buildMrCommandPrompt(input: MrCommandPromptInput): string {
     '',
     '## How to work',
     '',
-    '1. Orient first: read the MR description and inspect the diff on this branch ' +
-      `(\`git diff ${mr.targetBranch}...HEAD\`) before changing anything.`,
+    `1. Orient first: read the MR description and inspect the diff on this branch (\`git diff ${mr.targetBranch}...HEAD\`) before changing anything.`,
     '2. Do exactly what the instruction asks. If it needs no code change (a question, a ' +
       'check), just do the analysis and report what you found.',
     '3. If you change code, make atomic git commits in this working directory. The daemon ' +
