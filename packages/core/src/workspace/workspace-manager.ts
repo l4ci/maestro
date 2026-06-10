@@ -127,6 +127,17 @@ export class WorkspaceManager {
           persistedCredHelper(auth.tokenEnvName),
         ]);
       }
+      // A fresh clone lands on the repo's DEFAULT branch, but the caller asked for fromRef.
+      // Issue work cuts its branch off this point via prepareBranch, so the position is
+      // moot there — but the review/merge path runs the agent DIRECTLY on the MR's source
+      // branch with no prepareBranch, so the workspace must already sit on it. Position it
+      // now, daemon-side (mirrors the reuse path): on a blobless clone the reset materializes
+      // fromRef's blobs through the persisted helper + the daemon's token, so the token-
+      // scrubbed agent (§13.1) can read the diff without ever touching the network. Without
+      // this, a first-touch review found the file list (trees) but no contents (blobs) and
+      // parked itself blocked.
+      await this.#git([...auth.args, '-C', dir, 'fetch', 'origin', fromRef], auth.env);
+      await this.#git(['-C', dir, 'reset', '--hard', 'FETCH_HEAD']);
     }
     this.#touch(dir);
     return rescuedRef !== undefined ? { dir, repo, iid, rescuedRef } : { dir, repo, iid };
