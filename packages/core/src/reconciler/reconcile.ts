@@ -23,6 +23,7 @@ import {
 } from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
 import { isHumanComment } from '../forge/comments.js';
+import { isAuthorizedActor } from '../security/authorized-actor.js';
 
 function assertNever(x: never): never {
   throw new Error(`unreachable lifecycle state: ${String(x)}`);
@@ -33,10 +34,7 @@ function passesTriggerGuard(issue: Issue, trigger: TriggerGuard, botUser: string
   const assignedToBot = issue.assignees.some((a) => a.username === botUser);
   if (!assignedToBot) return false;
   if (trigger.requireLabel !== null && !issue.labels.includes(trigger.requireLabel)) return false;
-  if (trigger.allowedActors.length > 0) {
-    const actor = issue.lastActor;
-    if (!actor || !trigger.allowedActors.includes(actor.username)) return false; // fail-closed
-  }
+  if (!isAuthorizedActor(issue.lastActor?.username, trigger.allowedActors)) return false;
   return true;
 }
 
