@@ -6,6 +6,7 @@ export * from './reconciler/reconcile.js';
 export * from './config/load-config.js';
 export * from './config/resolve-settings.js';
 export * from './workflow/load-workflow.js';
+export * from './compose/forge-wiring.js';
 export * from './workflow/roles.js';
 export * from './workflow/workflow-source.js';
 export * from './exec/node-exec.js';
