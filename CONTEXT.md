@@ -108,6 +108,48 @@ full ancestry including target-branch history). An empty commit fetch skips the 
 so a transient miss never wipes a live region. v1 mirrors commits only — NO fuzzy-matching
 commit text to plan checkboxes (decided in the issue).
 
+## Intent executor
+
+The **intent executor** (`daemon/executor.ts`, decided 2026-06-10 round-2 review, not yet built)
+is the effect-side counterpart of the pure edges: one module owning the
+workspace → run → push → record → move choreography that the eight `run*` handlers in `tick.ts`
+and the command-MR `runMrCommand` each re-implement today. Interface:
+`executeIntent(intent, snapshot, ctx: ExecutorContext)` (plus the command-MR entry) — the switch
+and the thin per-intent functions live INSIDE the module sharing private helpers; a declarative
+plan table was rejected (verdict handling and AC-draft comments don't fit data). The executor
+owns a small intent-kind → LifecycleMove map (the reconciler's Intent contract does NOT gain a
+move field). `ExecutorContext` is a narrow subset of TickContext — the tick keeps claims/slots
+and rate-gating, the executor gets only what execution needs. The command-MR run path folds in
+the same slice; mr-command-pass keeps its claim loop and pure decide.
+
+## Proof-failure escalation
+
+Proof generation has a typed error mode (decided 2026-06-10, not yet built):
+`ProofGenerationError` (strategy + cause) thrown at the proof seam; a per-issue in-memory
+consecutive-failure streak in the daemon (restart resets it — acceptable); a pure
+`decideProofFailure(streak)` edge beside the after-run edge returning retry-proof (streak < 3) or
+park-blocked with a comment carrying the failure reason. Counter clears on success; a human
+reply un-parks via the existing unblock edge. Replaces the silent identical-retry-forever loop.
+Ships with the missing crash-recovery (agent-done → daemon restart → idempotent handoff)
+integration test.
+
+## Snapshot validation
+
+`assembleSnapshot` verifies the ForgePrimitives promise (decided 2026-06-10, not yet built): zod
+schemas for the §0.2 model pieces (Issue, MergeRequest, Comment — core already ships zod for the
+same semi-trusted-input reason as WorkflowSchema), `safeParse` at assembly, throw naming the
+forge and field path. Normalization bugs surface at the seam that promised them away instead of
+in the reconciler or views; a third forge inherits the contract check for free.
+
+## Workspace seam (deferred)
+
+The task-level workspace seam (raise the 8 granular git/fs methods to
+acquire-workspace → run-task → push so a container backend wraps whole task lifecycles) is
+DEFERRED (decided 2026-06-10): one adapter exists, nothing varies across the seam. Trigger to
+revisit: the container backend becoming real. Until then all workspace choreography routes
+through the intent executor, making the later raise a one-caller change. Do not re-propose while
+the host backend is the only adapter.
+
 ## Public vs. runtime surface
 
 Core presents two interfaces via package.json subpath exports (decided 2026-06-09, built
