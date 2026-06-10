@@ -37,7 +37,7 @@ Beneath that public interface, two shared modules carry what used to be duplicat
 
 ## Forge wiring
 
-The **forge wiring** module (`core/src/compose/`, decided 2026-06-09, not yet built) is the one
+The **forge wiring** module (`core/src/compose/forge-wiring.ts`, built 2026-06-10, PR #98) is the one
 place forge-aware construction lives: token-env lookup, botUser-per-host resolution, the
 GitLab/GitHub adapter choice, plus the static settings path (config parse, WORKFLOW.md cache read
 with bootstrap-template fallback) that `cli/main` and `web/main` previously each implemented.
@@ -53,11 +53,14 @@ wiring module makes that later fix one-place.
 
 ## Claim
 
-A **claim** (decided 2026-06-09, not yet built) is the daemon's unit of work admission — one
-object owning both concurrency resources for one issue: **uniqueness** (this issue is not already
-being worked; today `InFlightSet`) and **capacity** (a worker slot under global and per-repo caps;
-today `SlotAccountant`). Interface: `claims.open(key, iid) → Claim | null` (null = already in
-flight, claimed before any await), `claim.slotAvailable(max)`, `claim.holdSlot()` (called once in
+A **claim** (`daemon/claims.ts`, built 2026-06-10, PR #99) is the daemon's unit of work admission
+— one object owning both concurrency resources for one unit of work (an issue, or a command MR):
+**uniqueness** (not already being worked; internally `InFlightSet`) and **capacity** (a worker
+slot under global and per-repo caps; internally `SlotAccountant`). Interface:
+`claims.open(key, iid, scope = key) → Claim | null` (null = already in flight, claimed before any
+await; the command-MR pass passes a distinct `scope` so issue iid 5 and MR iid 5 never collide
+while the SLOT stays keyed on the repo — one shared per-repo budget, §14),
+`claim.slotAvailable(max)`, `claim.holdSlot()` (called once in
 `beginIntent`, keyed on the slot-consuming intent set — not per switch case), `claim.close()`
 (releases whatever is held, idempotent, the only release path). SlotAccountant and InFlightSet
 survive as internal seams behind the Claims interface; only Claims is exported. `holdSlot` is
@@ -66,7 +69,7 @@ deliberately uncheck-and-take like today's `acquire` — capacity policy lives i
 
 ## After-run edge
 
-The **after-run edge** (`reconciler/after-run.ts`, decided 2026-06-09, not yet built) is the pure
+The **after-run edge** (`reconciler/after-run.ts`, built 2026-06-10, PR #101) is the pure
 runner-result half of the issue lifecycle: `decideAfterRun(result, { hasMr, rolesDeclared }) →
 AfterRunDecision`, a tagged union in the Intent idiom (`pause-spawns` / `proof-and-handoff` /
 `proof-only-then-in-review` / `no-mr-error` / `mark-blocked` / `wait`). It lives beside
@@ -92,8 +95,8 @@ makeForgeAdapter are the way in (#90). Node resolution enforces the seam (pinned
 
 ## Authorized actor
 
-`isAuthorizedActor(username | undefined, allowedActors)` (`core/src/security/`, decided
-2026-06-09, not yet built) is the one implementation of the trigger allowlist rule: empty list →
+`isAuthorizedActor(username | undefined, allowedActors)` (`security/authorized-actor.ts`, built
+2026-06-10, PR #97) is the one implementation of the trigger allowlist rule: empty list →
 allowed; missing username with a non-empty list → fail-closed. Both the issue trigger guard
 (`reconcile.ts`) and the command-MR edge (`mr-command/decide.ts`) call it; `isHumanComment` stays
 separate in the MR path. security/ is neutral ground, so the mr-command thesis guard (reconciler

@@ -12,9 +12,11 @@ Mode: worktree-isolated agents per issue, PRs only, sequential review+merge thro
 
 ## Blocked (dispatch after blocker merges)
 
-- [ ] #94 after-run edge — after #91 ✓ (unblocked)
-- [ ] #95 public/runtime surface split — after #90 ✓ (unblocked)
+- [x] #94 after-run edge — PR #101 merged (deviation: decision carries resetAt as ISO 8601, tick parses back; round trip pinned by test)
+- [x] #95 public/runtime surface split — PR #102 merged (exceptions documented in public.ts and CONTEXT.md: WorkspaceManager + ForgeError stay public; adapter classes exported from NEITHER surface)
 
 ## Review
 
 - 2026-06-10: #97→#100 merged sequentially (plain merge commits), CI green on all; full verification chain re-run on combined main (98+99 both touched cli/daemon.ts).
+- 2026-06-10: #101 merged; #102 conflicted with it (index.ts deleted vs. modified) — agent merged main back in, after-run edge routed onto the public surface, chain green, merged. Final main verified: all six review issues (#90–#95) closed.
+- Daemon residue: the daemon had independently picked up #90 (PR #96) — closed as superseded by #98.
