@@ -512,12 +512,22 @@ function render(view) {
   reconcile(root, sortReposByAttention(view.repos), (r) => r.repo.url, createRepoCard, updateRepoCard);
 }
 
-function createRepoCard(r) {
+// One render path per field (#106). The create* functions below build KEYED SKELETONS
+// only — structure, classes, event wiring — and never touch a view value. Every field
+// lands in the matching update* function, which the keyed reconcile runs on freshly
+// created nodes too, so create + update IS the create path. Each field's value (and its
+// security discipline: textContent only, safeUrl on every forge-controlled URL, no
+// innerHTML, §13.1) therefore renders in exactly one place — the historical #35 XSS was
+// an update-path bypass of the old create/update split. The parity suite in page.test.ts
+// pins the rule structurally: a fresh node painted with a view must equal a stub node
+// updated with the same view.
+
+function createRepoCard() {
   const card = document.createElement('div');
   card.className = 'repo';
   const h2 = document.createElement('h2');
   const chev = span('chev', '▾');
-  h2.append(chev, r.repo.project, span('counts', ''));
+  h2.append(chev, span('project', ''), span('counts', ''));
   const table = document.createElement('table');
   table.append(document.createElement('tbody'));
   // Collapse on header click (#34): plain node state — the keyed renderer never
@@ -531,6 +541,7 @@ function createRepoCard(r) {
 }
 
 function updateRepoCard(card, r) {
+  card.querySelector('.project').textContent = r.repo.project;
   // A repo whose forge call failed carries an error marker — show it as unreachable
   // instead of a misleading idle, so broken auth never looks like a healthy empty repo.
   const counts = card.querySelector('.counts');
@@ -580,7 +591,6 @@ function createRow(x) {
   if (x.key === '~error' || x.key === '~empty') {
     const cell = td(x.key === '~error' ? 'err' : 'empty');
     cell.colSpan = 4;
-    if (x.key === '~empty') cell.textContent = 'no open issues assigned to the bot';
     tr.append(cell);
   } else if (x.detail) {
     // The drill-down panel row (#41): one full-width cell, hidden until its summary row is
@@ -593,12 +603,9 @@ function createRow(x) {
     tr.append(cell);
   } else {
     tr.className = 'issue';
-    const iid = td('iid');
-    iid.append(link('', '', '')); // forge issue link; text + href filled in updateRow
-    const state = td('state');
-    state.append(badge(x.issue.state));
-    // People cell: author (+ reviewer once handed off) as round avatars, filled in updateRow.
-    tr.append(iid, state, td(''), td('people'));
+    // Four cells: issue link, state badge, title (+ MR link + activity line), people.
+    // All empty skeletons — updateRow fills every value, on first paint and poll alike.
+    tr.append(td('iid'), td('state'), td(''), td('people'));
     // Click anywhere on the summary row (except the forge links, which open in a new tab)
     // toggles its detail row open/closed and lazy-loads it once. The detail row is the
     // immediate next sibling, by construction of the paired keyed rows above.
@@ -611,18 +618,20 @@ function createRow(x) {
 }
 
 function updateRow(tr, x) {
-  if (x.key === '~empty' || x.detail) return;
+  if (x.detail) return;
+  if (x.key === '~empty') {
+    tr.firstElementChild.textContent = 'no open issues assigned to the bot';
+    return;
+  }
   if (x.key === '~error') {
     tr.firstElementChild.textContent = '⚠ ' + x.error;
     return;
   }
   const [iid, state, title, people] = tr.children;
-  const issueLink = iid.firstElementChild;
-  issueLink.textContent = '#' + x.issue.iid;
-  issueLink.href = safeUrl(x.issue.issueUrl);
-  const b = state.firstElementChild;
-  b.className = 'badge s-' + x.issue.state;
-  b.textContent = x.issue.state;
+  // Issue link + state badge: rebuilt every poll through the same helpers as everything
+  // else, so link() → safeUrl() stays the only place an anchor gets a forge href.
+  iid.replaceChildren(link('', '#' + x.issue.iid, x.issue.issueUrl));
+  state.replaceChildren(badge(x.issue.state));
   // Title cell holds the title text node plus an optional MR/PR link; rebuild both so a
   // newly-opened (or vanished) MR is reflected across polls without recreating the row.
   const noun = x.forge === 'github' ? 'PR' : 'MR';
