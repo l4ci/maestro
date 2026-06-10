@@ -12,6 +12,8 @@ export * from './exec/node-exec.js';
 export { ForgeCli, buildPath } from './forge/cli.js';
 export type { ForgeCliConfig, HttpMethod, ApiOptions } from './forge/cli.js';
 export { ForgeError } from './forge/errors.js';
+export { composeForges, loadConfigFile, makeForgeAdapter } from './forge/wiring.js';
+export type { ForgeWiring } from './forge/wiring.js';
 export {
   type ForgePrimitives,
   assembleSnapshot,
