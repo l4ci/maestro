@@ -33,6 +33,7 @@ import {
 } from '../contracts/index.js';
 import type { ForgeAdapter } from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
+import { decideAfterRun } from '../reconciler/after-run.js';
 import { reconcile } from '../reconciler/reconcile.js';
 import { type AgentRole, declaresRoles, promptForRole } from '../workflow/roles.js';
 import type { Claim } from './claims.js';
@@ -345,19 +346,6 @@ function startWorkComment(branch: string, mr: MergeRequest): string {
   ].join('\n');
 }
 
-/** Blocked comment (#25): a heading the thread can scan, the agent's questions verbatim
- *  (the STATUS_CONTRACT asks it to number multiple questions), and what unblocks it.
- *  Unblock detection keys on author + timestamp (repliesSinceBlock), not on this text. */
-function blockedComment(summary: string): string {
-  return [
-    '### 🚧 Blocked — input needed',
-    '',
-    summary,
-    '',
-    '_Reply in this thread to answer; maestro resumes this issue on its next pass. If you write from the bot’s own account, start the reply with `/maestro`._',
-  ].join('\n');
-}
-
 /** Surface a #55 rescue: the workspace reset found committed-but-unpushed work and
  *  parked it on a rescue ref instead of destroying it — a human may want it back. */
 function warnIfRescued(handle: WorkspaceHandleLike, ctx: TickContext): void {
@@ -648,7 +636,8 @@ async function runReview(
   }
 }
 
-/** §0.9 runner-result → lifecycle mapping — the mapping the daemon OWNS. */
+/** §0.9 runner-result → lifecycle mapping. The DECISION lives in the pure after-run
+ *  edge (reconciler/after-run.ts); this function only executes its effects. */
 async function applyAgentResult(
   result: AgentResult,
   snapshot: IssueSnapshot,
@@ -657,12 +646,18 @@ async function applyAgentResult(
   ctx: TickContext,
 ): Promise<void> {
   const { repo, issue } = snapshot;
+  const decision = decideAfterRun(result, {
+    hasMr: mr !== undefined,
+    rolesDeclared: declaresRoles(ctx.promptBody),
+  });
   // Rate-limited run (#47): the spawn was doomed, not an agent error. Pause ALL
   // spawning (CLI-reported reset time when present, else capped exponential backoff)
   // and apply nothing — no plan write, no lifecycle transition; the issue resumes
   // untouched once the gate reopens. A healthy run clears the gate's trip streak.
-  if (result.rateLimit) {
-    const until = ctx.rateGate.trip(result.rateLimit.resetAt);
+  if (decision.kind === 'pause-spawns') {
+    const until = ctx.rateGate.trip(
+      decision.resetAt === undefined ? undefined : Date.parse(decision.resetAt),
+    );
     ctx.log.warn('claude rate-limited: pausing all agent spawns (#47)', {
       repo: repoKey(repo),
       iid: issue.iid,
@@ -676,38 +671,39 @@ async function applyAgentResult(
   // still records its plan and a done run lands the fully-ticked todo. The MR
   // description is the durable detailed plan/todo; the issue gets a one-time summary.
   await recordPlan(result, snapshot, mr, ctx);
-  switch (result.status) {
-    case 'done': {
-      if (!mr) {
-        ctx.log.error('agent done but no MR to hand off', { repo: repoKey(repo), iid: issue.iid });
-        return;
-      }
-      // Role pipeline (#29 P3): implementation `done` posts the proof but NOT the
-      // handoff — the internal review gate decides when a human gets pinged. The
-      // in-review label is a projection for boards; the thread markers are the truth.
-      if (declaresRoles(ctx.promptBody)) {
-        await ctx.proofOnly({
-          repo,
-          issueIid: issue.iid,
-          mrIid: mr.iid,
-          ticketCreator: issue.author.username,
-          settings: ctx.settings,
-          adapter: ctx.adapter,
-          proofInput: {
-            workspaceDir,
-            strategies: ctx.workflow.proof,
-            environment: ctx.workflow.environment,
-            exec: ctx.exec,
-          },
-        });
-        await ctx.adapter.setIssueLabels(
-          repo,
-          issue.iid,
-          [ctx.settings.labels.inReview],
-          [ctx.settings.labels.inProgress],
-        );
-        return;
-      }
+  switch (decision.kind) {
+    case 'no-mr-error':
+      ctx.log.error('agent done but no MR to hand off', { repo: repoKey(repo), iid: issue.iid });
+      return;
+    // Role pipeline (#29 P3): implementation `done` posts the proof but NOT the
+    // handoff — the internal review gate decides when a human gets pinged. The
+    // in-review label is a projection for boards; the thread markers are the truth.
+    case 'proof-only-then-in-review': {
+      if (!mr) return; // unreachable: the decision implies hasMr
+      await ctx.proofOnly({
+        repo,
+        issueIid: issue.iid,
+        mrIid: mr.iid,
+        ticketCreator: issue.author.username,
+        settings: ctx.settings,
+        adapter: ctx.adapter,
+        proofInput: {
+          workspaceDir,
+          strategies: ctx.workflow.proof,
+          environment: ctx.workflow.environment,
+          exec: ctx.exec,
+        },
+      });
+      await ctx.adapter.setIssueLabels(
+        repo,
+        issue.iid,
+        [ctx.settings.labels.inReview],
+        [ctx.settings.labels.inProgress],
+      );
+      return;
+    }
+    case 'proof-and-handoff': {
+      if (!mr) return; // unreachable: the decision implies hasMr
       await ctx.proofAndHandoff({
         repo,
         issueIid: issue.iid,
@@ -724,16 +720,16 @@ async function applyAgentResult(
       });
       return;
     }
-    case 'needs_input':
+    case 'mark-blocked':
       await ctx.adapter.setIssueLabels(
         repo,
         issue.iid,
         [ctx.settings.labels.blocked],
         [ctx.settings.labels.inProgress],
       );
-      await ctx.adapter.commentIssue(repo, issue.iid, blockedComment(result.summary));
+      await ctx.adapter.commentIssue(repo, issue.iid, decision.comment);
       return;
-    default:
+    case 'wait':
       // in_progress → leave the labels untouched; the next tick resumes (§0.9).
       return;
   }
