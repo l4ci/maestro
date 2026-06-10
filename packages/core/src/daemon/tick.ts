@@ -3,9 +3,12 @@
 //   (a) lifecycle  — listAssignedOpenIssues → getSnapshot → reconcile → execute Intent
 //   (b) cleanup     — enumerate workspace dirs → getIssueState → evict terminal ones
 // It adds NO business rules beyond the orchestration the contracts assigned it:
-// concurrency accounting, the runner-result→lifecycle mapping (§0.9), and the two
-// passes. Everything else is delegated to the already-tested M1–M4 units behind the
-// TickContext seam (ports.ts), so this file is unit-testable with zero real I/O.
+// concurrency accounting (claims, slots, the rate-limit gate) and the two passes.
+// Executing an admitted Intent — the workspace → run → push → record → move
+// choreography, including the §0.9 runner-result→lifecycle mapping — lives in the
+// intent executor (executor.ts, #105). Everything else is delegated to the
+// already-tested M1–M4 units behind the TickContext seam (ports.ts), so this file is
+// unit-testable with zero real I/O.
 //
 // OPS GUARDS (§14, documented not coded — there is no cross-install coordination in
 // v1, §17):
@@ -18,30 +21,26 @@
 //    so a restart loses nothing). Disk is bounded by the M3 WorkspaceManager LRU.
 
 import {
-  AC_DRAFT_SENTINEL,
-  type AgentResult,
   DONE_SENTINEL,
   type Intent,
   type IssueSnapshot,
-  type MergeRequest,
-  PLAN_COMMENT_SENTINEL,
-  type ProofResult,
-  REVIEW_PASS_SENTINEL,
   type RepoRef,
-  type RunnerInput,
-  reviewFailMarker,
 } from '../contracts/index.js';
 import type { ForgeAdapter } from '../contracts/index.js';
-import { branchName, mrTitle } from '../contracts/naming.js';
-import { decideAfterRun } from '../reconciler/after-run.js';
 import { reconcile } from '../reconciler/reconcile.js';
 import { lifecycleMove } from '../reconciler/transitions.js';
-import { type AgentRole, declaresRoles, promptForRole } from '../workflow/roles.js';
+import { declaresRoles } from '../workflow/roles.js';
 import type { Claim } from './claims.js';
+import { executeIntent } from './executor.js';
 import { evaluateMrCommands } from './mr-command-pass.js';
-import type { TickContext, WorkspaceHandleLike } from './ports.js';
+import type { TickContext } from './ports.js';
 import { repoKey } from './ports.js';
 import { upsertProgressRegion } from './progress-mirror.js';
+
+// The full run choreography (workspace → run → push → record → move) lives in the
+// intent executor (#105); `withClosesTrailer` moved with it — re-exported here for
+// the existing import sites.
+export { withClosesTrailer } from './executor.js';
 
 /** Result of one repo's tick — `active` drives the adaptive scheduler (§14). */
 export interface RepoTickResult {
@@ -86,10 +85,6 @@ export async function tick(units: RepoUnit[]): Promise<Map<string, RepoTickResul
   await Promise.all(allPending);
   return out;
 }
-
-/** Proof stand-in for the crash-recovery resume: the real proof is already on the
- *  forge (the sentinel is how we detected workComplete), so handoff skips re-posting. */
-const RECOVERED_PROOF: ProofResult[] = [{ ok: true, kind: 'none', summary: '(recovered)' }];
 
 /** crash-recovery signal (AM-1): the agent reached `done` (proof comment posted) on a
  *  prior tick but handoff did not finish (issue still labelled in-progress). */
@@ -198,9 +193,12 @@ async function refreshProgressMirror(snapshot: IssueSnapshot, ctx: TickContext):
 }
 
 /**
- * Translate one Intent into effects. Every slot-consuming kind (SLOT_INTENTS) holds its
- * slot through the ONE `claim.holdSlot()` site below — synchronously, before any await —
- * then returns a launched promise; everything else runs without a slot. `guard` closes
+ * Admit one Intent and dispatch it to the executor (#105). This function owns
+ * ADMISSION only — the rate gate, the intent journal line, the two queue checks, and
+ * the slot take; the choreography itself (workspace → run → push → record → move) is
+ * `executeIntent`. Every slot-consuming kind (SLOT_INTENTS) holds its slot through the
+ * ONE `claim.holdSlot()` site below — synchronously, before any await — then the
+ * launched promise is returned; everything else runs without a slot. `guard` closes
  * the claim (slot + uniqueness) when the launched work settles. Non-acting intents
  * (poll-review / blocked-wait / none / skip-untrusted / cleanup-in-passA) are no-ops.
  */
@@ -212,7 +210,7 @@ function beginIntent(
   claim: Claim,
   slotAvailable: boolean,
 ): { active: boolean; promise?: Promise<void> } {
-  const { repo, issue } = snapshot;
+  const { issue } = snapshot;
   const meta = { repo: key, iid: issue.iid, intent: intent.kind };
 
   // Claude rate-limited (#47): every new spawn is doomed until the window resets, so
@@ -245,84 +243,22 @@ function beginIntent(
     return { active: false };
   }
 
+  // poll-review · blocked-wait · none · skip-untrusted · cleanup (pass B owns it):
+  // nothing to launch, nothing to claim.
+  if (!ACTING_INTENTS.has(intent.kind)) return { active: false };
+
   // The ONE capacity take (#91): unconditional, exactly like the per-case acquires it
   // replaced — capacity POLICY stayed in the reconciler (via `slotAvailable`) and the
   // two queue checks above. Released with the claim when the launched work settles.
   if (SLOT_INTENTS.has(intent.kind)) claim.holdSlot();
 
-  switch (intent.kind) {
-    case 'start-new':
-      return {
-        active: true,
-        promise: guard(runStartNew(intent, snapshot, ctx), ctx, meta, claim),
-      };
-    case 'run-agent': {
-      const comments = intent.feedback?.reviewComments ?? snapshot.recentComments;
-      return {
-        active: true,
-        promise: guard(
-          runAgent(snapshot, snapshot.mr, comments, ctx, intent.role ?? 'implement'),
-          ctx,
-          meta,
-          claim,
-        ),
-      };
-    }
-    case 'run-define':
-      return {
-        active: true,
-        promise: guard(runDefine(snapshot, ctx), ctx, meta, claim),
-      };
-    case 'run-plan':
-      return {
-        active: true,
-        promise: guard(runPlan(intent, snapshot, ctx), ctx, meta, claim),
-      };
-    case 'run-review':
-      return {
-        active: true,
-        promise: guard(runReview(intent, snapshot, ctx), ctx, meta, claim),
-      };
-    case 'apply-changes-requested':
-      return {
-        active: true,
-        promise: guard(runApplyChanges(intent, snapshot, ctx), ctx, meta, claim),
-      };
-    case 'apply-unblock':
-      return {
-        active: true,
-        promise: guard(runApplyUnblock(intent, snapshot, ctx), ctx, meta, claim),
-      };
-    case 'mark-queued': {
-      // Wants a slot, none free (#53/#29): one cheap label write, no slot, not "active"
-      // (the issue is waiting, not worked). Visible as maestro:queued until a slot frees.
-      const m = lifecycleMove('mark-queued', ctx.settings.labels);
-      return {
-        active: false,
-        promise: guard(
-          ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset),
-          ctx,
-          meta,
-          claim,
-        ),
-      };
-    }
-    case 'merge':
-      return {
-        active: false,
-        promise: guard(
-          ctx.adapter.mergeMR(repo, mrIidOf(snapshot), intent.strategy, intent.deleteSource),
-          ctx,
-          meta,
-          claim,
-        ),
-      };
-    case 'handoff':
-      return { active: false, promise: guard(runRecoveryHandoff(snapshot, ctx), ctx, meta, claim) };
-    default:
-      // poll-review · blocked-wait · none · skip-untrusted · cleanup (pass B owns it)
-      return { active: false };
-  }
+  // "active" = an agent runs this tick (drives the adaptive scheduler, §14) — exactly
+  // the spawning set. mark-queued / merge / handoff launch cheap forge effects while
+  // the issue is waiting, not worked.
+  return {
+    active: SPAWNING_INTENTS.has(intent.kind),
+    promise: guard(executeIntent(intent, snapshot, ctx), ctx, meta, claim),
+  };
 }
 
 /** The intents that recur every tick without acting — excluded from the intent log. */
@@ -350,6 +286,16 @@ const SPAWNING_INTENTS: ReadonlySet<Intent['kind']> = new Set([
  *  a future non-slot spawn (or slot-only intent) splits the sets deliberately. */
 const SLOT_INTENTS: ReadonlySet<Intent['kind']> = SPAWNING_INTENTS;
 
+/** Everything the executor acts on: the spawning set plus the slot-free forge effects.
+ *  The complement (QUIET_INTENTS — and any future kind until it is wired here) launches
+ *  nothing. */
+const ACTING_INTENTS: ReadonlySet<Intent['kind']> = new Set([
+  ...SPAWNING_INTENTS,
+  'mark-queued',
+  'merge',
+  'handoff',
+]);
+
 /** Isolate one issue's launched work: a rejection is caught + logged (retried next
  *  tick, §13), and the claim — slot and uniqueness together — is closed no matter
  *  what (no leak, §14; the ONLY release path for launched work, #91). */
@@ -365,445 +311,6 @@ function guard(
       (err) => ctx.log.error('tick: issue work failed', { ...meta, err: String(err) }),
     )
     .finally(() => claim.close());
-}
-
-/** Start-of-work comment (#25): structured, and says where the plan will land. The agent
- *  only produces its plan during the first session, so the daemon posts the plan summary
- *  right after it (recordPlan's "### 🎼 Plan" comment) instead of inventing one here. */
-function startWorkComment(branch: string, mr: MergeRequest): string {
-  const mrRef = mr.webUrl && mr.webUrl !== 'u' ? `[!${mr.iid}](${mr.webUrl})` : `!${mr.iid}`;
-  return [
-    '🎼 **maestro started work on this issue.**',
-    '',
-    `- Branch: \`${branch}\``,
-    `- Draft MR: ${mrRef} — its description carries the live plan + todo list`,
-    '',
-    '_A short plan summary follows after the first working session._',
-  ].join('\n');
-}
-
-/** Surface a #55 rescue: the workspace reset found committed-but-unpushed work and
- *  parked it on a rescue ref instead of destroying it — a human may want it back. */
-function warnIfRescued(handle: WorkspaceHandleLike, ctx: TickContext): void {
-  if (handle.rescuedRef) {
-    ctx.log.warn('workspace: parked unpushed commits before reset (#55)', {
-      repo: handle.repo.project,
-      iid: handle.iid,
-      ref: handle.rescuedRef,
-    });
-  }
-}
-
-/** New issue → branch + draft MR + label + "started" comment, THEN run the agent
- *  (§7 New row ordering: everything review-facing is set up before the agent runs). */
-async function runStartNew(
-  intent: Extract<Intent, { kind: 'start-new' }>,
-  snapshot: IssueSnapshot,
-  ctx: TickContext,
-): Promise<void> {
-  const { repo, issue } = snapshot;
-  const target = ctx.settings.git.target;
-  const handle = await ctx.workspace.ensureWorkspace(repo, issue.iid, target);
-  warnIfRescued(handle, ctx);
-  await ctx.workspace.prepareBranch(handle, intent.branch);
-  await ctx.adapter.createBranch(repo, intent.branch, target);
-  // Seed the branch with an empty commit before opening the PR: GitHub 422s a PR whose head
-  // has no commits beyond base, and at this point the branch still equals `target` (#14).
-  await ctx.workspace.seedBranch(handle, intent.branch);
-  const mr = await ctx.adapter.createDraftMR(repo, {
-    sourceBranch: intent.branch,
-    targetBranch: target,
-    title: intent.mrTitle,
-    description: `Closes #${issue.iid}`,
-    draft: true,
-    assignToBot: true,
-  });
-  // in-progress replaces the queued marker (#53) — an agent is actually on it now.
-  const m = lifecycleMove('begin-work', ctx.settings.labels);
-  await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
-  await ctx.adapter.commentIssue(repo, issue.iid, startWorkComment(intent.branch, mr));
-  const result = await ctx.runner.run(
-    buildRunnerInput(handle.dir, snapshot, mr, snapshot.recentComments, ctx),
-  );
-  // Push the agent's commits to the MR branch BEFORE handoff — the agent's env has the
-  // forge token scrubbed (§13.1), so the daemon owns the push; without it the work never
-  // reaches the PR. Pushed even on in_progress/needs_input so partial work persists.
-  await ctx.workspace.pushBranch(handle, intent.branch);
-  await applyAgentResult(result, snapshot, mr, handle.dir, ctx);
-}
-
-/** Resume an in-progress issue (no branch/MR creation). Re-materializes the workspace on
- *  the MR's OWN branch (not target) so the agent continues its prior commits, then pushes
- *  the new ones back. With no MR (defensive) it falls back to target and skips the push. */
-async function runAgent(
-  snapshot: IssueSnapshot,
-  mr: MergeRequest | undefined,
-  comments: IssueSnapshot['recentComments'],
-  ctx: TickContext,
-  role: AgentRole = 'implement',
-): Promise<void> {
-  const fromRef = mr?.sourceBranch ?? ctx.settings.git.target;
-  const handle = await ctx.workspace.ensureWorkspace(snapshot.repo, snapshot.issue.iid, fromRef);
-  warnIfRescued(handle, ctx);
-  const result = await ctx.runner.run(
-    buildRunnerInput(handle.dir, snapshot, mr, comments, ctx, role),
-  );
-  if (mr) await ctx.workspace.pushBranch(handle, mr.sourceBranch);
-  await applyAgentResult(result, snapshot, mr, handle.dir, ctx);
-}
-
-/** Backlog stage (#29): the define agent refines the request into an AC draft. No
- *  branch, no MR — its only output is the draft comment the human gate approves.
- *  needs_input routes through the normal blocked path (applyAgentResult). */
-async function runDefine(snapshot: IssueSnapshot, ctx: TickContext): Promise<void> {
-  const { repo, issue } = snapshot;
-  const handle = await ctx.workspace.ensureWorkspace(repo, issue.iid, ctx.settings.git.target);
-  warnIfRescued(handle, ctx);
-  const result = await ctx.runner.run(
-    buildRunnerInput(handle.dir, snapshot, undefined, snapshot.recentComments, ctx, 'define'),
-  );
-  if (result.rateLimit || result.status === 'needs_input') {
-    await applyAgentResult(result, snapshot, undefined, handle.dir, ctx);
-    return;
-  }
-  // done = "AC draft ready" (there is no proof/handoff at this stage). The draft rides
-  // the #48 planComment channel; the sentinel makes the gate check and re-posts cheap.
-  if (result.status === 'done' && result.planComment) {
-    const alreadyDrafted = snapshot.recentComments.some((c) => c.body.includes(AC_DRAFT_SENTINEL));
-    if (!alreadyDrafted) {
-      await ctx.adapter.commentIssue(
-        repo,
-        issue.iid,
-        `### 📋 Acceptance criteria (draft)\n\n${result.planComment}\n\n_Approve by applying the \`${ctx.settings.labels.todo}\` label or replying \`/maestro approve\`._\n\n${AC_DRAFT_SENTINEL}`,
-      );
-    }
-    const m = lifecycleMove('enter-define', ctx.settings.labels);
-    await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
-  }
-  // in_progress (ran out of turns) → resume next tick; done without a draft → retry.
-}
-
-/** Todo stage (#29): the plan agent produces the plan FIRST; only then does the daemon
- *  create the branch + draft MR carrying it (the #48 channel made durable from birth),
- *  flip labels to in-progress, and post the structured start comment. */
-async function runPlan(
-  intent: Extract<Intent, { kind: 'run-plan' }>,
-  snapshot: IssueSnapshot,
-  ctx: TickContext,
-): Promise<void> {
-  const { repo, issue } = snapshot;
-  const target = ctx.settings.git.target;
-  const handle = await ctx.workspace.ensureWorkspace(repo, issue.iid, target);
-  warnIfRescued(handle, ctx);
-  const result = await ctx.runner.run(
-    buildRunnerInput(handle.dir, snapshot, undefined, snapshot.recentComments, ctx, 'plan'),
-  );
-  if (result.rateLimit || result.status === 'needs_input') {
-    await applyAgentResult(result, snapshot, undefined, handle.dir, ctx);
-    return;
-  }
-  if (result.status !== 'done') return; // out of turns — re-plan next tick (no MR yet)
-
-  await ctx.workspace.prepareBranch(handle, intent.branch);
-  await ctx.adapter.createBranch(repo, intent.branch, target);
-  await ctx.workspace.seedBranch(handle, intent.branch); // PR-able head before createDraftMR (#14)
-  const mr = await ctx.adapter.createDraftMR(repo, {
-    sourceBranch: intent.branch,
-    targetBranch: target,
-    title: intent.mrTitle,
-    description: withClosesTrailer(result.mrDescription ?? `Closes #${issue.iid}`, issue.iid),
-    draft: true,
-    assignToBot: true,
-  });
-  // The ONE move that consumes the human-set todo gate (#29) — planning is done.
-  const m = lifecycleMove('begin-work-from-plan', ctx.settings.labels);
-  await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
-  await ctx.adapter.commentIssue(repo, issue.iid, startWorkComment(intent.branch, mr));
-  if (result.planComment) {
-    await ctx.adapter.commentIssue(
-      repo,
-      issue.iid,
-      `### 🎼 Plan\n\n${result.planComment}\n\n${PLAN_COMMENT_SENTINEL}`,
-    );
-  }
-}
-
-/** Review asked for changes: flip in-review→in-progress, then run the agent with the
- *  review feedback threaded into context (§7 In-review→in-progress edge). */
-async function runApplyChanges(
-  intent: Extract<Intent, { kind: 'apply-changes-requested' }>,
-  snapshot: IssueSnapshot,
-  ctx: TickContext,
-): Promise<void> {
-  const m = lifecycleMove('resume-from-review', ctx.settings.labels);
-  await ctx.adapter.setIssueLabels(snapshot.repo, snapshot.issue.iid, m.set, m.unset);
-  await runAgent(snapshot, snapshot.mr, intent.feedback.reviewComments, ctx);
-}
-
-/** Maintainer answered a blocked issue: flip blocked→in-progress, then run the agent with
- *  the answer threaded into context (§7 Blocked→in-progress edge). The label flip is what
- *  retires the edge — without it `deriveState` stays `blocked` and the next tick would
- *  re-resume on every poll. Mirrors runApplyChanges; the agent re-blocks if it needs more. */
-async function runApplyUnblock(
-  intent: Extract<Intent, { kind: 'apply-unblock' }>,
-  snapshot: IssueSnapshot,
-  ctx: TickContext,
-): Promise<void> {
-  const role = intent.role ?? 'implement';
-  // Only implementation restores in-progress; define/plan stages carry their own
-  // labels already (#29) — the artifacts, not this flip, decide the stage.
-  const m = lifecycleMove('unblock', ctx.settings.labels, role);
-  await ctx.adapter.setIssueLabels(snapshot.repo, snapshot.issue.iid, m.set, m.unset);
-  // The human's answer is in recentComments — each stage handler reads it from there.
-  if (role === 'define') return runDefine(snapshot, ctx);
-  if (role === 'plan') {
-    return runPlan(
-      {
-        kind: 'run-plan',
-        branch: branchName(snapshot.issue),
-        mrTitle: mrTitle(snapshot.issue),
-      },
-      snapshot,
-      ctx,
-    );
-  }
-  await runAgent(snapshot, snapshot.mr, intent.feedback.reviewComments, ctx, role);
-}
-
-/** review:internal stage (#29 P3): a cold code-review session over the diff. The
- *  verdict rides the final JSON. pass → pass marker + the idempotent human handoff
- *  (M4 — proof comment already posted, so it only assigns/undrafts/labels). fail →
- *  findings comment with a round marker (handoff context AND the countable bounce
- *  signal); at review.max_rounds since the last human action, escalate: blocked flag
- *  + a summary instead of another doomed bounce. */
-async function runReview(
-  intent: Extract<Intent, { kind: 'run-review' }>,
-  snapshot: IssueSnapshot,
-  ctx: TickContext,
-): Promise<void> {
-  const { repo, issue } = snapshot;
-  const mr = snapshot.mr;
-  if (!mr) {
-    ctx.log.error('review intent but no MR', { repo: repoKey(repo), iid: issue.iid });
-    return;
-  }
-  const handle = await ctx.workspace.ensureWorkspace(repo, issue.iid, mr.sourceBranch);
-  warnIfRescued(handle, ctx);
-  const result = await ctx.runner.run(
-    buildRunnerInput(handle.dir, snapshot, mr, snapshot.recentComments, ctx, 'review'),
-  );
-  if (result.rateLimit || result.status === 'needs_input') {
-    await applyAgentResult(result, snapshot, mr, handle.dir, ctx);
-    return;
-  }
-  if (result.status !== 'done' || !result.review) {
-    // No verdict (out of turns / contract miss): retry next tick — never guess a pass.
-    ctx.log.warn('review run ended without a verdict — will retry', {
-      repo: repoKey(repo),
-      iid: issue.iid,
-      status: result.status,
-    });
-    return;
-  }
-
-  if (result.review.verdict === 'pass') {
-    await ctx.adapter.commentIssue(
-      repo,
-      issue.iid,
-      `### ✅ Internal review passed\n\n${result.summary}\n\n${REVIEW_PASS_SENTINEL}`,
-    );
-    await ctx.handoff({
-      repo,
-      issueIid: issue.iid,
-      mrIid: mr.iid,
-      ticketCreator: issue.author.username,
-      settings: ctx.settings,
-      adapter: ctx.adapter,
-      proof: [{ ok: true, kind: 'none', summary: '(internal review passed)' }],
-    });
-    return;
-  }
-
-  const round = intent.rounds + 1;
-  const findings = result.review.findings ?? result.summary;
-  await ctx.adapter.commentIssue(
-    repo,
-    issue.iid,
-    `### 🔍 Internal review — changes needed (round ${round})\n\n${findings}\n\n${reviewFailMarker(round)}`,
-  );
-  const maxRounds = ctx.workflow.review.max_rounds;
-  if (round >= maxRounds) {
-    // Bounce cap (#29): never auto-merge, never silently drop — park it for a human.
-    const m = lifecycleMove('park-blocked', ctx.settings.labels);
-    await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
-    await ctx.adapter.commentIssue(
-      repo,
-      issue.iid,
-      `### 🚧 Blocked — review bounce cap reached (${maxRounds} rounds)\n\nThe internal review keeps finding blocking issues. Outstanding findings are in the round comments above.\n\n_Reply in this thread to reset the count and resume; any human comment clears it (from the bot’s own account, start with \`/maestro\`)._`,
-    );
-    ctx.log.warn('review bounce cap hit — escalated to blocked (#29)', {
-      repo: repoKey(repo),
-      iid: issue.iid,
-      rounds: round,
-    });
-  }
-}
-
-/** §0.9 runner-result → lifecycle mapping. The DECISION lives in the pure after-run
- *  edge (reconciler/after-run.ts); this function only executes its effects. */
-async function applyAgentResult(
-  result: AgentResult,
-  snapshot: IssueSnapshot,
-  mr: MergeRequest | undefined,
-  workspaceDir: string,
-  ctx: TickContext,
-): Promise<void> {
-  const { repo, issue } = snapshot;
-  const decision = decideAfterRun(result, {
-    hasMr: mr !== undefined,
-    rolesDeclared: declaresRoles(ctx.promptBody),
-  });
-  // Rate-limited run (#47): the spawn was doomed, not an agent error. Pause ALL
-  // spawning (CLI-reported reset time when present, else capped exponential backoff)
-  // and apply nothing — no plan write, no lifecycle transition; the issue resumes
-  // untouched once the gate reopens. A healthy run clears the gate's trip streak.
-  if (decision.kind === 'pause-spawns') {
-    const until = ctx.rateGate.trip(
-      decision.resetAt === undefined ? undefined : Date.parse(decision.resetAt),
-    );
-    ctx.log.warn('claude rate-limited: pausing all agent spawns (#47)', {
-      repo: repoKey(repo),
-      iid: issue.iid,
-      resumeAt: new Date(until).toISOString(),
-    });
-    return;
-  }
-  ctx.rateGate.clear();
-  // #48: the agent can't touch the forge (§13.1), so the daemon writes the plan it
-  // returned — regardless of status — BEFORE the status switch, so an in_progress run
-  // still records its plan and a done run lands the fully-ticked todo. The MR
-  // description is the durable detailed plan/todo; the issue gets a one-time summary.
-  await recordPlan(result, snapshot, mr, ctx);
-  switch (decision.kind) {
-    case 'no-mr-error':
-      ctx.log.error('agent done but no MR to hand off', { repo: repoKey(repo), iid: issue.iid });
-      return;
-    // Role pipeline (#29 P3): implementation `done` posts the proof but NOT the
-    // handoff — the internal review gate decides when a human gets pinged. The
-    // in-review label is a projection for boards; the thread markers are the truth.
-    case 'proof-only-then-in-review': {
-      if (!mr) return; // unreachable: the decision implies hasMr
-      await ctx.proofOnly({
-        repo,
-        issueIid: issue.iid,
-        mrIid: mr.iid,
-        ticketCreator: issue.author.username,
-        settings: ctx.settings,
-        adapter: ctx.adapter,
-        proofInput: {
-          workspaceDir,
-          strategies: ctx.workflow.proof,
-          environment: ctx.workflow.environment,
-          exec: ctx.exec,
-        },
-      });
-      const m = lifecycleMove('enter-review', ctx.settings.labels);
-      await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
-      return;
-    }
-    case 'proof-and-handoff': {
-      if (!mr) return; // unreachable: the decision implies hasMr
-      await ctx.proofAndHandoff({
-        repo,
-        issueIid: issue.iid,
-        mrIid: mr.iid,
-        ticketCreator: issue.author.username,
-        settings: ctx.settings,
-        adapter: ctx.adapter,
-        proofInput: {
-          workspaceDir,
-          strategies: ctx.workflow.proof, // already normalized to a list by WorkflowSchema
-          environment: ctx.workflow.environment,
-          exec: ctx.exec,
-        },
-      });
-      return;
-    }
-    case 'mark-blocked': {
-      const m = lifecycleMove('park-blocked', ctx.settings.labels);
-      await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
-      await ctx.adapter.commentIssue(repo, issue.iid, decision.comment);
-      return;
-    }
-    case 'wait':
-      // in_progress → leave the labels untouched; the next tick resumes (§0.9).
-      return;
-  }
-}
-
-/**
- * Write the agent's plan to the forge (#48). `mrDescription` (the durable detailed
- * plan + checkbox todo) is set via the idempotent `updateMRDescription`, with the
- * `Closes #N` auto-close trailer preserved. `planComment` is posted once as an issue
- * comment, guarded by a sentinel read from this tick's snapshot so a later tick (which
- * re-reads the snapshot, now carrying the comment) never double-posts.
- */
-async function recordPlan(
-  result: AgentResult,
-  snapshot: IssueSnapshot,
-  mr: MergeRequest | undefined,
-  ctx: TickContext,
-): Promise<void> {
-  const { repo, issue } = snapshot;
-  if (mr && result.mrDescription) {
-    await ctx.adapter.updateMRDescription(
-      repo,
-      mr.iid,
-      withClosesTrailer(result.mrDescription, issue.iid),
-    );
-  }
-  if (result.planComment) {
-    const alreadyPosted = snapshot.recentComments.some((c) =>
-      c.body.includes(PLAN_COMMENT_SENTINEL),
-    );
-    if (!alreadyPosted) {
-      await ctx.adapter.commentIssue(
-        repo,
-        issue.iid,
-        `### 🎼 Plan\n\n${result.planComment}\n\n${PLAN_COMMENT_SENTINEL}`,
-      );
-    }
-  }
-}
-
-/** Keep the `Closes #N` keyword so merging the MR still auto-closes the issue, even if
- *  the agent's rewritten description dropped it. No-op when an issue-closing reference
- *  to this iid is already present (any of closes/fixes/resolves). */
-export function withClosesTrailer(body: string, iid: number): string {
-  if (new RegExp(`\\b(clos(e|es|ed)|fix(e[sd])?|resolv(e|es|ed))\\s+#${iid}\\b`, 'i').test(body)) {
-    return body;
-  }
-  return `${body.trimEnd()}\n\nCloses #${iid}`;
-}
-
-/** Crash-recovery resume: handoff started (proof posted) but didn't finish. Re-run the
- *  idempotent bare sequence (M4) — proof already on the forge, so it only assigns /
- *  undrafts / labels. No slot consumed (handoff is not active agent work). */
-async function runRecoveryHandoff(snapshot: IssueSnapshot, ctx: TickContext): Promise<void> {
-  const { repo, issue } = snapshot;
-  if (!snapshot.mr) {
-    ctx.log.error('handoff recovery but no MR present', { repo: repoKey(repo), iid: issue.iid });
-    return;
-  }
-  await ctx.handoff({
-    repo,
-    issueIid: issue.iid,
-    mrIid: snapshot.mr.iid,
-    ticketCreator: issue.author.username,
-    settings: ctx.settings,
-    adapter: ctx.adapter,
-    proof: RECOVERED_PROOF,
-  });
 }
 
 /** Unassigning the bot is how a human stops maestro on a queued issue (#53). Queued
@@ -871,34 +378,4 @@ export async function cleanupSweep(repo: RepoRef, ctx: TickContext): Promise<voi
       });
     }
   }
-}
-
-function buildRunnerInput(
-  workspaceDir: string,
-  snapshot: IssueSnapshot,
-  mr: MergeRequest | undefined,
-  recentComments: IssueSnapshot['recentComments'],
-  ctx: TickContext,
-  role: AgentRole = 'implement', // every dispatch today is implementation work (#29 P1)
-): RunnerInput {
-  return {
-    workspaceDir,
-    // The role's own section when the WORKFLOW declares roles; whole body otherwise
-    // (legacy generalist — #29 stays opt-in per repo).
-    promptBody: promptForRole(ctx.promptBody, role),
-    context: mr
-      ? { issue: snapshot.issue, mr, recentComments }
-      : { issue: snapshot.issue, recentComments },
-    claude: {
-      command: ctx.workflow.claude.command,
-      maxTurns: ctx.workflow.claude.max_turns,
-      permissionMode: ctx.workflow.claude.permission_mode,
-      stallTimeoutMs: ctx.workflow.claude.stall_timeout_seconds * 1000,
-    },
-  };
-}
-
-function mrIidOf(snapshot: IssueSnapshot): number {
-  if (!snapshot.mr) throw new Error(`merge intent for issue ${snapshot.issue.iid} with no MR`);
-  return snapshot.mr.iid;
 }
