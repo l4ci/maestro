@@ -168,6 +168,20 @@ export class GithubAdapter implements ForgeAdapter {
     return raw.state === 'closed' ? 'closed' : 'open';
   }
 
+  /** Commit subjects for the #86 progress mirror — the SAME endpoint #lastBotPushAt hits.
+   *  GitHub lists PR commits chronologically already (oldest first; the endpoint itself
+   *  caps at 250), so no reorder; --paginate keeps the count exact up to that cap. */
+  async listMrCommits(repo: RepoRef, mrIid: number): Promise<string[]> {
+    const commits =
+      (await this.#c.api<RawCommit[]>('GET', `${this.#base(repo)}/pulls/${mrIid}/commits`, {
+        query: { per_page: 100 },
+        paginate: true,
+      })) ?? [];
+    return commits
+      .map((cm) => (cm.commit.message ?? '').split('\n', 1)[0] ?? '')
+      .filter((s) => s !== '');
+  }
+
   /** Fetch one PR and normalize — shared by the command-MR pass. */
   async #getMergeRequest(repo: RepoRef, prNumber: number): Promise<MergeRequest> {
     return normalizeMergeRequest(

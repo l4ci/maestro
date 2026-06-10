@@ -8,6 +8,7 @@ export * from './rate-limit-gate.js';
 export * from './claims.js';
 export * from './heartbeat.js';
 export * from './clock.js';
+export * from './progress-mirror.js';
 export * from './scheduler.js';
 export * from './tick.js';
 export * from './run.js';

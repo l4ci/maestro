@@ -743,3 +743,38 @@ describe('MR-command — getMergeRequestState', () => {
     expect(await gone.a.getMergeRequestState(repo, 7)).toBe('missing');
   });
 });
+
+// --- #86: listMrCommits ------------------------------------------------------
+
+describe('#86 — listMrCommits', () => {
+  it('fetches the MR-SCOPED commits endpoint and returns subjects chronological (oldest first)', async () => {
+    const { a, fake } = mk();
+    // GitLab returns MR commits newest-first; `title` is the precomputed first line
+    fake.onApi('GET', '/merge_requests/7/commits', [
+      { id: 'c3', title: 'third', committed_date: '2026-06-03T00:00:00Z' },
+      { id: 'c2', title: 'second', committed_date: '2026-06-02T00:00:00Z' },
+      { id: 'c1', title: 'first', committed_date: '2026-06-01T00:00:00Z' },
+    ]);
+    expect(await a.listMrCommits(repo, 7)).toEqual(['first', 'second', 'third']);
+    const q = fake.callsTo('GET', '/merge_requests/7/commits')[0]?.args.join(' ');
+    expect(q).toContain('per_page=100');
+    // NOT the branch-history endpoint #lastBotPushAt uses — that one walks the full
+    // ancestry (target-branch history included); the mirror wants the MR's own commits.
+    expect(fake.callsTo('GET', '/repository/commits')).toHaveLength(0);
+  });
+
+  it('falls back to the first message line when title is absent, dropping empty subjects', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/merge_requests/7/commits', [
+      { id: 'c2', message: 'subject only from message\n\nbody text', committed_date: '' },
+      { id: 'c1', message: '', committed_date: '' },
+    ]);
+    expect(await a.listMrCommits(repo, 7)).toEqual(['subject only from message']);
+  });
+
+  it('404 (MR gone) → empty list, not an error', async () => {
+    const { a, fake } = mk();
+    fake.onApiError('GET', '/merge_requests/7/commits', 1, '404 Not Found');
+    expect(await a.listMrCommits(repo, 7)).toEqual([]);
+  });
+});

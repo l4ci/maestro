@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DONE_SENTINEL, PLAN_COMMENT_SENTINEL } from '../src/contracts/index.js';
 import { Claims } from '../src/daemon/claims.js';
+import { upsertProgressRegion } from '../src/daemon/progress-mirror.js';
 import { RateLimitGate } from '../src/daemon/rate-limit-gate.js';
 import { tickRepo, withClosesTrailer } from '../src/daemon/tick.js';
 import {
@@ -732,5 +733,117 @@ describe('A11 — #29 P3 review tick handlers (roled WORKFLOW)', () => {
 
     expect(handoffSpy).not.toHaveBeenCalled();
     expect(adapter.issueComments).toHaveLength(0);
+  });
+});
+
+// #86 — the daemon-maintained progress mirror: a marker-delimited, commit-derived
+// region in the MR description, refreshed every due tick (compare-and-skip). It is the
+// fallback "where it's at" when a session dies before emitting mrDescription.
+describe('A12 — progress mirror refreshes the MR description every due tick (#86)', () => {
+  const subjects = ['Add the adapter seam', 'Wire the tick'];
+  // poll-review: a NO-OP intent — proves the mirror runs independent of acting intents
+  const watching = () =>
+    makeSnapshot({
+      issue: { labels: [labels.inReview] },
+      mr: { approvals: { approved: false, approvedBy: [], changesRequested: false } },
+    });
+
+  it('writes the region when commits exist and the description lacks one — even on a no-op intent', async () => {
+    const adapter = recordingAdapter({
+      snapshot: watching(),
+      mrCommits: new Map([[7, subjects]]),
+    });
+    const { ctx, runnerSpy } = buildContext({ adapter });
+
+    await tickRepo(repo, ctx);
+
+    expect(runnerSpy.inputs).toHaveLength(0); // poll-review spawned nothing…
+    expect(adapter.mrDescriptions).toEqual([
+      { mrIid: 7, body: upsertProgressRegion('Closes #42', subjects) },
+    ]); // …yet the mirror still landed, appended after the existing description
+    expect(adapter.mrDescriptions[0]?.body.startsWith('Closes #42')).toBe(true);
+  });
+
+  it('rewrites a stale region in place, preserving the agent todo outside the markers', async () => {
+    const todo = '## Plan\n\n- [ ] agent todo\n\nCloses #42';
+    const stale = upsertProgressRegion(todo, ['old subject']);
+    const snap = watching();
+    if (snap.mr) snap.mr.description = stale;
+    const adapter = recordingAdapter({ snapshot: snap, mrCommits: new Map([[7, subjects]]) });
+    const { ctx } = buildContext({ adapter });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.mrDescriptions).toEqual([
+      { mrIid: 7, body: upsertProgressRegion(todo, subjects) },
+    ]);
+    expect(adapter.mrDescriptions[0]?.body).toContain('- [ ] agent todo');
+    expect(adapter.mrDescriptions[0]?.body).not.toContain('old subject');
+  });
+
+  it('writes NOTHING when the description is already current (compare-and-skip)', async () => {
+    const snap = watching();
+    if (snap.mr) snap.mr.description = upsertProgressRegion('Closes #42', subjects);
+    const adapter = recordingAdapter({ snapshot: snap, mrCommits: new Map([[7, subjects]]) });
+    const { ctx } = buildContext({ adapter });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.calls).toContain('listMrCommits');
+    expect(adapter.calls).not.toContain('updateMRDescription');
+  });
+
+  it('writes NOTHING when the MR has no commits (a transient empty fetch must not wipe a region)', async () => {
+    const adapter = recordingAdapter({ snapshot: watching() }); // no mrCommits configured → []
+    const { ctx } = buildContext({ adapter });
+
+    await tickRepo(repo, ctx);
+
+    expect(adapter.calls).not.toContain('updateMRDescription');
+  });
+
+  it("heals recordPlan's full-description overwrite on the next tick", async () => {
+    const plan = '## Plan\n\n- [x] step one\n\nCloses #42';
+    const snap = makeSnapshot({ issue: { labels: [labels.inProgress] } });
+    const adapter = recordingAdapter({ snapshot: snap, mrCommits: new Map([[7, subjects]]) });
+    const runner = scriptedRunner([
+      { status: 'in_progress', summary: 'planned', mrDescription: plan },
+      { status: 'in_progress', summary: '' }, // second session emits no mrDescription
+    ]);
+    const { ctx } = buildContext({ adapter, runner });
+
+    await tickRepo(repo, ctx);
+    // tick 1: mirror first (description pre-run), then recordPlan's full overwrite LOSES the region
+    expect(adapter.mrDescriptions.at(-1)).toEqual({ mrIid: 7, body: plan });
+
+    if (snap.mr) snap.mr.description = plan; // the overwrite is what the next snapshot sees
+    await tickRepo(repo, ctx);
+    // tick 2: the upsert re-appends the region without touching the plan text
+    expect(adapter.mrDescriptions.at(-1)).toEqual({
+      mrIid: 7,
+      body: upsertProgressRegion(plan, subjects),
+    });
+    expect(adapter.mrDescriptions.at(-1)?.body).toContain('- [x] step one');
+    expect(adapter.mrDescriptions.at(-1)?.body.match(/maestro:progress:start/g)).toHaveLength(1);
+  });
+
+  it('a mirror failure is logged and never breaks the issue tick', async () => {
+    const snap = makeSnapshot({ issue: { labels: [labels.inProgress] } });
+    const adapter = recordingAdapter({
+      snapshot: snap,
+      mrCommits: new Map([[7, subjects]]),
+      fail: { listMrCommits: () => new Error('forge 500') },
+    });
+    const log = silentLogger();
+    const { ctx, runnerSpy } = buildContext({ adapter, log });
+
+    await tickRepo(repo, ctx);
+
+    expect(runnerSpy.inputs).toHaveLength(1); // the agent still ran
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining('progress mirror'),
+      expect.objectContaining({ iid: 42 }),
+    );
+    expect(log.error).not.toHaveBeenCalledWith('lifecycle: issue tick failed', expect.anything());
   });
 });

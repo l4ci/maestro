@@ -61,7 +61,11 @@ export interface RawReview {
 }
 export interface RawCommit {
   sha: string;
-  commit: { committer?: { date?: string }; author?: { date?: string; email?: string } };
+  commit: {
+    message?: string;
+    committer?: { date?: string };
+    author?: { date?: string; email?: string };
+  };
   author: RawUser | null;
   committer: RawUser | null;
 }
