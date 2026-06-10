@@ -5,6 +5,23 @@
 
 import type { ForgeKind } from '../contracts/index.js';
 
+/** A normalized snapshot piece violated its §0.2 schema at assembly (issue #108): the
+ *  adapter's ForgePrimitives promised a normalized model object and delivered something
+ *  else. Names the forge and the failing field path so the bug surfaces at the seam
+ *  that promised it away, not as a far-off crash in the reconciler or views. */
+export class SnapshotValidationError extends Error {
+  readonly forge: ForgeKind;
+  readonly path: string;
+
+  constructor(forge: ForgeKind, path: string, detail: string, issueCount: number) {
+    const more = issueCount > 1 ? ` (+${issueCount - 1} more)` : '';
+    super(`${forge} snapshot failed §0.2 validation at ${path}: ${detail}${more}`);
+    this.name = 'SnapshotValidationError';
+    this.forge = forge;
+    this.path = path;
+  }
+}
+
 export class ForgeError extends Error {
   readonly forge: ForgeKind;
   readonly code: number;

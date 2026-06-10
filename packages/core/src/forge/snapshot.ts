@@ -8,9 +8,11 @@
 // supplies only the forge-specific PIECES (normalized model objects + two timestamps);
 // this module owns every decision. A third forge writes primitives, never an algorithm.
 
+import { z } from 'zod';
 import type {
   ApprovalState,
   Comment,
+  ForgeKind,
   ForgeUser,
   Issue,
   IssueSnapshot,
@@ -18,7 +20,38 @@ import type {
   MrActivity,
   RepoRef,
 } from '../contracts/index.js';
-import { MAESTRO_COMMAND_RE } from '../contracts/index.js';
+import {
+  CommentSchema,
+  IssueSchema,
+  MAESTRO_COMMAND_RE,
+  MergeRequestSchema,
+} from '../contracts/index.js';
+import { SnapshotValidationError } from './errors.js';
+
+const CommentsSchema = z.array(CommentSchema);
+
+/**
+ * Verify one normalized piece against its §0.2 schema — the runtime check of the
+ * ForgePrimitives promise (issue #108). A violation throws naming the forge and the
+ * failing field path, so a normalization bug fails AT assembly instead of crashing the
+ * reconciler or views far from its cause; the lifecycle pass's per-issue catch contains
+ * the blast radius to that issue's tick. The original object is kept (zod's parsed copy
+ * is discarded), so valid data flows through byte-identical.
+ */
+function checkPiece<T>(forge: ForgeKind, piece: string, schema: z.ZodType<unknown>, value: T): T {
+  const result = schema.safeParse(value);
+  if (!result.success) {
+    const first = result.error.issues[0];
+    const path = [piece, ...(first?.path ?? [])].join('.');
+    throw new SnapshotValidationError(
+      forge,
+      path,
+      first?.message ?? 'invalid',
+      result.error.issues.length,
+    );
+  }
+  return value;
+}
 
 /** The later of two ISO timestamps; either may be undefined. */
 function laterOf(a: string | undefined, b: string | undefined): string | undefined {
@@ -139,15 +172,32 @@ export async function assembleSnapshot(
 ): Promise<IssueSnapshot> {
   const issue = await prim.issue(issueIid);
   const lastActor = await prim.lastActor(issueIid);
-  const issueWithActor: Issue = lastActor ? { ...issue, lastActor } : issue;
+  // Validated AFTER the merge so the lastActor primitive's output is covered too.
+  const issueWithActor: Issue = checkPiece(
+    repo.forge,
+    'issue',
+    IssueSchema,
+    lastActor ? { ...issue, lastActor } : issue,
+  );
 
-  const recentComments = (await prim.comments(issueIid))
+  // Validated BEFORE the sort — a malformed createdAt would otherwise crash inside the
+  // comparator with no forge or field path attached.
+  const recentComments = checkPiece(
+    repo.forge,
+    'recentComments',
+    CommentsSchema,
+    await prim.comments(issueIid),
+  )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, commentCap);
 
   // Comments are read BEFORE the MR so the issue-thread /maestro signal can feed the MR's
   // changes-requested edge (shared-account rework on the issue thread, self-clearing on push).
   const found = await findMaestroMr(issueIid, prim, issueCommandAt(recentComments));
+  // The CHOSEN MR is validated after its approvals are filled, covering both the
+  // openMergeRequests and approvalBase primitives. The rest of the candidate pool is
+  // not — on GitHub it is repo-wide, and other issues' MRs are other ticks' business.
+  if (found) checkPiece(repo.forge, 'mr', MergeRequestSchema, found.mr);
 
   return {
     repo,
