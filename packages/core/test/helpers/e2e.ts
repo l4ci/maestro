@@ -36,10 +36,13 @@ import type {
 import {
   Claims,
   ClaudeRunner,
+  ProofStreaks,
+  RateLimitGate,
   RepoSettingsCell,
   WorkflowStore,
   buildBootstrapWorkflow,
   handoff,
+  proofAndComment,
   proofAndHandoff,
   selectAdapter,
   slugifyProject,
@@ -190,11 +193,14 @@ export function buildHarness(): E2EHarness {
     runner,
     handoff,
     proofAndHandoff,
+    proofOnly: proofAndComment, // #29 P3 — mirror of startDaemon's wiring
     exec,
     settings: cell.settings,
     workflow: cell.frontMatter,
     promptBody: cell.promptBody,
     claims,
+    rateGate: new RateLimitGate(), // #47 — mirror of startDaemon's wiring
+    proofStreaks: new ProofStreaks(), // #109
     log: e2eLog,
   };
 

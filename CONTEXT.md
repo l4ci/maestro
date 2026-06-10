@@ -124,14 +124,16 @@ the same slice; mr-command-pass keeps its claim loop and pure decide.
 
 ## Proof-failure escalation
 
-Proof generation has a typed error mode (decided 2026-06-10, not yet built):
-`ProofGenerationError` (strategy + cause) thrown at the proof seam; a per-issue in-memory
-consecutive-failure streak in the daemon (restart resets it — acceptable); a pure
-`decideProofFailure(streak)` edge beside the after-run edge returning retry-proof (streak < 3) or
-park-blocked with a comment carrying the failure reason. Counter clears on success; a human
-reply un-parks via the existing unblock edge. Replaces the silent identical-retry-forever loop.
-Ships with the missing crash-recovery (agent-done → daemon restart → idempotent handoff)
-integration test.
+Proof generation has a typed error mode (decided 2026-06-10, built 2026-06-10, #109):
+`ProofGenerationError` (strategy + cause) thrown at the proof seam (`generateProofs`); a
+per-issue in-memory consecutive-failure streak in the daemon (`ProofStreaks`, restart resets it —
+acceptable); a pure `decideProofFailure(streak, failure)` edge beside the after-run edge
+(`reconciler/proof-failure.ts`) returning retry-proof (streak < 3) or park-blocked with a comment
+carrying the failure reason. Counter clears on success; a human reply un-parks via the existing
+unblock edge. The executor's catch path (`runProofStep`) owns the seam: typed proof errors feed
+the streak + edge, agent/forge errors rethrow to the tick's guard untouched. Replaces the silent
+identical-retry-forever loop. Shipped with the missing crash-recovery (agent-done → daemon
+restart → idempotent handoff) integration test (`daemon-crash-recovery.test.ts`).
 
 ## Snapshot validation
 

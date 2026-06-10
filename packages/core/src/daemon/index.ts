@@ -6,6 +6,7 @@
 export * from './ports.js';
 export * from './rate-limit-gate.js';
 export * from './claims.js';
+export * from './proof-streaks.js';
 export * from './heartbeat.js';
 export * from './clock.js';
 export * from './progress-mirror.js';

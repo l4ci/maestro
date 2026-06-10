@@ -21,6 +21,8 @@ export * from './contracts/index.js';
 export * from './reconciler/reconcile.js';
 // The pure after-run edge (#94) — the runner-result half of the lifecycle, beside reconcile.
 export * from './reconciler/after-run.js';
+// The pure proof-failure edge (#109) — failure streak → retry-or-park, beside after-run.
+export * from './reconciler/proof-failure.js';
 // The lifecycle-move table (#78) — the pure write-side counterpart of the lifecycle edges.
 export * from './reconciler/transitions.js';
 

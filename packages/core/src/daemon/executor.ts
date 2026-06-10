@@ -33,11 +33,14 @@ import {
 } from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
 import { buildMrCommandPrompt } from '../mr-command/prompt.js';
+import { ProofGenerationError } from '../proof/strategies.js';
 import { decideAfterRun } from '../reconciler/after-run.js';
+import { decideProofFailure } from '../reconciler/proof-failure.js';
 import { type LifecycleMove, lifecycleMove } from '../reconciler/transitions.js';
 import { type AgentRole, declaresRoles, promptForRole } from '../workflow/roles.js';
 import type { Logger, ProofAndHandoffFn, ProofOnlyFn, WorkspaceHandleLike } from './ports.js';
 import { repoKey } from './ports.js';
+import type { ProofStreaks } from './proof-streaks.js';
 
 /** The workspace surface execution drives — acquire / prepare / seed / push / count.
  *  The cleanup-sweep and reconcile-input methods (evict, list*, workspaceExists) stay
@@ -77,6 +80,7 @@ export interface ExecutorContext {
   workflow: WorkflowFrontMatter;
   promptBody: string; // WORKFLOW body → RunnerInput.promptBody
   rateGate: RateGateRecorder; // #47 — outcome recording only
+  proofStreaks: ProofStreaks; // #109 — per-issue consecutive proof-failure streak
   log: Logger;
 }
 
@@ -481,40 +485,53 @@ async function applyAgentResult(
     // in-review label is a projection for boards; the thread markers are the truth.
     case 'proof-only-then-in-review': {
       if (!mr) return; // unreachable: the decision implies hasMr
-      await ctx.proofOnly({
-        repo,
-        issueIid: issue.iid,
-        mrIid: mr.iid,
-        ticketCreator: issue.author.username,
-        settings: ctx.settings,
-        adapter: ctx.adapter,
-        proofInput: {
-          workspaceDir,
-          strategies: ctx.workflow.proof,
-          environment: ctx.workflow.environment,
-          exec: ctx.exec,
-        },
-      });
+      const proofed = await runProofStep(
+        () =>
+          ctx.proofOnly({
+            repo,
+            issueIid: issue.iid,
+            mrIid: mr.iid,
+            ticketCreator: issue.author.username,
+            settings: ctx.settings,
+            adapter: ctx.adapter,
+            proofInput: {
+              workspaceDir,
+              strategies: ctx.workflow.proof,
+              environment: ctx.workflow.environment,
+              exec: ctx.exec,
+            },
+          }),
+        snapshot,
+        ctx,
+      );
+      // Proof never posted (retrying or parked) → no in-review flip: the review stage
+      // reads the proof comment, and an unproven in-review would be a lie on the board.
+      if (!proofed) return;
       const m = lifecycleMove('enter-review', ctx.settings.labels);
       await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
       return;
     }
     case 'proof-and-handoff': {
       if (!mr) return; // unreachable: the decision implies hasMr
-      await ctx.proofAndHandoff({
-        repo,
-        issueIid: issue.iid,
-        mrIid: mr.iid,
-        ticketCreator: issue.author.username,
-        settings: ctx.settings,
-        adapter: ctx.adapter,
-        proofInput: {
-          workspaceDir,
-          strategies: ctx.workflow.proof, // already normalized to a list by WorkflowSchema
-          environment: ctx.workflow.environment,
-          exec: ctx.exec,
-        },
-      });
+      await runProofStep(
+        () =>
+          ctx.proofAndHandoff({
+            repo,
+            issueIid: issue.iid,
+            mrIid: mr.iid,
+            ticketCreator: issue.author.username,
+            settings: ctx.settings,
+            adapter: ctx.adapter,
+            proofInput: {
+              workspaceDir,
+              strategies: ctx.workflow.proof, // already normalized to a list by WorkflowSchema
+              environment: ctx.workflow.environment,
+              exec: ctx.exec,
+            },
+          }),
+        snapshot,
+        ctx,
+      );
       return;
     }
     case 'mark-blocked': {
@@ -526,6 +543,52 @@ async function applyAgentResult(
     case 'wait':
       // in_progress → leave the labels untouched; the next tick resumes (§0.9).
       return;
+  }
+}
+
+/**
+ * The proof seam's catch path (#109, CONTEXT.md §Proof-failure escalation). Runs the
+ * proof-bearing step and absorbs ONLY its typed failure: a ProofGenerationError feeds
+ * the per-issue streak, and the pure decideProofFailure edge picks retry (streak below
+ * the cap — silent, the next tick re-runs the issue) or park-blocked with the typed
+ * reason on the thread (third straight failure; a human reply un-parks via the existing
+ * unblock edge). Success clears the streak. Everything else — agent and forge errors —
+ * rethrows to the tick's guard exactly as before. Returns true iff the step completed,
+ * so callers skip their follow-up moves on failure.
+ */
+async function runProofStep(
+  step: () => Promise<unknown>,
+  snapshot: IssueSnapshot,
+  ctx: ExecutorContext,
+): Promise<boolean> {
+  const { repo, issue } = snapshot;
+  try {
+    await step();
+    ctx.proofStreaks.clear(repo, issue.iid);
+    return true;
+  } catch (err) {
+    if (!(err instanceof ProofGenerationError)) throw err;
+    const streak = ctx.proofStreaks.fail(repo, issue.iid);
+    const decision = decideProofFailure(streak, { strategy: err.strategy, message: err.message });
+    if (decision.kind === 'retry-proof') {
+      ctx.log.warn('proof generation failed — retrying next tick (#109)', {
+        repo: repoKey(repo),
+        iid: issue.iid,
+        strategy: err.strategy,
+        streak,
+      });
+      return false;
+    }
+    const m = lifecycleMove('park-blocked', ctx.settings.labels);
+    await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
+    await ctx.adapter.commentIssue(repo, issue.iid, decision.comment);
+    ctx.log.warn('proof failure streak hit the cap — parked blocked (#109)', {
+      repo: repoKey(repo),
+      iid: issue.iid,
+      strategy: err.strategy,
+      streak,
+    });
+    return false;
   }
 }
 

@@ -21,6 +21,7 @@ import type {
 import { WorkflowSchema, labelNames } from '../../src/contracts/index.js';
 import { Claims } from '../../src/daemon/claims.js';
 import type { TickContext, Workspace, WorkspaceHandleLike } from '../../src/daemon/ports.js';
+import { ProofStreaks } from '../../src/daemon/proof-streaks.js';
 import { RateLimitGate } from '../../src/daemon/rate-limit-gate.js';
 
 export const repo: RepoRef = {
@@ -371,6 +372,7 @@ export function buildContext(
     proofAndHandoff?: ReturnType<typeof vi.fn>;
     proofOnly?: ReturnType<typeof vi.fn>;
     rateGate?: RateLimitGate;
+    proofStreaks?: ProofStreaks;
     log?: TickContext['log'];
     promptBody?: string;
   } = {},
@@ -396,6 +398,7 @@ export function buildContext(
     promptBody: partial.promptBody ?? 'do the work',
     claims,
     rateGate: partial.rateGate ?? new RateLimitGate(),
+    proofStreaks: partial.proofStreaks ?? new ProofStreaks(),
     log: partial.log ?? silentLogger(),
   };
   return {

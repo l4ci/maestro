@@ -17,6 +17,7 @@ import type {
 } from '../contracts/index.js';
 import type { ProofAndHandoffInput } from '../handoff/handoff.js';
 import type { Claims } from './claims.js';
+import type { ProofStreaks } from './proof-streaks.js';
 import type { RateLimitGate } from './rate-limit-gate.js';
 
 /** A live per-issue workspace handle (structurally satisfied by M3 WorkspaceHandle). */
@@ -90,6 +91,7 @@ export interface TickContext {
   promptBody: string; // WORKFLOW body → RunnerInput.promptBody
   claims: Claims; // process-wide work admission: uniqueness + slot capacity (§14, #18, #91)
   rateGate: RateLimitGate; // process-wide Claude usage-limit backoff (#47)
+  proofStreaks: ProofStreaks; // process-wide per-issue proof-failure streaks (#109)
   log: Logger;
 }
 
