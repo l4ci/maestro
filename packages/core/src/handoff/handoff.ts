@@ -21,6 +21,7 @@ import {
   type ProofResult,
 } from '../contracts/index.js';
 import { type PlaywrightTuning, generateProofs } from '../proof/strategies.js';
+import { lifecycleMove } from '../reconciler/transitions.js';
 
 /** Fold N proof results into one comment: header is all-must-pass (ok = AND), each
  *  strategy gets its own labelled section. A single strategy renders flat (no label),
@@ -87,12 +88,8 @@ export async function handoff(input: HandoffInput): Promise<void> {
   // 5. Label in-review (terminal step) — guarded by label presence.
   const labeled = snap.issue.labels.includes(settings.labels.inReview);
   if (!labeled) {
-    await adapter.setIssueLabels(
-      repo,
-      issueIid,
-      [settings.labels.inReview],
-      [settings.labels.inProgress],
-    );
+    const m = lifecycleMove('enter-review', settings.labels);
+    await adapter.setIssueLabels(repo, issueIid, m.set, m.unset);
   }
 }
 

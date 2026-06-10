@@ -35,6 +35,7 @@ import type { ForgeAdapter } from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
 import { decideAfterRun } from '../reconciler/after-run.js';
 import { reconcile } from '../reconciler/reconcile.js';
+import { lifecycleMove } from '../reconciler/transitions.js';
 import { type AgentRole, declaresRoles, promptForRole } from '../workflow/roles.js';
 import type { Claim } from './claims.js';
 import { evaluateMrCommands } from './mr-command-pass.js';
@@ -259,18 +260,20 @@ function beginIntent(
         active: true,
         promise: guard(runApplyUnblock(intent, snapshot, ctx), ctx, meta, claim),
       };
-    case 'mark-queued':
+    case 'mark-queued': {
       // Wants a slot, none free (#53/#29): one cheap label write, no slot, not "active"
       // (the issue is waiting, not worked). Visible as maestro:queued until a slot frees.
+      const m = lifecycleMove('mark-queued', ctx.settings.labels);
       return {
         active: false,
         promise: guard(
-          ctx.adapter.setIssueLabels(repo, issue.iid, [ctx.settings.labels.queued], []),
+          ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset),
           ctx,
           meta,
           claim,
         ),
       };
+    }
     case 'merge':
       return {
         active: false,
@@ -383,12 +386,8 @@ async function runStartNew(
     assignToBot: true,
   });
   // in-progress replaces the queued marker (#53) — an agent is actually on it now.
-  await ctx.adapter.setIssueLabels(
-    repo,
-    issue.iid,
-    [ctx.settings.labels.inProgress],
-    [ctx.settings.labels.queued],
-  );
+  const m = lifecycleMove('begin-work', ctx.settings.labels);
+  await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
   await ctx.adapter.commentIssue(repo, issue.iid, startWorkComment(intent.branch, mr));
   const result = await ctx.runner.run(
     buildRunnerInput(handle.dir, snapshot, mr, snapshot.recentComments, ctx),
@@ -445,12 +444,8 @@ async function runDefine(snapshot: IssueSnapshot, ctx: TickContext): Promise<voi
         `### 📋 Acceptance criteria (draft)\n\n${result.planComment}\n\n_Approve by applying the \`${ctx.settings.labels.todo}\` label or replying \`/maestro approve\`._\n\n${AC_DRAFT_SENTINEL}`,
       );
     }
-    await ctx.adapter.setIssueLabels(
-      repo,
-      issue.iid,
-      [ctx.settings.labels.backlog],
-      [ctx.settings.labels.queued],
-    );
+    const m = lifecycleMove('enter-define', ctx.settings.labels);
+    await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
   }
   // in_progress (ran out of turns) → resume next tick; done without a draft → retry.
 }
@@ -487,12 +482,9 @@ async function runPlan(
     draft: true,
     assignToBot: true,
   });
-  await ctx.adapter.setIssueLabels(
-    repo,
-    issue.iid,
-    [ctx.settings.labels.inProgress],
-    [ctx.settings.labels.todo, ctx.settings.labels.backlog, ctx.settings.labels.queued],
-  );
+  // The ONE move that consumes the human-set todo gate (#29) — planning is done.
+  const m = lifecycleMove('begin-work-from-plan', ctx.settings.labels);
+  await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
   await ctx.adapter.commentIssue(repo, issue.iid, startWorkComment(intent.branch, mr));
   if (result.planComment) {
     await ctx.adapter.commentIssue(
@@ -510,12 +502,8 @@ async function runApplyChanges(
   snapshot: IssueSnapshot,
   ctx: TickContext,
 ): Promise<void> {
-  await ctx.adapter.setIssueLabels(
-    snapshot.repo,
-    snapshot.issue.iid,
-    [ctx.settings.labels.inProgress],
-    [ctx.settings.labels.inReview],
-  );
+  const m = lifecycleMove('resume-from-review', ctx.settings.labels);
+  await ctx.adapter.setIssueLabels(snapshot.repo, snapshot.issue.iid, m.set, m.unset);
   await runAgent(snapshot, snapshot.mr, intent.feedback.reviewComments, ctx);
 }
 
@@ -531,12 +519,8 @@ async function runApplyUnblock(
   const role = intent.role ?? 'implement';
   // Only implementation restores in-progress; define/plan stages carry their own
   // labels already (#29) — the artifacts, not this flip, decide the stage.
-  await ctx.adapter.setIssueLabels(
-    snapshot.repo,
-    snapshot.issue.iid,
-    role === 'implement' ? [ctx.settings.labels.inProgress] : [],
-    [ctx.settings.labels.blocked],
-  );
+  const m = lifecycleMove('unblock', ctx.settings.labels, role);
+  await ctx.adapter.setIssueLabels(snapshot.repo, snapshot.issue.iid, m.set, m.unset);
   // The human's answer is in recentComments — each stage handler reads it from there.
   if (role === 'define') return runDefine(snapshot, ctx);
   if (role === 'plan') {
@@ -617,12 +601,8 @@ async function runReview(
   const maxRounds = ctx.workflow.review.max_rounds;
   if (round >= maxRounds) {
     // Bounce cap (#29): never auto-merge, never silently drop — park it for a human.
-    await ctx.adapter.setIssueLabels(
-      repo,
-      issue.iid,
-      [ctx.settings.labels.blocked],
-      [ctx.settings.labels.inProgress],
-    );
+    const m = lifecycleMove('park-blocked', ctx.settings.labels);
+    await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
     await ctx.adapter.commentIssue(
       repo,
       issue.iid,
@@ -694,12 +674,8 @@ async function applyAgentResult(
           exec: ctx.exec,
         },
       });
-      await ctx.adapter.setIssueLabels(
-        repo,
-        issue.iid,
-        [ctx.settings.labels.inReview],
-        [ctx.settings.labels.inProgress],
-      );
+      const m = lifecycleMove('enter-review', ctx.settings.labels);
+      await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
       return;
     }
     case 'proof-and-handoff': {
@@ -720,15 +696,12 @@ async function applyAgentResult(
       });
       return;
     }
-    case 'mark-blocked':
-      await ctx.adapter.setIssueLabels(
-        repo,
-        issue.iid,
-        [ctx.settings.labels.blocked],
-        [ctx.settings.labels.inProgress],
-      );
+    case 'mark-blocked': {
+      const m = lifecycleMove('park-blocked', ctx.settings.labels);
+      await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
       await ctx.adapter.commentIssue(repo, issue.iid, decision.comment);
       return;
+    }
     case 'wait':
       // in_progress → leave the labels untouched; the next tick resumes (§0.9).
       return;
@@ -811,7 +784,8 @@ async function retractStaleTodos(repo: RepoRef, ctx: TickContext): Promise<void>
     for (const issue of marked) {
       const assignedToBot = issue.assignees.some((a) => a.username === ctx.settings.botUser);
       if (assignedToBot) continue;
-      await ctx.adapter.setIssueLabels(repo, issue.iid, [], [ctx.settings.labels.queued]);
+      const m = lifecycleMove('retract-queued', ctx.settings.labels);
+      await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
       ctx.log.info('queued mark retracted: bot unassigned — no longer watching (#53)', {
         repo: repoKey(repo),
         iid: issue.iid,
