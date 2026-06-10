@@ -79,8 +79,26 @@ function view(): View {
   };
 }
 
+type Repo = View['repos'][number];
+type Issue = Repo['issues'][number];
+// A keyed row item, as updateRepoCard hands it to createRow/updateRow.
+type RowItem =
+  | { key: string; issue: Issue; forge?: string; repoId: string }
+  | { key: '~error'; error: string }
+  | { key: '~empty' }
+  | { key: string; detail: true };
+
 type PageWindow = Window &
-  typeof globalThis & { render: (v: View) => void; refresh: () => Promise<void> };
+  typeof globalThis & {
+    render: (v: View) => void;
+    refresh: () => Promise<void>;
+    // The keyed create/update pairs, reachable because the inline script evals in window
+    // scope. The parity suite (#106) drives them directly.
+    createRow: (x: RowItem) => HTMLElement;
+    updateRow: (tr: HTMLElement, x: RowItem) => void;
+    createRepoCard: () => HTMLElement;
+    updateRepoCard: (card: HTMLElement, r: Repo) => void;
+  };
 
 let windows: Array<{ close(): void }> = [];
 
@@ -183,6 +201,160 @@ describe('keyed rendering — node identity across polls (#42)', () => {
     const after = repoCards(w);
     expect(after[0]).toBe(cardB);
     expect(after[1]).toBe(cardA);
+  });
+});
+
+describe('single render path — create/update parity (#106)', () => {
+  // The decided design: create* builds a keyed skeleton, update* renders every field.
+  // Parity pins the rule structurally: a freshly created node painted with a view must be
+  // byte-identical (outerHTML) to a stub node later updated with the same view. A field
+  // rendered on the create path only — or rendered differently on the two paths, the #35
+  // XSS bug class — breaks this for any view that exercises the field.
+  const repoId = 'gitlab.com/g/api';
+
+  const stubRow = (): RowItem => ({
+    key: `${repoId}#1`,
+    issue: { iid: 1, title: '', state: 'new' },
+    forge: 'gitlab',
+    repoId,
+  });
+
+  // Row field variants: every field present, everything optional absent, hostile URLs.
+  // The activity timestamp sits mid-bucket (3m) so the two renders, ms apart, agree.
+  const fullRow = (): RowItem => ({
+    key: `${repoId}#1`,
+    forge: 'gitlab',
+    repoId,
+    issue: {
+      iid: 1,
+      title: 'full row',
+      state: 'in-progress',
+      issueUrl: 'https://gitlab.com/g/api/-/issues/1',
+      mrUrl: 'https://gitlab.com/g/api/-/merge_requests/9',
+      isDraft: true,
+      author: { username: 'alice', id: '1', avatarUrl: 'https://gitlab.com/u/alice.png' },
+      reviewer: { username: 'bob', id: '2' }, // no avatar URL → initials circle
+      lastActivity: {
+        at: new Date(Date.now() - 3 * 60_000).toISOString(),
+        source: 'mr',
+        summary: 'bot pushed a commit',
+      },
+    },
+  });
+  const minimalRow = (): RowItem => ({
+    key: `${repoId}#1`,
+    forge: 'gitlab',
+    repoId,
+    issue: { iid: 1, title: 'bare', state: 'done' },
+  });
+  const hostileRow = (): RowItem => ({
+    key: `${repoId}#1`,
+    forge: 'gitlab',
+    repoId,
+    issue: {
+      iid: 1,
+      title: '<img src=x onerror=alert(1)>',
+      state: 'blocked',
+      issueUrl: 'javascript:alert(1)',
+      mrUrl: 'javascript:alert(2)',
+      author: { username: 'mallory', id: '6', avatarUrl: 'javascript:alert(3)' },
+    },
+  });
+
+  const freshRowDom = (w: PageWindow, item: RowItem) => {
+    const n = w.createRow(item);
+    w.updateRow(n, item);
+    return n.outerHTML;
+  };
+  const stubRowDom = (w: PageWindow, stub: RowItem, item: RowItem) => {
+    const n = w.createRow(stub);
+    w.updateRow(n, item);
+    return n.outerHTML;
+  };
+  const staleRowDom = (w: PageWindow, stale: RowItem, item: RowItem) => {
+    const n = w.createRow(stale);
+    w.updateRow(n, stale); // painted with old data first…
+    w.updateRow(n, item); // …then the current poll lands
+    return n.outerHTML;
+  };
+
+  it('createRow builds a value-free skeleton: same DOM for any issue item', () => {
+    const w = loadPage();
+    expect(w.createRow(fullRow()).outerHTML).toBe(w.createRow(stubRow()).outerHTML);
+    expect(w.createRow(hostileRow()).outerHTML).toBe(w.createRow(stubRow()).outerHTML);
+  });
+
+  it('issue row: createRow(view)+paint ≡ createRow(stub) then update(view), all variants', () => {
+    const w = loadPage();
+    for (const item of [fullRow(), minimalRow(), hostileRow()]) {
+      expect(stubRowDom(w, stubRow(), item)).toBe(freshRowDom(w, item));
+    }
+  });
+
+  it('issue row: a row painted with old data converges to the fresh DOM on update', () => {
+    const w = loadPage();
+    const full = fullRow(); // one instance, so the activity ISO matches on both paths
+    const minimal = minimalRow();
+    // Rich → minimal: vanished MR link, reviewer, and activity must leave no residue.
+    expect(staleRowDom(w, full, minimal)).toBe(freshRowDom(w, minimal));
+    // Minimal → rich: every field must appear via the update path alone.
+    expect(staleRowDom(w, minimal, full)).toBe(freshRowDom(w, full));
+  });
+
+  it('error and empty placeholder rows render their text on the one path too', () => {
+    const w = loadPage();
+    const err: RowItem = { key: '~error', error: 'auth failed (401)' };
+    expect(stubRowDom(w, { key: '~error', error: 'old' }, err)).toBe(freshRowDom(w, err));
+    const empty: RowItem = { key: '~empty' };
+    expect(stubRowDom(w, { key: '~empty' }, empty)).toBe(freshRowDom(w, empty));
+  });
+
+  // Repo card variants: healthy with issues, idle-empty, unreachable.
+  const stubCard = (): Repo => ({
+    repo: { url: repoId, project: '' },
+    issues: [],
+    counts: { ...zero },
+  });
+  const healthyCard = (): Repo => {
+    const r = view().repos[0];
+    if (!r) throw new Error('fixture shape');
+    return r;
+  };
+  const idleCard = (): Repo => ({
+    repo: { url: repoId, project: 'g/api' },
+    issues: [],
+    counts: { ...zero },
+  });
+  const errorCard = (): Repo => ({
+    repo: { url: repoId, project: 'g/api' },
+    issues: [],
+    counts: { ...zero },
+    error: 'auth failed (401)',
+  });
+
+  const freshCardDom = (w: PageWindow, r: Repo) => {
+    const n = w.createRepoCard();
+    w.updateRepoCard(n, r);
+    return n.outerHTML;
+  };
+  const staleCardDom = (w: PageWindow, stale: Repo, r: Repo) => {
+    const n = w.createRepoCard();
+    w.updateRepoCard(n, stale);
+    w.updateRepoCard(n, r);
+    return n.outerHTML;
+  };
+
+  it('repo card: create+paint ≡ stub card updated with the same repo, all variants', () => {
+    const w = loadPage();
+    for (const r of [healthyCard(), idleCard(), errorCard()]) {
+      expect(staleCardDom(w, stubCard(), r)).toBe(freshCardDom(w, r));
+    }
+  });
+
+  it('repo card: flipping healthy ↔ unreachable converges to the fresh DOM', () => {
+    const w = loadPage();
+    expect(staleCardDom(w, healthyCard(), errorCard())).toBe(freshCardDom(w, errorCard()));
+    expect(staleCardDom(w, errorCard(), healthyCard())).toBe(freshCardDom(w, healthyCard()));
   });
 });
 
