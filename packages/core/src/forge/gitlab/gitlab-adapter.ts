@@ -79,6 +79,8 @@ interface RawCommit {
   committed_date: string;
   author_name: string;
   author_email: string;
+  title?: string; // first line of the message — GitLab precomputes it
+  message?: string;
 }
 interface RawLabelEvent {
   id: number | string;
@@ -173,6 +175,24 @@ export class GitlabAdapter implements ForgeAdapter {
     if (raw.state === 'merged') return 'merged';
     if (raw.state === 'closed' || raw.state === 'locked') return 'closed';
     return 'open';
+  }
+
+  /** Commit subjects for the #86 progress mirror, chronological (oldest first). Uses the
+   *  MR-SCOPED commits endpoint, NOT `/repository/commits?ref_name=` like #lastBotPushAt:
+   *  ref_name walks the branch's FULL ancestry (target-branch history included), while the
+   *  mirror wants exactly the MR's own commits. GitLab returns them newest-first; one page
+   *  of 100 (glab has no --paginate merge) — beyond 100 the mirror's count is a floor. */
+  async listMrCommits(repo: RepoRef, mrIid: number): Promise<string[]> {
+    const commits =
+      (await this.#c.api<RawCommit[]>(
+        'GET',
+        `/projects/${this.#pid(repo)}/merge_requests/${mrIid}/commits`,
+        { query: { per_page: 100 } },
+      )) ?? [];
+    return commits
+      .map((cm) => cm.title ?? (cm.message ?? '').split('\n', 1)[0] ?? '')
+      .filter((s) => s !== '')
+      .reverse();
   }
 
   // --- mutation -----------------------------------------------------------

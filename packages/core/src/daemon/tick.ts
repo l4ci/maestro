@@ -41,6 +41,7 @@ import type { Claim } from './claims.js';
 import { evaluateMrCommands } from './mr-command-pass.js';
 import type { TickContext, WorkspaceHandleLike } from './ports.js';
 import { repoKey } from './ports.js';
+import { upsertProgressRegion } from './progress-mirror.js';
 
 /** Result of one repo's tick — `active` drives the adaptive scheduler (§14). */
 export interface RepoTickResult {
@@ -141,6 +142,12 @@ export async function evaluateLifecycle(
     let launched: { active: boolean; promise?: Promise<void> } = { active: false };
     try {
       const snapshot = await ctx.adapter.getSnapshot(repo, iid);
+      // #86: refresh the commit-derived progress mirror on EVERY due tick the issue has a
+      // maestro MR — independent of the intent (a poll-review no-op still refreshes), so a
+      // session that died before emitting `mrDescription` still leaves "where it's at" on
+      // the MR. Best-effort: its own try/catch, never fails the issue's tick. Closed issues
+      // never reach here (this pass lists open assigned issues only).
+      await refreshProgressMirror(snapshot, ctx);
       const slotAvailable = claim.slotAvailable(ctx.settings.concurrency.maxActive);
       const intent = reconcile({
         snapshot,
@@ -162,6 +169,32 @@ export async function evaluateLifecycle(
     }
   }
   return { pending, active };
+}
+
+/**
+ * Progress mirror (#86): upsert the daemon-owned marker region (commit subjects from the
+ * forge) into the MR description, compare-and-skip against the snapshot's already-fetched
+ * description — zero writes when nothing changed. Empty subjects skip entirely: there is
+ * nothing to mirror, and a transient empty fetch must never wipe a live region down to
+ * the placeholder. `recordPlan`'s full-description overwrite is healed by the next tick's
+ * upsert by design. Best-effort: failures are logged, never thrown.
+ */
+async function refreshProgressMirror(snapshot: IssueSnapshot, ctx: TickContext): Promise<void> {
+  const mr = snapshot.mr;
+  if (!mr) return;
+  try {
+    const subjects = await ctx.adapter.listMrCommits(snapshot.repo, mr.iid);
+    if (subjects.length === 0) return;
+    const next = upsertProgressRegion(mr.description ?? '', subjects);
+    if (next === mr.description) return; // compare-and-skip
+    await ctx.adapter.updateMRDescription(snapshot.repo, mr.iid, next);
+  } catch (err) {
+    ctx.log.warn('progress mirror refresh failed — best-effort, retried next tick (#86)', {
+      repo: repoKey(snapshot.repo),
+      iid: snapshot.issue.iid,
+      err: String(err),
+    });
+  }
 }
 
 /**

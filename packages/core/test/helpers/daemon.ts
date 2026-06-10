@@ -108,6 +108,7 @@ export interface AdapterConfig {
   createdMR?: MergeRequest; // createDraftMR return
   mrs?: MergeRequest[]; // listAssignedOpenMergeRequests (command-MR pass)
   mrComments?: Map<number, Comment[]>; // getMrComments per mrIid
+  mrCommits?: Map<number, string[]>; // listMrCommits per mrIid (#86 progress mirror)
   mrStates?: Map<number, 'open' | 'closed' | 'merged' | 'missing'>; // getMergeRequestState
   fail?: Partial<Record<keyof ForgeAdapter, () => Error>>; // inject throws
 }
@@ -148,6 +149,11 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
       r.calls.push('getMergeRequestState');
       maybeThrow('getMergeRequestState');
       return cfg.mrStates?.get(mrIid) ?? 'open';
+    },
+    listMrCommits: async (_repo, mrIid) => {
+      r.calls.push('listMrCommits');
+      maybeThrow('listMrCommits');
+      return cfg.mrCommits?.get(mrIid) ?? [];
     },
     listAssignedOpenIssues: async () => {
       r.calls.push('listAssignedOpenIssues');

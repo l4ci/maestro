@@ -803,3 +803,36 @@ describe('MR-command — getMergeRequestState', () => {
     expect(await gone.a.getMergeRequestState(repo, 7)).toBe('missing');
   });
 });
+
+// --- #86: listMrCommits ------------------------------------------------------
+
+describe('#86 — listMrCommits', () => {
+  it('fetches /pulls/:n/commits (already chronological) and returns first message lines', async () => {
+    const { a, fake } = mk();
+    // GitHub lists PR commits oldest-first; subject = first line of commit.message
+    fake.onApi('GET', '/pulls/7/commits', [
+      { sha: 'c1', commit: { message: 'first\n\nbody detail' } },
+      { sha: 'c2', commit: { message: 'second' } },
+    ]);
+    expect(await a.listMrCommits(repo, 7)).toEqual(['first', 'second']);
+    const q = fake.callsTo('GET', '/pulls/7/commits')[0]?.args.join(' ');
+    expect(q).toContain('per_page=100');
+    expect(fake.callsTo('GET', '/pulls/7/commits')[0]?.args).toContain('--paginate');
+  });
+
+  it('drops commits with an empty message and tolerates a missing one', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/pulls/7/commits', [
+      { sha: 'c1', commit: { message: '' } },
+      { sha: 'c2', commit: {} },
+      { sha: 'c3', commit: { message: 'kept' } },
+    ]);
+    expect(await a.listMrCommits(repo, 7)).toEqual(['kept']);
+  });
+
+  it('404 (PR gone) → empty list, not an error', async () => {
+    const { a, fake } = mk();
+    fake.onApiError('GET', '/pulls/7/commits', 1, 'gh: HTTP 404 Not Found');
+    expect(await a.listMrCommits(repo, 7)).toEqual([]);
+  });
+});

@@ -44,6 +44,11 @@ export interface ForgeAdapter {
     repo: RepoRef,
     mrIid: number,
   ): Promise<'open' | 'closed' | 'merged' | 'missing'>;
+  /** Commit subjects (first line of each message) on the MR/PR, CHRONOLOGICAL (oldest
+   *  first, newest last) — feeds the #86 progress mirror. Implementations fetch one
+   *  page of up to 100 commits, plenty for the mirror's 50-newest cap; beyond that the
+   *  mirror's truncation count is a floor, not exact. */
+  listMrCommits(repo: RepoRef, mrIid: number): Promise<string[]>;
 
   // --- mutation (all idempotent) ---
   createBranch(repo: RepoRef, name: string, fromRef: string): Promise<void>;
