@@ -15,6 +15,12 @@ Mode: worktree-isolated agents per issue, PRs only, sequential review+merge thro
 - [x] #94 after-run edge — PR #101 merged (deviation: decision carries resetAt as ISO 8601, tick parses back; round trip pinned by test)
 - [x] #95 public/runtime surface split — PR #102 merged (exceptions documented in public.ts and CONTEXT.md: WorkspaceManager + ForgeError stay public; adapter classes exported from NEITHER surface)
 
+## Follow-up from re-check of the 2026-06-07 review
+
+- [x] #78 lifecycle-move table — PR #103 merged (pure write-side table, 10 tick sites + handoff flip migrated, todo-gate invariant pinned)
+- [x] #80 loader Result-union — closed: completed by #98's loadConfig
+- [x] #81 onboarding as one concept — closed not-planned per its own caveat; #95 delivered the interface-narrowing half
+
 ## Review
 
 - 2026-06-10: #97→#100 merged sequentially (plain merge commits), CI green on all; full verification chain re-run on combined main (98+99 both touched cli/daemon.ts).

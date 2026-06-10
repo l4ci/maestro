@@ -80,7 +80,7 @@ the tick only executes.
 
 ## Lifecycle move
 
-A **lifecycle move** (decided 2026-06-10, issue #78, not yet built) is the write-side counterpart
+A **lifecycle move** (`reconciler/transitions.ts`, built 2026-06-10, PR #103) is the write-side counterpart
 of the pure lifecycle edges: a named label transition owned by one pure table,
 `lifecycleMove(move, labels, role?) → { set, unset }` in `reconciler/transitions.ts` — the write
 half beside the read half (`deriveState`/`deriveStage`). Moves preserve today's exact label pairs
