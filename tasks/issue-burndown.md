@@ -5,16 +5,16 @@ Mode: worktree-isolated agents per issue, PRs only, sequential review+merge thro
 
 ## Lanes (parallel, no file overlap)
 
-- [ ] #90 forge wiring module — core/src/compose (new), cli/main, web/main, cli/daemon, core index
-- [ ] #91 Claim module — core/src/daemon/slots.ts, tick.ts
-- [ ] #92 authorized-actor predicate — core/src/security (new), reconciler/reconcile.ts, mr-command/decide.ts
-- [ ] #93 FSM property test — core/test only
+- [x] #90 forge wiring module — PR #98 merged
+- [x] #91 Claim module — PR #99 merged (deviations: `open` scope param for the MR pass; `globalActive` getter for the heartbeat)
+- [x] #92 authorized-actor predicate — PR #97 merged
+- [x] #93 FSM property test — PR #100 merged; equivalence holds OUTSIDE three deliberate zones (D1 review gate #29, D2 mark-queued #53, D3 labels-vs-artifacts) → FSM unification off the table, CONTEXT.md updated
 
 ## Blocked (dispatch after blocker merges)
 
-- [ ] #94 after-run edge — after #91
-- [ ] #95 public/runtime surface split — after #90
+- [ ] #94 after-run edge — after #91 ✓ (unblocked)
+- [ ] #95 public/runtime surface split — after #90 ✓ (unblocked)
 
 ## Review
 
-(filled as PRs land)
+- 2026-06-10: #97→#100 merged sequentially (plain merge commits), CI green on all; full verification chain re-run on combined main (98+99 both touched cli/daemon.ts).

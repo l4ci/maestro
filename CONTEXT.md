@@ -96,10 +96,13 @@ stays MR-free) is unaffected.
 ## Reconciler FSMs (legacy + pipeline)
 
 The two FSMs in `reconcile.ts` (legacy `deriveState` switch vs. role-pipeline `deriveStage`,
-toggled by `rolesDeclared`) stay separate for now (decided 2026-06-09). First step is a property
-test asserting legacy ≡ pipeline-with-one-stage across generated snapshots; unification is a
-mechanical follow-up only if that equivalence holds. Do not unify without the test, and do not
-re-propose unify-now.
+toggled by `rolesDeclared`) stay separate (decided 2026-06-09; outcome 2026-06-10). The property
+test (`reconcile-fsm-equivalence.test.ts`, PR #100) enumerated the input grid exhaustively: the
+FSMs are equivalent everywhere EXCEPT three deliberate divergences — D1 the internal review gate
+(#29 P3), D2 queue visibility (`mark-queued`, #53), D3 label-derived state vs. artifact-derived
+stage. Unification is therefore off the table; the test pins the equivalence everywhere else and
+the divergence zones are envelope-guarded. Do not re-propose unifying these FSMs — the
+differences are features, not drift (details: issue #93 comment).
 
 ## Command MR
 
