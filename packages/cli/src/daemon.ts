@@ -33,14 +33,10 @@ import {
   type MaestroConfig,
   NodeExec,
   type RepoRef,
-  type WorkflowParseResult,
   WorkspaceManager,
-  botUserForHost,
   checkBinaries,
-  inferForge,
   loadConfig,
   makeForgeAdapter,
-  parseWorkflow,
   requiredBinaries,
 } from '@maestro/core';
 import {
@@ -51,15 +47,13 @@ import {
   HeartbeatWriter,
   type Logger,
   RateLimitGate,
-  RepoSettingsCell,
   type RepoUnit,
   type Rng,
   Scheduler,
   type TickContext,
   WatchedConfig,
+  WorkflowCells,
   WorkflowSource,
-  WorkflowStore,
-  buildBootstrapWorkflow,
   handoff,
   proofAndComment,
   proofAndHandoff,
@@ -188,40 +182,11 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
   // The M0 template — base for the bootstrap workflow a no-WORKFLOW repo runs on.
   const templateText = readTemplate();
 
-  // Per-repo settings cell (settings/promptBody/front matter re-derived live on reload).
-  const cells = new Map<string, { repo: RepoRef; cell: RepoSettingsCell }>();
-  // The WORKFLOW text each cell was last derived from — so a refresh re-derives only on a
-  // real change (and so an unchanged remote is a no-op). `undefined` = bootstrap mode.
-  const lastText = new Map<string, string | undefined>();
-
-  /** Build a repo's settings cell from its WORKFLOW text. `undefined` text → BOOTSTRAP mode
-   *  (no committed WORKFLOW.md yet) so the daemon can still work the "define my workflow"
-   *  issue. Returns undefined when the text is invalid — the caller keeps the prior good
-   *  cell (validate-before-swap, §5); a user error is logged, not fatal. */
-  const deriveCell = (
-    repo: RepoRef,
-    workflowText: string | undefined,
-  ): RepoSettingsCell | undefined => {
-    const parsed: WorkflowParseResult =
-      workflowText !== undefined
-        ? parseWorkflow(workflowText, repo.host)
-        : buildBootstrapWorkflow(repo, templateText, botUserForHost(repo.host, config));
-    if (!parsed.ok) {
-      log.error('WORKFLOW invalid — keeping previous workflow if any', {
-        repo: repo.project,
-        error: parsed.error,
-      });
-      return undefined;
-    }
-    const override = config.repos.find((r) => r.url === repo.url)?.overrides;
-    return new RepoSettingsCell({
-      repo,
-      store: new WorkflowStore(parsed.value, repo.host),
-      defaults: config.defaults,
-      ...(override ? { override } : {}),
-      log,
-    });
-  };
+  // Per-repo settings cells (settings/promptBody/front matter re-derived live on reload),
+  // owned by core's WorkflowCells (#107): validate-before-swap on refresh, and an invalid
+  // WORKFLOW with no prior good cell SKIPS the repo with an error log — never a bootstrap
+  // fallback over a file the user actually wrote.
+  const cells = new WorkflowCells({ config, templateText, log });
 
   // Initial cells from the LOCAL CACHE (instant, offline-tolerant). A missing cache file →
   // bootstrap; the background refresh below then converges to the default-branch copy.
@@ -232,32 +197,15 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     } catch {
       cached = undefined;
     }
-    const cell = deriveCell(repo, cached);
-    if (!cell) continue; // invalid local cache; the remote refresh may yet supply a good one
-    cells.set(repo.url, { repo, cell });
-    lastText.set(repo.url, cached);
-    if (cached === undefined)
-      log.info('repo has no WORKFLOW.md yet — operating in bootstrap mode', { repo: repo.project });
+    cells.seed(repo, cached);
   }
 
   // Fetch a repo's WORKFLOW.md from its default branch and re-derive its cell ON CHANGE.
   // This is how the bootstrap→merge loop closes (#5): once the bootstrap PR lands, the next
   // refresh sees the real WORKFLOW.md and swaps the repo out of bootstrap mode by itself.
   const refreshFromRemote = async (repo: RepoRef): Promise<void> => {
-    const text = await source.load(repo); // load() serves cache on transient failure, never throws here
-    if (cells.has(repo.url) && text === lastText.get(repo.url)) return; // unchanged → no re-derive
-    const cell = deriveCell(repo, text);
-    if (!cell) return; // invalid → keep prior good cell (already logged)
-    const had = cells.has(repo.url);
-    cells.set(repo.url, { repo, cell });
-    lastText.set(repo.url, text);
-    log.info(
-      had ? 'WORKFLOW re-derived from default branch' : 'WORKFLOW loaded from default branch',
-      {
-        repo: repo.project,
-        bootstrap: text === undefined,
-      },
-    );
+    // load() serves cache on transient failure, never throws here
+    cells.applyRemote(repo, await source.load(repo));
   };
 
   const refreshAll = async (): Promise<void> => {
@@ -272,7 +220,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
 
   /** Fresh units each pass so live settings/promptBody/front matter take effect (§5). */
   const buildUnits = (): RepoUnit[] =>
-    [...cells.values()].map(({ repo, cell }): RepoUnit => {
+    cells.entries().map(({ repo, cell }): RepoUnit => {
       const ctx: TickContext = {
         adapter: selectAdapter(repo, adapters),
         workspace,
