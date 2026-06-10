@@ -34,7 +34,7 @@
 // whole suite is SKIPPED, so no default run hits gitlab.com or spawns the agent.
 
 import { describe, expect, it } from 'vitest';
-import { DONE_SENTINEL } from '../src/index.js';
+import { DONE_SENTINEL } from '../src/public.js';
 import {
   type E2EHarness,
   buildHarness,

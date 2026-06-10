@@ -12,28 +12,17 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Logger, TickContext } from '../../src/daemon/ports.js';
+import { ForgeCli } from '../../src/forge/cli.js';
+import { GithubAdapter } from '../../src/forge/github/github-adapter.js';
+import { GitlabAdapter, encodeProject } from '../../src/forge/gitlab/gitlab-adapter.js';
 import {
-  Claims,
-  ClaudeRunner,
-  ForgeCli,
-  GithubAdapter,
-  GitlabAdapter,
   NodeExec,
-  RepoSettingsCell,
-  WorkflowStore,
   WorkspaceManager,
-  buildBootstrapWorkflow,
   deriveState,
   deriveWatchSet,
-  encodeProject,
-  handoff,
   parseConfig,
   parseWorkflow,
-  proofAndHandoff,
-  selectAdapter,
-  slugifyProject,
-  tickRepo,
-} from '../../src/index.js';
+} from '../../src/public.js';
 import type {
   Exec,
   ForgeAdapter,
@@ -43,7 +32,19 @@ import type {
   RepoRef,
   RepoSettings,
   WorkflowParseResult,
-} from '../../src/index.js';
+} from '../../src/public.js';
+import {
+  Claims,
+  ClaudeRunner,
+  RepoSettingsCell,
+  WorkflowStore,
+  buildBootstrapWorkflow,
+  handoff,
+  proofAndHandoff,
+  selectAdapter,
+  slugifyProject,
+  tickRepo,
+} from '../../src/runtime.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 

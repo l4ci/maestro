@@ -4,8 +4,8 @@
 // the structured result.
 
 import { describe, expect, it } from 'vitest';
-import type { Exec, ExecOptions, ExecResult, MaestroConfig, SpawnHandle } from '../src/index.js';
-import { allBinaries, checkBinaries, requiredBinaries } from '../src/index.js';
+import type { Exec, ExecOptions, ExecResult, MaestroConfig, SpawnHandle } from '../src/public.js';
+import { allBinaries, checkBinaries, requiredBinaries } from '../src/public.js';
 
 /** Exec whose run() resolves for binaries in `installed`, else rejects with an
  *  ENOENT-coded error — exactly how node:child_process surfaces a missing executable. */

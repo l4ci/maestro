@@ -77,12 +77,18 @@ the tick only executes.
 
 ## Public vs. runtime surface
 
-Core presents two interfaces via package.json subpath exports (decided 2026-06-09, not yet built):
-`@maestro/core` is the **public surface** — contracts, view assembly, onboarding, forge wiring —
-the only thing cli/web may import; `@maestro/core/runtime` is the **runtime surface** — daemon
-internals (tick, WorkspaceManager, ClaudeRunner, WorkflowSource, proof, handoff) — imported only
-by the daemon composition (`cli/daemon.ts`). Node resolution enforces the seam; the flat
-`index.ts` grab-bag retires.
+Core presents two interfaces via package.json subpath exports (decided 2026-06-09, built
+2026-06-10 in `public.ts`/`runtime.ts`): `@maestro/core` is the **public surface** — contracts,
+pure reconciler edges, view assembly, onboarding, forge wiring, config/WORKFLOW parsing, log +
+heartbeat READING — the only thing cli/web may import; `@maestro/core/runtime` is the **runtime
+surface** — daemon internals (tick, ClaudeRunner, WorkflowSource, proof, handoff, heartbeat
+writer, hot-reload stores, workspace plumbing) — imported only by the daemon composition
+(`cli/daemon.ts`). One deliberate exception: the `WorkspaceManager` class stays public because
+`cli/main.ts` constructs it (`maestro add` bootstrap-PR wiring, `maestro run` attach); its
+path/auth internals do not follow it. The forge adapter classes (ForgeCli, GitlabAdapter,
+GithubAdapter, snapshot plumbing) are exported from NEITHER surface — composeForges /
+makeForgeAdapter are the way in (#90). Node resolution enforces the seam (pinned by
+`cli/test/core-surface.test.ts`); the flat `index.ts` grab-bag is gone.
 
 ## Authorized actor
 
