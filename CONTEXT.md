@@ -78,6 +78,19 @@ tick's `applyAgentResult` shrinks to recordPlan (every kind except `pause-spawns
 effects-only switch. Same idiom as the reconciler and `decideMrCommand`: decisions are pure edges,
 the tick only executes.
 
+## Lifecycle move
+
+A **lifecycle move** (decided 2026-06-10, issue #78, not yet built) is the write-side counterpart
+of the pure lifecycle edges: a named label transition owned by one pure table,
+`lifecycleMove(move, labels, role?) → { set, unset }` in `reconciler/transitions.ts` — the write
+half beside the read half (`deriveState`/`deriveStage`). Moves preserve today's exact label pairs
+(`begin-work`, `begin-work-from-plan`, `enter-define`, `resume-from-review`, role-aware `unblock`,
+`park-blocked`, `enter-review`, `mark-queued`, `retract-queued`); the tick and handoff keep their
+own `setIssueLabels` calls and just spread the table's result. Two constraints are load-bearing
+and forbid a "clear all other labels" normalization: the human-set `todo` definition gate must
+survive every move, and a non-implement `unblock` sets NO stage label (artifacts carry the stage,
+#29). The queued marker is capacity, not stage — its set/retract are moves like any other.
+
 ## Public vs. runtime surface
 
 Core presents two interfaces via package.json subpath exports (decided 2026-06-09, built
