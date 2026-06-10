@@ -26,6 +26,22 @@ export class ProofConfigError extends Error {
   }
 }
 
+/** The proof seam's typed error mode (#109, CONTEXT.md §Proof-failure escalation): any
+ *  THROW inside a strategy run — a ProofConfigError, a rejecting Exec, a Playwright
+ *  crash — surfaces from `generateProofs` as this one error carrying WHICH strategy and
+ *  WHY, so the executor's catch path can tell a proof failure from an agent error and
+ *  escalate instead of silently retrying forever. `ok: false` RESULTS are unaffected —
+ *  still non-fatal (M4 policy); this types only the throwing path. */
+export class ProofGenerationError extends Error {
+  readonly strategy: ProofStrategyKind;
+  constructor(strategy: ProofStrategyKind, cause: unknown) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(`proof generation failed (${strategy}): ${reason}`, { cause });
+    this.name = 'ProofGenerationError';
+    this.strategy = strategy;
+  }
+}
+
 export interface PlaywrightTuning {
   healthAttempts?: number; // bounded health poll (default 10)
   sleep?: (ms: number) => Promise<void>; // injectable for fast tests
@@ -200,6 +216,11 @@ export function generateProof(input: ProofInput, tuning?: PlaywrightTuning): Pro
  * order. Sequential by design (§14): a server-spawning strategy (playwright) must not
  * race another for ports/resources, and the order is what the handoff comment renders.
  * The handoff folds these into the single proof comment (all-must-pass).
+ *
+ * This is the daemon's proof seam (#109): a strategy that THROWS (vs. returning
+ * ok:false) aborts the run and surfaces as one typed ProofGenerationError, which the
+ * executor's catch path escalates (retry → park-blocked). Callers that drive a single
+ * strategy directly (`generateProof`) still see the raw error.
  */
 export async function generateProofs(
   base: Omit<ProofInput, 'workflowProof'>,
@@ -208,7 +229,11 @@ export async function generateProofs(
 ): Promise<ProofResult[]> {
   const results: ProofResult[] = [];
   for (const workflowProof of strategies) {
-    results.push(await generateProof({ ...base, workflowProof }, tuning));
+    try {
+      results.push(await generateProof({ ...base, workflowProof }, tuning));
+    } catch (err) {
+      throw new ProofGenerationError(workflowProof.type, err);
+    }
   }
   return results;
 }

@@ -46,6 +46,7 @@ import {
   ConfigStore,
   HeartbeatWriter,
   type Logger,
+  ProofStreaks,
   RateLimitGate,
   type RepoUnit,
   type Rng,
@@ -170,6 +171,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
   const claims = new Claims(globalMax);
   const heartbeat = new HeartbeatWriter(logsRoot); // liveness signal for the web dashboard (#40)
   const rateGate = new RateLimitGate(); // global Claude usage-limit backoff (#47)
+  const proofStreaks = new ProofStreaks(); // per-issue proof-failure streaks (#109)
   const scheduler = new Scheduler(
     {
       active: config.defaults.poll_interval_active,
@@ -234,6 +236,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
         promptBody: cell.promptBody,
         claims,
         rateGate,
+        proofStreaks,
         log,
       };
       return { repo, ctx };
