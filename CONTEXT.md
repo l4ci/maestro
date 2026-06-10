@@ -91,6 +91,20 @@ and forbid a "clear all other labels" normalization: the human-set `todo` defini
 survive every move, and a non-implement `unblock` sets NO stage label (artifacts carry the stage,
 #29). The queued marker is capacity, not stage — its set/retract are moves like any other.
 
+## Progress mirror
+
+The **progress mirror** (decided 2026-06-10, issue #86, not yet built) is a daemon-owned,
+marker-delimited region (`<!-- maestro:progress:start/end -->`) inside the MR description,
+listing the branch's commit subjects (chronological, capped at 50 with a truncation note). It is
+the FALLBACK "where it's at" when a session dies before emitting `mrDescription` — the
+agent-emitted todo stays the primary channel and owns everything outside the markers. Refresh is
+**every due tick** for issues with a maestro MR, compare-and-skip against the snapshot's already
+fetched `mr.description` (one write only on change; a post-run hook would miss stall-kills, the
+motivating failure on #84). `recordPlan`'s full-description overwrite is healed by the next
+tick's upsert. The region transform is a pure helper; commits come from a new adapter fetch
+beside the `lastBotPushAt` path. v1 mirrors commits only — NO fuzzy-matching commit text to plan
+checkboxes (decided in the issue).
+
 ## Public vs. runtime surface
 
 Core presents two interfaces via package.json subpath exports (decided 2026-06-09, built
