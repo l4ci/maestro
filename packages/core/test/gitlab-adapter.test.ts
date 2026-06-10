@@ -266,6 +266,21 @@ describe('Slice 6 — description / draft / assign', () => {
     await already.a.assignMR(repo, 7, 'reporter');
     expect(already.fake.callsTo('PUT', '/merge_requests/7')).toHaveLength(0);
   });
+
+  it('requestReview resolves username→id and sets reviewer_ids; idempotent if already requested', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/users', [user(5, 'reporter')]);
+    fake.onApi('GET', '/merge_requests/7', rawMr({ reviewers: [] }));
+    fake.onApi('PUT', '/merge_requests/7', rawMr());
+    await a.requestReview(repo, 7, 'reporter');
+    expect(bodyOf(fake, 'PUT', '/merge_requests/7').reviewer_ids).toEqual([5]);
+
+    const already = mk();
+    already.fake.onApi('GET', '/users', [user(5, 'reporter')]);
+    already.fake.onApi('GET', '/merge_requests/7', rawMr({ reviewers: [user(5, 'reporter')] }));
+    await already.a.requestReview(repo, 7, 'reporter');
+    expect(already.fake.callsTo('PUT', '/merge_requests/7')).toHaveLength(0);
+  });
 });
 
 // --- Slice 7: mergeMR ------------------------------------------------------

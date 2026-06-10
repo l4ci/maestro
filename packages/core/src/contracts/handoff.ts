@@ -1,5 +1,5 @@
 // Handoff contract (AM-11). M4 implements the §7 ordering guarantee (proof-comment
-// → assignMR → setDraft(false) → label in-review, idempotent); M5 invokes it.
+// → requestReview → ready comment → setDraft(false) → label in-review, idempotent); M5 invokes it.
 
 import type { ForgeAdapter } from './forge-adapter.js';
 import type { RepoRef } from './forge-model.js';
@@ -10,7 +10,7 @@ export interface HandoffInput {
   repo: RepoRef;
   issueIid: number;
   mrIid: number;
-  ticketCreator: string; // issue.author.username — the reviewer to assign
+  ticketCreator: string; // issue.author.username — the reviewer to request review from
   settings: RepoSettings;
   adapter: ForgeAdapter;
   proof: ProofResult[]; // one entry per configured strategy; all-must-pass at handoff

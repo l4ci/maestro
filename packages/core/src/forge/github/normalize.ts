@@ -44,6 +44,7 @@ export interface RawPr {
   head: { ref: string; sha?: string };
   base: { ref: string };
   assignees?: RawUser[];
+  requested_reviewers?: RawUser[];
   labels: RawLabel[];
   html_url: string;
 }
@@ -139,6 +140,7 @@ export function normalizeMergeRequest(
     sourceBranch: raw.head.ref,
     targetBranch: raw.base.ref,
     assignees: (raw.assignees ?? []).map(normalizeUser),
+    reviewers: (raw.requested_reviewers ?? []).map(normalizeUser),
     labels: (raw.labels ?? []).map(labelName),
     approvals,
     webUrl: raw.html_url,

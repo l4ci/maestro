@@ -292,6 +292,37 @@ describe('Slice 6 — description / draft / assign', () => {
     await already.a.assignMR(repo, 7, 'reporter');
     expect(already.fake.callsTo('POST', '/issues/7/assignees')).toHaveLength(0);
   });
+
+  it('requestReview requests by login; idempotent if already requested', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/pulls/7', rawPr({ requested_reviewers: [] }));
+    fake.onApi('POST', '/pulls/7/requested_reviewers', { number: 7 });
+    await a.requestReview(repo, 7, 'reporter');
+    expect(bodyOf(fake, 'POST', '/pulls/7/requested_reviewers').reviewers).toEqual(['reporter']);
+
+    const already = mk();
+    already.fake.onApi('GET', '/pulls/7', rawPr({ requested_reviewers: [user(5, 'reporter')] }));
+    await already.a.requestReview(repo, 7, 'reporter');
+    expect(already.fake.callsTo('POST', '/pulls/7/requested_reviewers')).toHaveLength(0);
+  });
+
+  it('requestReview is a no-op when the user is the bot (PR author → would 422)', async () => {
+    const { a, fake } = mk();
+    await a.requestReview(repo, 7, 'maestro-bot');
+    expect(fake.calls).toHaveLength(0); // no GET, no POST — short-circuited
+  });
+
+  it('requestReview swallows a 422 (non-collaborator) — the ready comment carries the ping', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/pulls/7', rawPr({ requested_reviewers: [] }));
+    fake.onApiError(
+      'POST',
+      '/pulls/7/requested_reviewers',
+      1,
+      'gh: Reviews may only be requested from collaborators. (HTTP 422)',
+    );
+    await expect(a.requestReview(repo, 7, 'reporter')).resolves.toBeUndefined();
+  });
 });
 
 // --- Slice 7: mergeMR ------------------------------------------------------

@@ -48,6 +48,7 @@ export const MergeRequestSchema = z.object({
   sourceBranch: z.string(),
   targetBranch: z.string(),
   assignees: z.array(ForgeUserSchema),
+  reviewers: z.array(ForgeUserSchema),
   labels: z.array(z.string()),
   approvals: ApprovalStateSchema,
   webUrl: z.string(),

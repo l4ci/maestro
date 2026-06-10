@@ -48,6 +48,7 @@ export interface MergeRequest {
   sourceBranch: string;
   targetBranch: string;
   assignees: ForgeUser[];
+  reviewers: ForgeUser[]; // review requested from these users (GitLab reviewer_ids / GitHub requested_reviewers); handoff requests the ticket creator (§7)
   labels: string[];
   approvals: ApprovalState;
   webUrl: string;

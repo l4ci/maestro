@@ -21,7 +21,7 @@ const repo: RepoRef = {
 const user = (u: string) => ({ username: u, id: `id-${u}` });
 
 function snapshot(
-  over: { comments?: string[]; assignees?: string[]; isDraft?: boolean; labels?: string[] } = {},
+  over: { comments?: string[]; reviewers?: string[]; isDraft?: boolean; labels?: string[] } = {},
 ): IssueSnapshot {
   const issue: Issue = {
     iid: 42,
@@ -43,10 +43,11 @@ function snapshot(
     isDraft: over.isDraft ?? true,
     sourceBranch: 'maestro/issue-42',
     targetBranch: 'main',
-    assignees: (over.assignees ?? []).map(user),
+    assignees: [],
+    reviewers: (over.reviewers ?? []).map(user),
     labels: over.labels ?? [],
     approvals: { approved: false, approvedBy: [], changesRequested: false },
-    webUrl: 'u',
+    webUrl: 'https://forge/mr/7',
   };
   return {
     repo,
@@ -61,38 +62,29 @@ function snapshot(
   };
 }
 
-/** Recording fake adapter: pushes each mutating method onto `calls`. `assignLands` models
- *  whether the forge actually applies the assignee — GitHub/GitLab silently drop an
- *  un-assignable user, so a re-read (getSnapshot) reflects it only when it landed. */
-function recorder(snap: IssueSnapshot, opts: { assignLands?: boolean } = {}) {
-  const assignLands = opts.assignLands ?? true;
+/** Recording fake adapter: pushes each mutating method onto `calls`, captures issue-comment
+ *  bodies and the usernames review was requested from. requestReview is a plain recorder — the
+ *  handoff no longer re-reads after it, because the ready-for-review comment is the guaranteed
+ *  notification regardless of whether the request landed (#115). */
+function recorder(snap: IssueSnapshot) {
   const calls: string[] = [];
-  const assigned: string[] = [];
+  const reviewers: string[] = [];
   const comments: string[] = [];
   const adapter: Partial<ForgeAdapter> = {
-    getSnapshot: async () =>
-      snap.mr
-        ? {
-            ...snap,
-            mr: {
-              ...snap.mr,
-              assignees: [...snap.mr.assignees, ...(assignLands ? assigned.map(user) : [])],
-            },
-          }
-        : snap,
+    getSnapshot: async () => snap,
     commentIssue: async (_r, _i, body) => {
       calls.push('commentIssue');
       comments.push(body);
     },
     commentMR: async () => void calls.push('commentMR'),
-    assignMR: async (_r, _iid, username) => {
-      calls.push('assignMR');
-      assigned.push(username);
+    requestReview: async (_r, _iid, username) => {
+      calls.push('requestReview');
+      reviewers.push(username);
     },
     setDraft: async () => void calls.push('setDraft'),
     setIssueLabels: async () => void calls.push('setIssueLabels'),
   };
-  return { adapter: adapter as ForgeAdapter, calls, assigned, comments };
+  return { adapter: adapter as ForgeAdapter, calls, reviewers, comments };
 }
 
 const proof: ProofResult[] = [{ ok: true, kind: 'test-output', summary: 'all green' }];
@@ -125,15 +117,26 @@ function hin(adapter: ForgeAdapter, over: Partial<HandoffInput> = {}): HandoffIn
 
 // --- Slice 5: strict ordering ---------------------------------------------
 
+const READY = '<!-- maestro:ready-for-review -->';
+
 describe('Slice 5 — strict ordering (§7 guarantee)', () => {
-  it('comment(issue) < comment(MR) < assign < undraft < label; reviewer = ticket creator', async () => {
-    const { adapter, calls, assigned } = recorder(snapshot());
+  it('comment(issue) < comment(MR) < requestReview < ready comment < undraft < label; reviewer = ticket creator', async () => {
+    const { adapter, calls, reviewers, comments } = recorder(snapshot());
     await handoff(hin(adapter));
-    expect(calls).toEqual(['commentIssue', 'commentMR', 'assignMR', 'setDraft', 'setIssueLabels']);
-    expect(assigned).toEqual(['reporter']); // ticket creator, not the bot
+    expect(calls).toEqual([
+      'commentIssue', // proof
+      'commentMR', // proof
+      'requestReview',
+      'commentIssue', // ready-for-review ping
+      'setDraft',
+      'setIssueLabels',
+    ]);
+    expect(reviewers).toEqual(['reporter']); // ticket creator, not the bot
+    expect(comments[0]).toContain('all green'); // proof first
+    expect(comments[1]).toContain('ready for your review'); // ping second
   });
 
-  it('proofAndHandoff posts proof comment before assigning (proof-before-assign end-to-end)', async () => {
+  it('proofAndHandoff posts proof comment before requesting review (proof-before-ping end-to-end)', async () => {
     const { adapter, calls } = recorder(snapshot());
     await proofAndHandoff({
       ...hin(adapter),
@@ -145,62 +148,53 @@ describe('Slice 5 — strict ordering (§7 guarantee)', () => {
         exec: adapter as never,
       },
     } as never);
-    expect(calls.indexOf('commentIssue')).toBeLessThan(calls.indexOf('assignMR'));
+    expect(calls.indexOf('commentIssue')).toBeLessThan(calls.indexOf('requestReview'));
   });
 });
 
 // --- Slice 6: pinged exactly once ------------------------------------------
 
 describe('Slice 6 — human pinged exactly once', () => {
-  it('assignMR called once, after proof comments', async () => {
-    const { adapter, calls } = recorder(snapshot());
+  it('requestReview and ready comment each happen once, after the proof comments', async () => {
+    const { adapter, calls, comments } = recorder(snapshot());
     await handoff(hin(adapter));
-    expect(calls.filter((c) => c === 'assignMR')).toHaveLength(1);
+    expect(calls.filter((c) => c === 'requestReview')).toHaveLength(1);
+    expect(comments.filter((b) => b.includes(READY))).toHaveLength(1);
   });
 
-  it('if a proof comment throws, assignMR is never reached', async () => {
+  it('if a proof comment throws, the review request is never reached', async () => {
     const { adapter, calls } = recorder(snapshot());
     adapter.commentMR = async () => {
       throw new Error('network');
     };
     await expect(handoff(hin(adapter))).rejects.toThrow('network');
-    expect(calls).not.toContain('assignMR');
+    expect(calls).not.toContain('requestReview');
   });
 });
 
-// --- Slice 6b: un-assignable reviewer → @-mention fallback (#6) -------------
+// --- Slice 6b: the ready comment always notifies (#115) --------------------
 
-describe('Slice 6b — un-assignable reviewer falls back to an @-mention (#6)', () => {
-  const PING = '<!-- maestro:reviewer-ping -->';
-
-  it('pings the ticket creator when the assign silently no-ops', async () => {
-    const { adapter, calls, comments } = recorder(snapshot(), { assignLands: false });
+describe('Slice 6b — ready-for-review comment always @-mentions the creator (#115)', () => {
+  it('posts an @-mention with the MR link and the three response channels', async () => {
+    const { adapter, comments } = recorder(snapshot());
     await handoff(hin(adapter));
-    expect(calls.filter((c) => c === 'assignMR')).toHaveLength(1); // attempted
-    const ping = comments.find((b) => b.includes('@reporter'));
-    expect(ping).toBeDefined();
-    expect(ping).toContain('review');
-    expect(ping).toContain(PING);
-    // the rest of the sequence still completes
-    expect(calls).toContain('setDraft');
-    expect(calls).toContain('setIssueLabels');
+    const ready = comments.find((b) => b.includes(READY));
+    expect(ready).toBeDefined();
+    expect(ready).toContain('@reporter');
+    expect(ready).toContain('review');
+    expect(ready).toContain('https://forge/mr/7'); // MR link
+    expect(ready).toContain('/maestro'); // the comment-steering channel
   });
 
-  it('does not ping when the assign lands', async () => {
-    const { adapter, comments } = recorder(snapshot(), { assignLands: true });
-    await handoff(hin(adapter));
-    expect(comments.some((b) => b.includes('@reporter'))).toBe(false);
-  });
-
-  it('idempotent: a crash-recovery re-run does not re-ping', async () => {
+  it('idempotent: a crash-recovery re-run does not re-ping (sentinel present)', async () => {
     const { adapter, calls } = recorder(
-      snapshot({ comments: [`### Proof\nok\n${DONE_SENTINEL}`, PING] }),
-      { assignLands: false },
+      snapshot({ comments: [`### Proof\nok\n${DONE_SENTINEL}`, READY], reviewers: ['reporter'] }),
     );
     await handoff(hin(adapter));
-    // proof already posted AND already pinged → no commentIssue at all
+    // proof already posted, review already requested, ready already posted → no comments, no request
     expect(calls).not.toContain('commentIssue');
-    expect(calls).toEqual(['assignMR', 'setDraft', 'setIssueLabels']);
+    expect(calls).not.toContain('requestReview');
+    expect(calls).toEqual(['setDraft', 'setIssueLabels']);
   });
 });
 
@@ -211,25 +205,26 @@ describe('Slice 7 — crash-recovery idempotency', () => {
     const { adapter, calls } = recorder(snapshot());
     await handoff(hin(adapter));
     expect(calls).toContain('commentIssue');
-    expect(calls).toContain('assignMR');
+    expect(calls).toContain('requestReview');
   });
 
-  it('b. partway (proof posted, not assigned) → no double-comment, still assigns/undrafts/labels', async () => {
-    const { adapter, calls } = recorder(
+  it('b. partway (proof posted, not requested) → no double proof comment; still requests/pings/undrafts/labels', async () => {
+    const { adapter, calls, comments } = recorder(
       snapshot({ comments: [`### Proof\nall green\n${DONE_SENTINEL}`] }),
     );
     await handoff(hin(adapter));
-    expect(calls).not.toContain('commentIssue'); // sentinel detected → skip
+    expect(comments.some((b) => b.includes('all green'))).toBe(false); // proof sentinel detected → skip
     expect(calls).not.toContain('commentMR');
-    expect(calls).toEqual(['assignMR', 'setDraft', 'setIssueLabels']);
+    expect(calls).toEqual(['requestReview', 'commentIssue', 'setDraft', 'setIssueLabels']);
+    expect(comments[0]).toContain(READY); // the only comment is the ping
   });
 
   it('c. fully done → no-op (zero mutating calls)', async () => {
     const l = labelNames('gitlab');
     const { adapter, calls } = recorder(
       snapshot({
-        comments: [DONE_SENTINEL],
-        assignees: ['reporter'],
+        comments: [DONE_SENTINEL, READY],
+        reviewers: ['reporter'],
         isDraft: false,
         labels: [l.inReview],
       }),
@@ -249,7 +244,7 @@ describe('Slice 8 — proof failure does not block handoff', () => {
       getSnapshot: async () => snap,
       commentIssue: async (_r, _i, body) => void bodies.push(body),
       commentMR: async () => {},
-      assignMR: async () => {},
+      requestReview: async () => {},
       setDraft: async () => {},
       setIssueLabels: async () => {},
     };

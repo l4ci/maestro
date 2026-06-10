@@ -90,7 +90,7 @@ stateDiagram-v2
     InProgress --> InProgress: write code,<br/>atomic commits
     InProgress --> Handoff: agent says "done"
     InProgress --> Blocked: agent has a question
-    Handoff --> InReview: proof posted,<br/>then reviewer assigned
+    Handoff --> InReview: proof posted,<br/>then review requested
     InReview --> InProgress: changes requested
     InReview --> Done: you approve, then merge
     Blocked --> InProgress: human answers
@@ -113,9 +113,16 @@ In words:
   off items in its to-do list (which lives in the MR description) and posting the
   occasional progress note.
 - **Handoff** — A brief, behind-the-scenes step. The agent says it's done, so
-  Maestro generates *proof* (see below), posts it, **then** assigns the merge
-  request to whoever opened the ticket and marks it ready for review. The order
-  matters: you're pinged last, when there's actually something to look at.
+  Maestro generates *proof* (see below), posts it on **both** the issue and the
+  MR, **then** requests your review on the merge request and posts a short
+  "ready for review" comment on the issue. The review request surfaces the MR
+  under your "review requests" and fires the forge's native notification; the
+  comment @-mentions you with a link and your response options, so you're
+  notified even if the review request can't land (no access to the repo, or a
+  shared bot account). From here you reply wherever is natural: approve or
+  request changes on the MR, or steer with a `/maestro` comment on either the
+  MR or the issue — all three channels reach the agent. The order matters:
+  you're pinged last, when there's actually something to look at.
 - **In review** — Maestro waits. If you approve, it merges using that repo's own
   git rules and the ticket auto-closes. If you request changes, it flips back to
   in-progress and feeds your feedback to the agent. Three channels count as
@@ -173,6 +180,36 @@ sequenceDiagram
 The only thing the daemon ever hears back from Claude is a tiny status:
 `done`, `needs_input`, or `in_progress` (a review session adds its pass/fail
 verdict). Everything else it learns by reading the forge on the next tick.
+
+---
+
+## Driving Maestro from a merge request — no ticket required
+
+Tickets aren't the only way in. Any **open MR/PR that has no backing issue** can
+be handed to Maestro directly: assign the MR to the bot account and write a
+comment that *starts with* `/maestro`:
+
+```
+/maestro the e2e tests fail on this branch — find out why and fix it
+```
+
+On the next tick, Maestro starts a cold agent on that MR's branch, follows the
+instruction (investigate, or change code), pushes commits if it changed
+anything, and **always** posts a reply — even if it only has findings, or
+failed. One command, one reply. To ask for more, comment `/maestro …` again;
+the newest unanswered command wins.
+
+Two verbs never reach the agent and are executed by the daemon itself,
+instantly: **`/maestro merge`** and **`/maestro close`**. (The agent never
+holds a forge token, so merging and closing are the daemon's job anyway.) A
+draft MR refuses `merge` with a hint to mark it ready first.
+
+The same trust rules as tickets apply: on a shared bot account the body-start
+`/maestro` is what marks a comment as provably human, and a non-empty
+`allowed_actors` list restricts who may command the bot. MRs that belong to a
+Maestro ticket (a `maestro/issue-*` branch, or one that `Closes #N`) are *not*
+picked up here — those stay with their ticket's lifecycle, where the same
+`/maestro` comment counts as review feedback.
 
 ---
 
@@ -451,6 +488,7 @@ environment:                   # how to reach or boot a running instance (for pr
 claude:                        # how the agent runs
   command: "claude"            #   same binary as interactive; the daemon runs it headless
   max_turns: 40                #   safety cap on how long one session can churn
+  stall_timeout_seconds: 120   #   kill a session that's been silent this long (then retry once)
   permission_mode: acceptEdits #   how much the agent may do without asking
 
 concurrency:
@@ -465,7 +503,15 @@ The blocks worth understanding:
   so a stranger can't kick off work by assignment alone.
 - **`proof`** is how Maestro *demonstrates* the change is good before pinging you.
   `playwright` runs browser tests, `test-output` runs your test suite, `diff-summary`
-  just summarizes the change, and `none` skips it.
+  just summarizes the change, and `none` skips it. If proof *generation itself*
+  crashes (a Playwright crash, a health-check timeout, a misconfigured command),
+  the first two failures retry quietly; the third consecutive one parks the ticket
+  as blocked with the failure posted on the issue, so a broken proof setup never
+  loops silently. Any reply from you un-parks it.
+- **`claude.stall_timeout_seconds`** is a watchdog, not a turn limit: a session
+  that emits *nothing* for this long is killed and retried once. Size it above
+  your repo's slowest silent command — a cold dependency install or full build
+  can legitimately produce no output for minutes.
 - **`environment`** only matters when proof needs a running app. If you already
   keep a local instance up, point `base_url` at it; otherwise Maestro uses
   `start_command` to boot one, `seed_command` to fill it with data, and

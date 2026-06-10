@@ -258,6 +258,19 @@ export class GitlabAdapter implements ForgeAdapter {
     });
   }
 
+  async requestReview(repo: RepoRef, mrIid: number, username: string): Promise<void> {
+    const pid = this.#pid(repo);
+    const id = Number(await this.#resolveUserId(username));
+    const mr = await this.#c.apiRequired<RawMr & { reviewers?: RawUser[] }>(
+      'GET',
+      `/projects/${pid}/merge_requests/${mrIid}`,
+    );
+    if ((mr.reviewers ?? []).some((r) => String(r.id) === String(id))) return; // already requested
+    await this.#c.api('PUT', `/projects/${pid}/merge_requests/${mrIid}`, {
+      body: { reviewer_ids: [id] },
+    });
+  }
+
   async mergeMR(
     repo: RepoRef,
     mrIid: number,
