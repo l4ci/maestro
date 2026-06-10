@@ -5,6 +5,7 @@
 import type { Comment, TriggerGuard } from '../contracts/index.js';
 import { MAESTRO_COMMAND_RE, MR_COMMAND_REPLY_SENTINEL } from '../contracts/index.js';
 import { isHumanComment } from '../forge/comments.js';
+import { isAuthorizedActor } from '../security/authorized-actor.js';
 
 export type MrCommandIntent = { kind: 'run-mr-command'; instruction: string } | { kind: 'none' };
 
@@ -28,8 +29,7 @@ export function decideMrCommand(
     thread.find((c) => c.author.username === botUser && c.body.includes(MR_COMMAND_REPLY_SENTINEL))
       ?.createdAt ?? '';
   const authorized = (c: Comment): boolean =>
-    isHumanComment(c, botUser) &&
-    (guard.allowedActors.length === 0 || guard.allowedActors.includes(c.author.username));
+    isHumanComment(c, botUser) && isAuthorizedActor(c.author.username, guard.allowedActors);
   const command = thread.find(
     (c) => MAESTRO_COMMAND_RE.test(c.body) && authorized(c) && c.createdAt > lastReplyAt,
   );

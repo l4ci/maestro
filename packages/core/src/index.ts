@@ -37,6 +37,7 @@ export * from './bootstrap/onboard.js';
 export * from './bootstrap/bootstrap-pr.js';
 export * from './bootstrap/bootstrap-workflow.js';
 export * from './security/scan-for-secrets.js';
+export { isAuthorizedActor } from './security/authorized-actor.js';
 export * from './views/assemble.js';
 export * from './logs/file-log-reader.js';
 export * from './preflight/check-binaries.js';
