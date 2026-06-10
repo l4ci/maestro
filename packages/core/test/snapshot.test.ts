@@ -261,6 +261,66 @@ describe('assembleSnapshot', () => {
     expect(without.mr).toBeUndefined();
   });
 
+  // §0.2 validation (issue #108): a normalization bug fails AT assembly, naming the
+  // forge and the field path, instead of crashing the reconciler or views downstream.
+  describe('validates the normalized pieces against the §0.2 schemas', () => {
+    const ghRepo: RepoRef = {
+      forge: 'github',
+      host: 'github.com',
+      project: 'o/r',
+      url: 'github.com/o/r',
+    };
+
+    it('a string iid on the issue fails with forge + field path (gitlab)', async () => {
+      const broken = { ...issue(), iid: '42' } as unknown as Issue;
+      await expect(
+        assembleSnapshot(repo, 42, fakePrimitives({ issue: async () => broken }), 50),
+      ).rejects.toThrow(/gitlab snapshot .*issue\.iid/);
+    });
+
+    it('a comment missing its author fails with the indexed field path (github)', async () => {
+      const broken = { id: 'c1', body: 'hi', createdAt: '2026-01-01' } as unknown as Comment;
+      await expect(
+        assembleSnapshot(ghRepo, 42, fakePrimitives({ comments: async () => [broken] }), 50),
+      ).rejects.toThrow(/github snapshot .*recentComments\.0\.author/);
+    });
+
+    it('a malformed approval on the chosen MR fails after approvals are filled', async () => {
+      const badBase = { approved: true, approvedBy: [{}], changesRequested: false };
+      await expect(
+        assembleSnapshot(
+          repo,
+          42,
+          fakePrimitives({
+            openMergeRequests: async () => [mr()],
+            approvalBase: async () => badBase as unknown as ApprovalState,
+          }),
+          50,
+        ),
+      ).rejects.toThrow(/gitlab snapshot .*mr\.approvals\.approvedBy\.0\.username/);
+    });
+
+    it('valid pieces pass through byte-identical on both forges', async () => {
+      for (const r of [repo, ghRepo]) {
+        const snap = await assembleSnapshot(
+          r,
+          42,
+          fakePrimitives({
+            openMergeRequests: async () => [mr()],
+            comments: async () => [
+              { id: 'c1', author: user('x'), body: 'hi', createdAt: '2026-01-01' },
+            ],
+            lastActor: async () => user('triager'),
+          }),
+          50,
+        );
+        expect(snap.issue).toEqual({ ...issue(), lastActor: user('triager') });
+        expect(snap.mr?.iid).toBe(7);
+        expect(snap.recentComments).toHaveLength(1);
+      }
+    });
+  });
+
   it('feeds the newest body-start /maestro issue comment into the MR changes-requested edge', async () => {
     const cmt = (body: string, at: string): Comment => ({
       id: at,

@@ -3,6 +3,7 @@
 // agrees on. Logic (reconcile, adapters, runner, proof, loaders) arrives in M1+.
 
 export * from './forge-model.js';
+export * from './forge-model-schema.js';
 export * from './forge-adapter.js';
 export * from './exec.js';
 export * from './runner.js';
