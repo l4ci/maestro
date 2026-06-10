@@ -1,0 +1,17 @@
+# Oneshot sweep of stale Claude Code agent worktrees — see scripts/cleanup-worktrees.sh
+# for the safety predicate (merged + unlocked + >24h old). Driven by the matching
+# .timer unit; run it once by hand with:
+#   systemctl --user start maestro-worktree-cleanup
+#
+# Install (together with the timer):
+#   cp templates/maestro-worktree-cleanup.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now maestro-worktree-cleanup.timer
+
+[Unit]
+Description=Sweep stale Claude Code agent worktrees in the maestro checkout
+
+[Service]
+Type=oneshot
+# EDIT: absolute path to the maestro checkout (script arg doubles as cwd).
+ExecStart=%h/Sync/Dev/maestro/scripts/cleanup-worktrees.sh %h/Sync/Dev/maestro

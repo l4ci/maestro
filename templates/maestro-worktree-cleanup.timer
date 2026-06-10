@@ -1,0 +1,13 @@
+# Daily trigger for maestro-worktree-cleanup.service. Persistent=true catches up
+# after a reboot/suspend; the randomized delay keeps it off the minute boundary.
+
+[Unit]
+Description=Daily sweep of stale Claude Code agent worktrees
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target
