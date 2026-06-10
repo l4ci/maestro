@@ -59,6 +59,7 @@ export function makeMR(over: Partial<MergeRequest> = {}): MergeRequest {
     sourceBranch: 'maestro/issue-42',
     targetBranch: 'main',
     assignees: [],
+    reviewers: [],
     labels: [],
     approvals: { approved: false, approvedBy: [], changesRequested: false },
     webUrl: 'u',
@@ -98,6 +99,7 @@ export interface AdapterRecorder {
   branches: { name: string; fromRef: string }[];
   createdMRs: CreateMRArgs[];
   assigned: { mrIid: number; username: string }[];
+  reviewRequests: { mrIid: number; username: string }[];
 }
 
 export interface AdapterConfig {
@@ -127,6 +129,7 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
     branches: [],
     createdMRs: [],
     assigned: [],
+    reviewRequests: [],
     adapter: undefined as unknown as ForgeAdapter,
   };
   const maybeThrow = (m: keyof ForgeAdapter) => {
@@ -194,6 +197,11 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
     assignMR: async (_repo, mrIid, username) => {
       r.calls.push('assignMR');
       r.assigned.push({ mrIid, username });
+    },
+    requestReview: async (_repo, mrIid, username) => {
+      r.calls.push('requestReview');
+      maybeThrow('requestReview');
+      r.reviewRequests.push({ mrIid, username });
     },
     mergeMR: async (_repo, mrIid, strategy, deleteSource) => {
       r.calls.push('mergeMR');

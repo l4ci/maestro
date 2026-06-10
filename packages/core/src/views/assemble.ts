@@ -58,7 +58,7 @@ export interface IssueView {
   changesRequested?: boolean; // an open "changes requested" review on the MR (#41)
   lastLog?: string;
   author: ForgeUser; // the issue reporter (#37)
-  reviewer?: ForgeUser; // MR assignee — the ticket creator assigned at handoff; absent before (#37)
+  reviewer?: ForgeUser; // MR reviewer — the ticket creator review was requested from at handoff; absent before (#37)
   lastActivity?: LastActivity; // newest of issue/MR/agent movement, when any is known (#39)
   // --- drill-down detail (#41): populated ONLY by assembleIssue, never by the dashboard
   // list assembly, so the collapsed board payload stays as small as before. ---
@@ -180,9 +180,9 @@ async function issueView(
   const lastLog = log?.msg;
   const lastActivity = lastActivityOf(snapshot, log);
   const mr = snapshot.mr;
-  // The reviewer is whoever the MR is assigned to — handoff assigns the ticket creator
-  // (§7), so before handoff (or on a bare MR) there is simply no assignee to show.
-  const reviewer = mr?.assignees[0];
+  // The reviewer is whoever review was requested from — handoff requests the ticket creator
+  // (§7), so before handoff (or on a bare MR) there is simply no reviewer to show.
+  const reviewer = mr?.reviewers[0];
   const plan = detail && mr ? parsePlan(mr.description) : undefined;
   return {
     iid,

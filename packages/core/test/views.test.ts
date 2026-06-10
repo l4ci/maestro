@@ -180,7 +180,7 @@ describe('assembleIssue — single issue view for status', () => {
     expect(view.approved).toBe(true);
   });
 
-  it('exposes the issue author and, once the MR is assigned, the reviewer (#37)', async () => {
+  it('exposes the issue author and, once review is requested, the reviewer (#37)', async () => {
     const snaps = new Map([
       [
         7,
@@ -189,7 +189,7 @@ describe('assembleIssue — single issue view for status', () => {
             iid: 7,
             author: { username: 'reporter', id: '2', avatarUrl: 'https://f/a.png' },
           },
-          mr: { assignees: [{ username: 'reporter', id: '2', avatarUrl: 'https://f/a.png' }] },
+          mr: { reviewers: [{ username: 'reporter', id: '2', avatarUrl: 'https://f/a.png' }] },
         }),
       ],
     ]);
@@ -201,8 +201,8 @@ describe('assembleIssue — single issue view for status', () => {
     expect(view.reviewer).toEqual({ username: 'reporter', id: '2', avatarUrl: 'https://f/a.png' });
   });
 
-  it('omits the reviewer when the MR has no assignee yet (pre-handoff)', async () => {
-    const snaps = new Map([[8, makeSnapshot({ issue: { iid: 8 }, mr: { assignees: [] } })]]);
+  it('omits the reviewer when the MR has no review requested yet (pre-handoff)', async () => {
+    const snaps = new Map([[8, makeSnapshot({ issue: { iid: 8 }, mr: { reviewers: [] } })]]);
     const rec = roAdapter(snaps);
 
     const view = await assembleIssue(repo, 8, deps(new Map([[repo.url, rec.adapter]])));

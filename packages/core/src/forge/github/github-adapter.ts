@@ -39,6 +39,7 @@ import {
   type RawPr,
   type RawReview,
   type RawTimelineEvent,
+  type RawUser,
   changesRequestedSince,
   normalizeComment,
   normalizeIssue,
@@ -253,6 +254,28 @@ export class GithubAdapter implements ForgeAdapter {
     const issue = await this.#c.apiRequired<RawIssue>('GET', `${this.#base(repo)}/issues/${mrIid}`);
     if ((issue.assignees ?? []).some((a) => a.login === username)) return; // already assigned
     await this.#addAssignees(repo, mrIid, [username]);
+  }
+
+  async requestReview(repo: RepoRef, mrIid: number, username: string): Promise<void> {
+    // GitHub 422s on a review request from the PR author. maestro always opens the PR as the
+    // bot, so a review of the bot account by itself (shared-account setup, bot_user = creator)
+    // is the author case — skip it deterministically rather than provoking the 422.
+    if (username === this.#c.botUser) return;
+    const pr = await this.#c.apiRequired<RawPr & { requested_reviewers?: RawUser[] }>(
+      'GET',
+      `${this.#base(repo)}/pulls/${mrIid}`,
+    );
+    if ((pr.requested_reviewers ?? []).some((r) => r.login === username)) return; // already requested
+    try {
+      await this.#c.api('POST', `${this.#base(repo)}/pulls/${mrIid}/requested_reviewers`, {
+        body: { reviewers: [username] },
+      });
+    } catch (e) {
+      // 422 = the user can't be a reviewer here (a non-collaborator on this repo). Not fatal:
+      // the handoff's ready-for-review comment @-mentions them and carries the notification.
+      if (e instanceof ForgeError && /\b422\b/.test(e.message)) return;
+      throw e;
+    }
   }
 
   async mergeMR(

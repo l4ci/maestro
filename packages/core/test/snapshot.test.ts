@@ -51,6 +51,7 @@ const mr = (over: Partial<MergeRequest> = {}): MergeRequest => ({
   sourceBranch: 'maestro/issue-42-add-oauth',
   targetBranch: 'main',
   assignees: [],
+  reviewers: [],
   labels: [],
   approvals: { approved: false, approvedBy: [], changesRequested: false },
   webUrl: 'u',

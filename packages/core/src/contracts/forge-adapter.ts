@@ -56,6 +56,11 @@ export interface ForgeAdapter {
   updateMRDescription(repo: RepoRef, mrIid: number, body: string): Promise<void>;
   setDraft(repo: RepoRef, mrIid: number, draft: boolean): Promise<void>;
   assignMR(repo: RepoRef, mrIid: number, username: string): Promise<void>;
+  /** Request review from a user (GitLab reviewer_ids / GitHub requested_reviewers) — the
+   *  handoff ping (§7). Idempotent. A forge that refuses (GitHub 422: the requested user is
+   *  the PR author on a shared bot account, or a non-collaborator) treats it as a no-op; the
+   *  handoff's ready-for-review comment carries the notification regardless. */
+  requestReview(repo: RepoRef, mrIid: number, username: string): Promise<void>;
   mergeMR(
     repo: RepoRef,
     mrIid: number,

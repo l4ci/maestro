@@ -137,7 +137,7 @@ describe('executor proof-failure escalation (#109)', () => {
     const { ctx, streaks } = escalationContext({
       adapter,
       proofAndHandoff: vi.fn(async () => {
-        throw new Error('assignMR: network down');
+        throw new Error('requestReview: network down');
       }),
     });
 

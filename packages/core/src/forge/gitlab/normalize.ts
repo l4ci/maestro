@@ -36,6 +36,7 @@ export interface RawMr {
   source_branch: string;
   target_branch: string;
   assignees?: RawUser[];
+  reviewers?: RawUser[];
   labels: string[];
   web_url: string;
 }
@@ -115,6 +116,7 @@ export function normalizeMergeRequest(
     sourceBranch: raw.source_branch,
     targetBranch: raw.target_branch,
     assignees: (raw.assignees ?? []).map(normalizeUser),
+    reviewers: (raw.reviewers ?? []).map(normalizeUser),
     labels: raw.labels ?? [],
     approvals,
     webUrl: raw.web_url,
