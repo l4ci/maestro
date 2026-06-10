@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path';
 export interface Heartbeat {
   /** When the daemon last completed a tick pass (ms since epoch). */
   lastTickAt: number;
-  /** Workers active at that tick (SlotAccountant.globalActive). */
+  /** Workers active at that tick (Claims.globalActive). */
   activeWorkers: number;
   /** The configured global cap (concurrency.global_max). */
   maxWorkers: number;

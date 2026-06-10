@@ -26,8 +26,9 @@ export function isStandaloneMr(mr: MergeRequest): boolean {
   return !mr.sourceBranch.startsWith('maestro/issue-') && mr.closesIssueIid === undefined;
 }
 
-/** In-flight namespace for command MRs — distinct from issues so an issue iid 5 and an MR
- *  iid 5 never collide in the process-wide set. */
+/** Claim-uniqueness namespace for command MRs — distinct from issues so an issue iid 5
+ *  and an MR iid 5 never collide. The SLOT stays keyed on the plain repo key: both
+ *  passes share one per-repo budget (§14). */
 const mrScope = (key: string): string => `${key}#mr`;
 
 /**
@@ -56,8 +57,8 @@ export async function evaluateMrCommands(
 
   for (const mr of mrs) {
     if (!isStandaloneMr(mr)) continue;
-    if (ctx.inFlight.has(scope, mr.iid)) continue;
-    ctx.inFlight.add(scope, mr.iid);
+    const claim = ctx.claims.open(key, mr.iid, scope);
+    if (!claim) continue;
     let launched: Promise<void> | undefined;
     try {
       const thread = await ctx.adapter.getMrComments(repo, mr.iid);
@@ -82,7 +83,7 @@ export async function evaluateMrCommands(
                 err: String(err),
               }),
           )
-          .finally(() => ctx.inFlight.delete(scope, mr.iid));
+          .finally(() => claim.close());
         pending.push(launched);
         continue;
       }
@@ -96,13 +97,13 @@ export async function evaluateMrCommands(
         continue;
       }
       // Share the repo's slot budget with the issue lifecycle (§14). No slot → wait, retry next tick.
-      if (!ctx.slots.available(key, ctx.settings.concurrency.maxActive)) {
+      if (!claim.slotAvailable(ctx.settings.concurrency.maxActive)) {
         ctx.log.info('mr-command waiting: no concurrency slot', { repo: key, mr: mr.iid });
         continue;
       }
 
       ctx.log.info('mr-command intent', { repo: key, mr: mr.iid });
-      const release = ctx.slots.acquire(key);
+      claim.holdSlot();
       active = true;
       launched = runMrCommand(repo, mr, intent.instruction, thread, ctx)
         .then(
@@ -110,15 +111,12 @@ export async function evaluateMrCommands(
           (err) =>
             ctx.log.error('mr-command: run failed', { repo: key, mr: mr.iid, err: String(err) }),
         )
-        .finally(() => {
-          release();
-          ctx.inFlight.delete(scope, mr.iid);
-        });
+        .finally(() => claim.close());
       pending.push(launched);
     } catch (err) {
       ctx.log.error('mr-command: mr tick failed', { repo: key, mr: mr.iid, err: String(err) });
     } finally {
-      if (!launched) ctx.inFlight.delete(scope, mr.iid);
+      if (!launched) claim.close();
     }
   }
   return { pending, active };

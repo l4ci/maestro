@@ -10,8 +10,8 @@
 // OPS GUARDS (§14, documented not coded — there is no cross-install coordination in
 // v1, §17):
 //  · ONE daemon per (repo, bot_user). Two daemons sharing a repo+bot can both claim
-//    the same assigned issue — the in-process SlotAccountant does not arbitrate across
-//    installs. Enforce one-repo-one-install by convention or distinct bot users.
+//    the same assigned issue — the in-process Claims accounting does not arbitrate
+//    across installs. Enforce one-repo-one-install by convention or distinct bot users.
 //  · `global_max` is sized to host RAM (≈ (RAM_MB − 512) / per_worker_peak_MB); the
 //    daemon only HONORS the cap (slot accounting) — it does not measure RAM or kill on
 //    OOM. systemd `MemoryMax` + Restart=always is the last-line backstop (stateless,
@@ -35,6 +35,7 @@ import type { ForgeAdapter } from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
 import { reconcile } from '../reconciler/reconcile.js';
 import { type AgentRole, declaresRoles, promptForRole } from '../workflow/roles.js';
+import type { Claim } from './claims.js';
 import { evaluateMrCommands } from './mr-command-pass.js';
 import type { TickContext, WorkspaceHandleLike } from './ports.js';
 import { repoKey } from './ports.js';
@@ -130,15 +131,15 @@ export async function evaluateLifecycle(
   for (const { iid } of issues) {
     // #18: claim the issue BEFORE any await. A repo stays "due" until this pass's agent work
     // settles, so overlapping tick passes re-enter here; without a per-issue claim a free
-    // slot (max_active ≥ 2) would stack a second agent on the same workspace. Capacity is
-    // the slot accountant's; UNIQUENESS is the in-flight set's. Released below if this pass
-    // launches no work, else when that work settles.
-    if (ctx.inFlight.has(key, iid)) continue;
-    ctx.inFlight.add(key, iid);
+    // slot (max_active ≥ 2) would stack a second agent on the same workspace. The claim owns
+    // BOTH resources (uniqueness + capacity, #91); `close` is the only release path — called
+    // below if this pass launches no work, else by `guard` when that work settles.
+    const claim = ctx.claims.open(key, iid);
+    if (!claim) continue;
     let launched: { active: boolean; promise?: Promise<void> } = { active: false };
     try {
       const snapshot = await ctx.adapter.getSnapshot(repo, iid);
-      const slotAvailable = ctx.slots.available(key, ctx.settings.concurrency.maxActive);
+      const slotAvailable = claim.slotAvailable(ctx.settings.concurrency.maxActive);
       const intent = reconcile({
         snapshot,
         settings: ctx.settings,
@@ -147,26 +148,25 @@ export async function evaluateLifecycle(
         workComplete: detectWorkComplete(snapshot),
         rolesDeclared: declaresRoles(ctx.promptBody), // #29 pipeline opt-in per repo
       });
-      launched = beginIntent(intent, snapshot, ctx, key, slotAvailable);
+      launched = beginIntent(intent, snapshot, ctx, key, claim, slotAvailable);
       if (launched.active) active = true;
-      if (launched.promise) {
-        pending.push(launched.promise.finally(() => ctx.inFlight.delete(key, iid)));
-      }
+      if (launched.promise) pending.push(launched.promise);
     } catch (err) {
       ctx.log.error('lifecycle: issue tick failed', { repo: key, iid, err: String(err) });
     } finally {
-      // No launched work (no-op intent, queued-no-slot, or a throw) → release the claim so
+      // No launched work (no-op intent, queued-no-slot, or a throw) → close the claim so
       // the next due pass re-evaluates this issue.
-      if (!launched.promise) ctx.inFlight.delete(key, iid);
+      if (!launched.promise) claim.close();
     }
   }
   return { pending, active };
 }
 
 /**
- * Translate one Intent into effects. The slot-consuming kinds (start-new, run-agent,
- * apply-changes-requested) acquire synchronously then return a launched promise that
- * releases in `finally`; everything else runs without a slot. Non-acting intents
+ * Translate one Intent into effects. Every slot-consuming kind (SLOT_INTENTS) holds its
+ * slot through the ONE `claim.holdSlot()` site below — synchronously, before any await —
+ * then returns a launched promise; everything else runs without a slot. `guard` closes
+ * the claim (slot + uniqueness) when the launched work settles. Non-acting intents
  * (poll-review / blocked-wait / none / skip-untrusted / cleanup-in-passA) are no-ops.
  */
 function beginIntent(
@@ -174,6 +174,7 @@ function beginIntent(
   snapshot: IssueSnapshot,
   ctx: TickContext,
   key: string,
+  claim: Claim,
   slotAvailable: boolean,
 ): { active: boolean; promise?: Promise<void> } {
   const { repo, issue } = snapshot;
@@ -199,16 +200,28 @@ function beginIntent(
   // fire every tick and would flood the log.
   if (!QUIET_INTENTS.has(intent.kind)) ctx.log.info('reconcile intent', meta);
 
+  // reconcile does not gate these two on a slot; the daemon does (§14). No slot → queue.
+  if (!slotAvailable && intent.kind === 'apply-changes-requested') {
+    ctx.log.info('changes-requested queued: no concurrency slot', { repo: key, iid: issue.iid });
+    return { active: false };
+  }
+  if (!slotAvailable && intent.kind === 'apply-unblock') {
+    ctx.log.info('unblock queued: no concurrency slot', { repo: key, iid: issue.iid });
+    return { active: false };
+  }
+
+  // The ONE capacity take (#91): unconditional, exactly like the per-case acquires it
+  // replaced — capacity POLICY stayed in the reconciler (via `slotAvailable`) and the
+  // two queue checks above. Released with the claim when the launched work settles.
+  if (SLOT_INTENTS.has(intent.kind)) claim.holdSlot();
+
   switch (intent.kind) {
-    case 'start-new': {
-      const release = ctx.slots.acquire(key);
+    case 'start-new':
       return {
         active: true,
-        promise: guard(runStartNew(intent, snapshot, ctx), ctx, meta, release),
+        promise: guard(runStartNew(intent, snapshot, ctx), ctx, meta, claim),
       };
-    }
     case 'run-agent': {
-      const release = ctx.slots.acquire(key);
       const comments = intent.feedback?.reviewComments ?? snapshot.recentComments;
       return {
         active: true,
@@ -216,58 +229,35 @@ function beginIntent(
           runAgent(snapshot, snapshot.mr, comments, ctx, intent.role ?? 'implement'),
           ctx,
           meta,
-          release,
+          claim,
         ),
       };
     }
-    case 'run-define': {
-      const release = ctx.slots.acquire(key);
+    case 'run-define':
       return {
         active: true,
-        promise: guard(runDefine(snapshot, ctx), ctx, meta, release),
+        promise: guard(runDefine(snapshot, ctx), ctx, meta, claim),
       };
-    }
-    case 'run-plan': {
-      const release = ctx.slots.acquire(key);
+    case 'run-plan':
       return {
         active: true,
-        promise: guard(runPlan(intent, snapshot, ctx), ctx, meta, release),
+        promise: guard(runPlan(intent, snapshot, ctx), ctx, meta, claim),
       };
-    }
-    case 'run-review': {
-      const release = ctx.slots.acquire(key);
+    case 'run-review':
       return {
         active: true,
-        promise: guard(runReview(intent, snapshot, ctx), ctx, meta, release),
+        promise: guard(runReview(intent, snapshot, ctx), ctx, meta, claim),
       };
-    }
-    case 'apply-changes-requested': {
-      // reconcile does not gate this on a slot; the daemon does (§14). No slot → queue.
-      if (!slotAvailable) {
-        ctx.log.info('changes-requested queued: no concurrency slot', {
-          repo: key,
-          iid: issue.iid,
-        });
-        return { active: false };
-      }
-      const release = ctx.slots.acquire(key);
+    case 'apply-changes-requested':
       return {
         active: true,
-        promise: guard(runApplyChanges(intent, snapshot, ctx), ctx, meta, release),
+        promise: guard(runApplyChanges(intent, snapshot, ctx), ctx, meta, claim),
       };
-    }
-    case 'apply-unblock': {
-      // reconcile does not gate this on a slot; the daemon does (§14). No slot → queue.
-      if (!slotAvailable) {
-        ctx.log.info('unblock queued: no concurrency slot', { repo: key, iid: issue.iid });
-        return { active: false };
-      }
-      const release = ctx.slots.acquire(key);
+    case 'apply-unblock':
       return {
         active: true,
-        promise: guard(runApplyUnblock(intent, snapshot, ctx), ctx, meta, release),
+        promise: guard(runApplyUnblock(intent, snapshot, ctx), ctx, meta, claim),
       };
-    }
     case 'mark-queued':
       // Wants a slot, none free (#53/#29): one cheap label write, no slot, not "active"
       // (the issue is waiting, not worked). Visible as maestro:queued until a slot frees.
@@ -277,6 +267,7 @@ function beginIntent(
           ctx.adapter.setIssueLabels(repo, issue.iid, [ctx.settings.labels.queued], []),
           ctx,
           meta,
+          claim,
         ),
       };
     case 'merge':
@@ -286,10 +277,11 @@ function beginIntent(
           ctx.adapter.mergeMR(repo, mrIidOf(snapshot), intent.strategy, intent.deleteSource),
           ctx,
           meta,
+          claim,
         ),
       };
     case 'handoff':
-      return { active: false, promise: guard(runRecoveryHandoff(snapshot, ctx), ctx, meta) };
+      return { active: false, promise: guard(runRecoveryHandoff(snapshot, ctx), ctx, meta, claim) };
     default:
       // poll-review · blocked-wait · none · skip-untrusted · cleanup (pass B owns it)
       return { active: false };
@@ -316,20 +308,26 @@ const SPAWNING_INTENTS: ReadonlySet<Intent['kind']> = new Set([
   'apply-unblock',
 ]);
 
+/** The intents that consume a worker slot (§14) — today exactly the spawning set: a
+ *  Claude agent process is precisely what capacity bounds. Kept as a separate name so
+ *  a future non-slot spawn (or slot-only intent) splits the sets deliberately. */
+const SLOT_INTENTS: ReadonlySet<Intent['kind']> = SPAWNING_INTENTS;
+
 /** Isolate one issue's launched work: a rejection is caught + logged (retried next
- *  tick, §13), and the slot — if any — is released no matter what (no leak, §14). */
+ *  tick, §13), and the claim — slot and uniqueness together — is closed no matter
+ *  what (no leak, §14; the ONLY release path for launched work, #91). */
 function guard(
   work: Promise<unknown>,
   ctx: TickContext,
   meta: Record<string, unknown>,
-  release?: () => void,
+  claim: Claim,
 ): Promise<void> {
   return work
     .then(
       () => {},
       (err) => ctx.log.error('tick: issue work failed', { ...meta, err: String(err) }),
     )
-    .finally(() => release?.());
+    .finally(() => claim.close());
 }
 
 /** Start-of-work comment (#25): structured, and says where the plan will land. The agent

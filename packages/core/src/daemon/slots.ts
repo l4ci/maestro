@@ -4,6 +4,10 @@
 // agent (`run-agent` / `start-new`); watching is not working, so poll/merge/
 // blocked/handoff/none never acquire. There is NO cross-install coordination in v1
 // (§17) — see the double-claim ops guard in the daemon header.
+//
+// INTERNAL since #91: both classes here are implementation seams behind the Claims
+// interface (claims.ts) — the tick reaches them only through a Claim, and neither is
+// exported from the package.
 
 /** A release handle. Idempotent: calling it more than once decrements only once. */
 export type SlotRelease = () => void;

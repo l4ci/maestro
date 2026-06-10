@@ -1,5 +1,5 @@
 // Global Claude rate-limit backoff (#47). One instance per daemon process, shared
-// across repos (like SlotAccountant): when ANY agent run dies on the account's usage
+// across repos (like the Claims accounting): when ANY agent run dies on the account's usage
 // limit, every subsequent spawn is pointless until the limit window resets — so the
 // gate pauses spawning process-wide. In-memory only by design: after a restart the
 // first doomed spawn re-trips it.
