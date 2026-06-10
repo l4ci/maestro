@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DONE_SENTINEL, PLAN_COMMENT_SENTINEL } from '../src/contracts/index.js';
+import { Claims } from '../src/daemon/claims.js';
 import { RateLimitGate } from '../src/daemon/rate-limit-gate.js';
 import { tickRepo, withClosesTrailer } from '../src/daemon/tick.js';
 import {
@@ -21,7 +22,7 @@ describe('A1 — start-new executes the New path', () => {
   it('claims a slot, sets up branch+MR+label+comment before running the agent, releases the slot', async () => {
     const adapter = recordingAdapter({ snapshot: makeSnapshot() }); // new issue, no maestro labels
     const runner = scriptedRunner({ status: 'in_progress', summary: '' });
-    const { ctx, ws, slots } = buildContext({ adapter, runner });
+    const { ctx, ws, claims } = buildContext({ adapter, runner });
 
     await tickRepo(repo, ctx);
 
@@ -47,8 +48,8 @@ describe('A1 — start-new executes the New path', () => {
     expect(runner.inputs).toHaveLength(1);
     expect(runner.inputs[0]?.workspaceDir).toBe('/ws/42');
     expect(runner.inputs[0]?.claude.command).toBe('claude');
-    // slot released in finally
-    expect(slots.globalActive).toBe(0);
+    // slot released when the claim closed
+    expect(claims.globalActive).toBe(0);
     expect(ws.evicted).toEqual([]);
   });
 });
@@ -61,7 +62,7 @@ describe('A2 — run-agent resumes an in-progress issue', () => {
     });
     const adapter = recordingAdapter({ snapshot: snap });
     const runner = scriptedRunner({ status: 'in_progress', summary: '' });
-    const { ctx, slots } = buildContext({ adapter, runner });
+    const { ctx, claims } = buildContext({ adapter, runner });
 
     await tickRepo(repo, ctx);
 
@@ -70,7 +71,7 @@ describe('A2 — run-agent resumes an in-progress issue', () => {
     expect(runner.inputs).toHaveLength(1);
     expect(runner.inputs[0]?.context.mr?.iid).toBe(7);
     expect(runner.inputs[0]?.context.recentComments.map((c) => c.body)).toEqual(['a prior note']);
-    expect(slots.globalActive).toBe(0);
+    expect(claims.globalActive).toBe(0);
   });
 });
 
@@ -83,7 +84,7 @@ describe('A3 — apply-changes-requested feeds feedback back to the agent', () =
     });
     const adapter = recordingAdapter({ snapshot: snap });
     const runner = scriptedRunner({ status: 'in_progress', summary: '' });
-    const { ctx, slots } = buildContext({ adapter, runner });
+    const { ctx, claims } = buildContext({ adapter, runner });
 
     await tickRepo(repo, ctx);
 
@@ -94,7 +95,7 @@ describe('A3 — apply-changes-requested feeds feedback back to the agent', () =
     expect(runner.inputs[0]?.context.recentComments.map((c) => c.body)).toEqual([
       'please rename the handler',
     ]);
-    expect(slots.globalActive).toBe(0);
+    expect(claims.globalActive).toBe(0);
   });
 });
 
@@ -118,7 +119,7 @@ describe('A3b — apply-unblock resumes a blocked issue with the maintainer answ
     ];
     const adapter = recordingAdapter({ snapshot: snap });
     const runner = scriptedRunner({ status: 'in_progress', summary: '' });
-    const { ctx, slots } = buildContext({ adapter, runner });
+    const { ctx, claims } = buildContext({ adapter, runner });
 
     await tickRepo(repo, ctx);
 
@@ -129,7 +130,7 @@ describe('A3b — apply-unblock resumes a blocked issue with the maintainer answ
     // the agent runs with the maintainer's answer (not the bot's block comment)
     expect(runner.inputs).toHaveLength(1);
     expect(runner.inputs[0]?.context.recentComments.map((c) => c.body)).toEqual(['use postgres']);
-    expect(slots.globalActive).toBe(0);
+    expect(claims.globalActive).toBe(0);
   });
 
   it('queues (no label flip, no run) when no concurrency slot is free', async () => {
@@ -149,10 +150,9 @@ describe('A3b — apply-unblock resumes a blocked issue with the maintainer answ
       },
     ];
     const adapter = recordingAdapter({ snapshot: snap });
-    const { SlotAccountant } = await import('../src/daemon/slots.js');
-    const slots = new SlotAccountant(1);
-    slots.acquire('someone-else'); // global cap already full
-    const { ctx, runnerSpy } = buildContext({ adapter, slots });
+    const claims = new Claims(1);
+    claims.open('someone-else', 1)?.holdSlot(); // global cap already full
+    const { ctx, runnerSpy } = buildContext({ adapter, claims });
 
     await tickRepo(repo, ctx);
 
@@ -168,13 +168,13 @@ describe('A4 — merge merges per WORKFLOW git rules, consuming no slot', () => 
       mr: { approvals: { approved: true, approvedBy: [], changesRequested: false } },
     });
     const adapter = recordingAdapter({ snapshot: snap });
-    const { ctx, runnerSpy, slots } = buildContext({ adapter });
+    const { ctx, runnerSpy, claims } = buildContext({ adapter });
 
     await tickRepo(repo, ctx);
 
     expect(adapter.merges).toEqual([{ mrIid: 7, strategy: 'squash', deleteSource: true }]);
     expect(runnerSpy.inputs).toHaveLength(0);
-    expect(slots.globalActive).toBe(0);
+    expect(claims.globalActive).toBe(0);
   });
 });
 
@@ -200,22 +200,21 @@ describe('A5 — non-acting intents are pure no-ops', () => {
     ['blocked-wait', makeSnapshot({ issue: { labels: [labels.blocked] } })],
   ])('%s touches nothing', async (_name, snap) => {
     const adapter = recordingAdapter({ snapshot: snap });
-    const { ctx, runnerSpy, slots } = buildContext({ adapter });
+    const { ctx, runnerSpy, claims } = buildContext({ adapter });
 
     await tickRepo(repo, ctx);
 
     for (const m of mutating) expect(adapter.calls).not.toContain(m);
     expect(runnerSpy.inputs).toHaveLength(0);
-    expect(slots.globalActive).toBe(0);
+    expect(claims.globalActive).toBe(0);
   });
 
   it('queued (no slot) marks queued once, then touches nothing (#53)', async () => {
     const snap = makeSnapshot(); // new issue
     const adapter = recordingAdapter({ snapshot: snap });
-    const { SlotAccountant } = await import('../src/daemon/slots.js');
-    const slots = new SlotAccountant(1);
-    slots.acquire('someone-else'); // global cap already full
-    const { ctx, runnerSpy } = buildContext({ adapter, slots });
+    const claims = new Claims(1);
+    claims.open('someone-else', 1)?.holdSlot(); // global cap already full
+    const { ctx, runnerSpy } = buildContext({ adapter, claims });
 
     await tickRepo(repo, ctx);
 

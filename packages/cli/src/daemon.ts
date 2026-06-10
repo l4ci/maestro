@@ -8,7 +8,7 @@
 // OPS GUARDS (§14, ENFORCED BY DEPLOYMENT, not code — no cross-install coordination in
 // v1, §17):
 //  · Run exactly ONE daemon per (repo, bot_user). Two daemons sharing a repo+bot can
-//    both claim the same assigned issue — the in-process SlotAccountant does not
+//    both claim the same assigned issue — the in-process Claims accounting does not
 //    arbitrate across installs. One-repo-one-install by convention or distinct bots.
 //  · Size `global_max` to host RAM (≈ (RAM_MB − 512) / per_worker_peak_MB; 4 GB → 1–2).
 //    The daemon only honors the cap; it does not measure RAM. Ship the systemd unit
@@ -28,13 +28,13 @@
 import { readFileSync, watch } from 'node:fs';
 import { join } from 'node:path';
 import {
+  Claims,
   ClaudeRunner,
   type Clock,
   ConfigStore,
   type Exec,
   type ForgeAdapter,
   HeartbeatWriter,
-  InFlightSet,
   type Logger,
   type MaestroConfig,
   NodeExec,
@@ -44,7 +44,6 @@ import {
   type RepoUnit,
   type Rng,
   Scheduler,
-  SlotAccountant,
   type TickContext,
   WatchedConfig,
   type WorkflowParseResult,
@@ -171,9 +170,9 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
       }),
   });
   const globalMax = config.defaults.concurrency.global_max;
-  const slots = new SlotAccountant(globalMax);
+  // Work admission (#91): per-issue uniqueness (#18) + slot capacity (§14) in one seam.
+  const claims = new Claims(globalMax);
   const heartbeat = new HeartbeatWriter(logsRoot); // liveness signal for the web dashboard (#40)
-  const inFlight = new InFlightSet(); // per-issue dedup across overlapping passes (#18)
   const rateGate = new RateLimitGate(); // global Claude usage-limit backoff (#47)
   const scheduler = new Scheduler(
     {
@@ -283,8 +282,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
         settings: cell.settings,
         workflow: cell.frontMatter,
         promptBody: cell.promptBody,
-        slots,
-        inFlight,
+        claims,
         rateGate,
         log,
       };
@@ -299,7 +297,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
       () =>
         heartbeat.write({
           lastTickAt: systemClock.now(),
-          activeWorkers: slots.globalActive,
+          activeWorkers: claims.globalActive,
           maxWorkers: globalMax,
           tickIntervalMs,
         }),

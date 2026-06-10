@@ -13,14 +13,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Logger, TickContext } from '../../src/daemon/ports.js';
 import {
+  Claims,
   ClaudeRunner,
   ForgeCli,
   GithubAdapter,
   GitlabAdapter,
-  InFlightSet,
   NodeExec,
   RepoSettingsCell,
-  SlotAccountant,
   WorkflowStore,
   WorkspaceManager,
   buildBootstrapWorkflow,
@@ -127,7 +126,7 @@ export interface E2EHarness {
  * Build a real, bounded-tick harness over the FIRST configured repo. Unlike startDaemon
  * (run-forever setInterval), this exposes a single tick + a poll-until helper so a test
  * can assert between ticks. Settings/workflow are resolved once (no hot-reload in a test);
- * slots/inFlight/workspace persist across ticks as the daemon's singletons do.
+ * claims/workspace persist across ticks as the daemon's singletons do.
  */
 export function buildHarness(): E2EHarness {
   const { configPath, workflowsDir, pollMs, maxTicks } = readE2EEnv();
@@ -157,8 +156,7 @@ export function buildHarness(): E2EHarness {
     (k): k is string => typeof k === 'string',
   );
   const runner = new ClaudeRunner(exec, { secretEnvKeys });
-  const slots = new SlotAccountant(config.defaults.concurrency.global_max);
-  const inFlight = new InFlightSet();
+  const claims = new Claims(config.defaults.concurrency.global_max);
 
   // Resolve the repo's WORKFLOW from <workflowsDir>/<slug>/WORKFLOW.md, else bootstrap.
   let workflowText: string | undefined;
@@ -195,8 +193,7 @@ export function buildHarness(): E2EHarness {
     settings: cell.settings,
     workflow: cell.frontMatter,
     promptBody: cell.promptBody,
-    slots,
-    inFlight,
+    claims,
     log: e2eLog,
   };
 

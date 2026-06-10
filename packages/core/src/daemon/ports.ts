@@ -16,8 +16,8 @@ import type {
   WorkflowFrontMatter,
 } from '../contracts/index.js';
 import type { ProofAndHandoffInput } from '../handoff/handoff.js';
+import type { Claims } from './claims.js';
 import type { RateLimitGate } from './rate-limit-gate.js';
-import type { InFlightSet, SlotAccountant } from './slots.js';
 
 /** A live per-issue workspace handle (structurally satisfied by M3 WorkspaceHandle). */
 export interface WorkspaceHandleLike {
@@ -74,7 +74,7 @@ export type ProofOnlyFn = (input: ProofAndHandoffInput) => Promise<ProofResult[]
 
 /**
  * Everything one repo's tick composes. Assembled per repo per tick by the daemon;
- * `slots` and `log` are the process-wide singletons (shared across repos), the rest
+ * `claims` and `log` are the process-wide singletons (shared across repos), the rest
  * are the per-repo resolved values (M1 `resolveRepoSettings` + the WORKFLOW bundle).
  */
 export interface TickContext {
@@ -88,8 +88,7 @@ export interface TickContext {
   settings: RepoSettings; // resolved; carries git / labels / trigger / concurrency
   workflow: WorkflowFrontMatter; // proof / environment / claude live here, not RepoSettings
   promptBody: string; // WORKFLOW body → RunnerInput.promptBody
-  slots: SlotAccountant; // process-wide concurrency gate (§14)
-  inFlight: InFlightSet; // process-wide per-issue dedup (§14, #18)
+  claims: Claims; // process-wide work admission: uniqueness + slot capacity (§14, #18, #91)
   rateGate: RateLimitGate; // process-wide Claude usage-limit backoff (#47)
   log: Logger;
 }

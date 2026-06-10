@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DONE_SENTINEL, type RepoRef } from '../src/contracts/index.js';
+import { Claims } from '../src/daemon/claims.js';
 import { repoKey } from '../src/daemon/ports.js';
-import { SlotAccountant } from '../src/daemon/slots.js';
 import { evaluateLifecycle, selectAdapter, tick, tickRepo } from '../src/daemon/tick.js';
 import {
   buildContext,
@@ -136,18 +136,18 @@ describe('B5 — stale queued marks are retracted when the bot is unassigned (#5
 
 describe('C1 — global cap queues excess work across repos', () => {
   it('global_max=1 lets one repo run and queues the other', async () => {
-    const slots = new SlotAccountant(1);
+    const claims = new Claims(1);
     const aAdapter = recordingAdapter({ snapshot: makeSnapshot() });
     const bAdapter = recordingAdapter({ snapshot: makeSnapshot({ issue: { iid: 5 } }) });
     const a = buildContext({
       adapter: aAdapter,
       runner: scriptedRunner({ status: 'in_progress', summary: '' }),
-      slots,
+      claims,
     });
     const b = buildContext({
       adapter: bAdapter,
       runner: scriptedRunner({ status: 'in_progress', summary: '' }),
-      slots,
+      claims,
     });
 
     await tick([
@@ -160,13 +160,13 @@ describe('C1 — global cap queues excess work across repos', () => {
     // the queued repo never created an MR
     const created = aAdapter.createdMRs.length + bAdapter.createdMRs.length;
     expect(created).toBe(1);
-    expect(slots.globalActive).toBe(0); // all released after the iteration
+    expect(claims.globalActive).toBe(0); // all released after the iteration
   });
 });
 
 describe('C2 — per-repo max_active caps a single busy repo', () => {
   it('max_active=1 with global headroom still runs only one issue', async () => {
-    const slots = new SlotAccountant(4);
+    const claims = new Claims(4);
     const adapter = recordingAdapter({
       issues: [
         makeIssue({ iid: 1, labels: [labels.inProgress] }),
@@ -184,7 +184,7 @@ describe('C2 — per-repo max_active caps a single busy repo', () => {
         { status: 'in_progress', summary: '' },
       ]),
       settings: defaultSettings({ concurrency: { globalMax: 4, maxActive: 1 } }),
-      slots,
+      claims,
     });
 
     await tickRepo(repo, ctx);
@@ -195,7 +195,7 @@ describe('C2 — per-repo max_active caps a single busy repo', () => {
 
 describe('C3 — only active work consumes a slot', () => {
   it('a merge proceeds even when the one global slot is held by an active agent', async () => {
-    const slots = new SlotAccountant(1);
+    const claims = new Claims(1);
     const adapter = recordingAdapter({
       issues: [
         makeIssue({ iid: 1, labels: [labels.inProgress] }),
@@ -215,7 +215,7 @@ describe('C3 — only active work consumes a slot', () => {
     const { ctx, runnerSpy } = buildContext({
       adapter,
       runner: scriptedRunner({ status: 'in_progress', summary: '' }),
-      slots,
+      claims,
     });
 
     await tickRepo(repo, ctx);
@@ -238,10 +238,10 @@ describe('C4 — slot released in finally even when the agent throws', () => {
       },
       inputs: [],
     };
-    const { ctx, slots } = buildContext({ adapter, runner: throwingRunner as never });
+    const { ctx, claims } = buildContext({ adapter, runner: throwingRunner as never });
 
     await expect(tickRepo(repo, ctx)).resolves.toBeDefined(); // caught, not thrown
-    expect(slots.globalActive).toBe(0); // no leak
+    expect(claims.globalActive).toBe(0); // no leak
   });
 });
 
@@ -268,18 +268,18 @@ describe('C5 — an in-flight issue is not dispatched twice across overlapping p
     });
     // global + per-repo headroom: the slot cap alone would NOT stop a second dispatch —
     // only the in-flight guard does.
-    const { ctx, inFlight } = buildContext({
+    const { ctx, claims } = buildContext({
       adapter,
       runner: blockingRunner as never,
       settings: defaultSettings({ concurrency: { globalMax: 4, maxActive: 2 } }),
-      slots: new SlotAccountant(4),
+      claims: new Claims(4),
     });
     const key = repoKey(repo);
 
     // pass 1: launches the (blocking) agent and claims the issue
     const r1 = await evaluateLifecycle(repo, ctx);
     expect(r1.pending).toHaveLength(1);
-    expect(inFlight.has(key, 42)).toBe(true);
+    expect(claims.open(key, 42)).toBeNull(); // still claimed by the in-flight work
 
     // pass 2 while the agent is still in-flight: skipped — no second dispatch
     const r2 = await evaluateLifecycle(repo, ctx);
@@ -288,7 +288,9 @@ describe('C5 — an in-flight issue is not dispatched twice across overlapping p
     // let the first agent finish → the claim clears
     releaseAgent();
     await Promise.all(r1.pending);
-    expect(inFlight.has(key, 42)).toBe(false);
+    const probe = claims.open(key, 42); // claim released → re-claimable
+    expect(probe).not.toBeNull();
+    probe?.close(); // hand it back so the next pass can claim it
 
     // a later pass dispatches again (normal resume), proving the guard only blocks overlap
     const r3 = await evaluateLifecycle(repo, ctx);
@@ -371,7 +373,7 @@ describe('G1 — workComplete drives the standalone handoff intent', () => {
         comments: [`### ✅ Proof\nall green\n${DONE_SENTINEL}`],
       }),
     });
-    const { ctx, runnerSpy, handoffSpy, proofHandoffSpy, slots } = buildContext({ adapter });
+    const { ctx, runnerSpy, handoffSpy, proofHandoffSpy, claims } = buildContext({ adapter });
 
     await tickRepo(repo, ctx);
 
@@ -379,7 +381,7 @@ describe('G1 — workComplete drives the standalone handoff intent', () => {
     expect(handoffSpy.mock.calls[0][0].mrIid).toBe(7);
     expect(proofHandoffSpy).not.toHaveBeenCalled(); // not the agent-done path
     expect(runnerSpy.inputs).toHaveLength(0); // no agent run
-    expect(slots.globalActive).toBe(0); // handoff consumes no slot
+    expect(claims.globalActive).toBe(0); // handoff consumes no slot
   });
 });
 
