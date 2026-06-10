@@ -2,21 +2,17 @@
 // per tick alongside the issue lifecycle + cleanup passes, sharing the repo's slot budget.
 // Only MRs with NO maestro-issue linkage are handled here — issue-backed MRs stay with the
 // issue path, so nothing double-fires. Mirrors `evaluateLifecycle`: claim → decide → (slot)
-// launch, releasing the claim when the launched work settles. The edge clears on the
-// ALWAYS-posted reply comment, so it can never loop (the issue #5 lesson — stronger here,
-// because the clear is a reply the daemon always posts, not a push that might not happen).
+// launch, releasing the claim when the launched work settles; the run choreography itself
+// (workspace → run → push → reply) is the intent executor's `executeMrCommand` (#105). The
+// edge clears on the ALWAYS-posted reply comment, so it can never loop (the issue #5 lesson
+// — stronger here, because the clear is a reply the daemon always posts, not a push that
+// might not happen).
 
-import type {
-  AgentResult,
-  Comment,
-  MergeRequest,
-  RepoRef,
-  RunnerInput,
-} from '../contracts/index.js';
+import type { MergeRequest, RepoRef } from '../contracts/index.js';
 import { MR_COMMAND_REPLY_SENTINEL } from '../contracts/index.js';
 import { decideMrCommand } from '../mr-command/decide.js';
 import { type MetaCommand, metaCommandOf } from '../mr-command/meta.js';
-import { buildMrCommandPrompt } from '../mr-command/prompt.js';
+import { executeMrCommand } from './executor.js';
 import type { TickContext } from './ports.js';
 import { repoKey } from './ports.js';
 
@@ -105,7 +101,7 @@ export async function evaluateMrCommands(
       ctx.log.info('mr-command intent', { repo: key, mr: mr.iid });
       claim.holdSlot();
       active = true;
-      launched = runMrCommand(repo, mr, intent.instruction, thread, ctx)
+      launched = executeMrCommand(repo, mr, intent.instruction, thread, ctx)
         .then(
           () => {},
           (err) =>
@@ -120,39 +116,6 @@ export async function evaluateMrCommands(
     }
   }
   return { pending, active };
-}
-
-/** Check out the MR branch, run the agent on the one instruction, push iff it committed,
- *  and ALWAYS reply (§5) — the reply clears the edge. The single exception is a rate-limited
- *  spawn: nothing ran, so it does NOT reply and the command stays pending for next tick. */
-async function runMrCommand(
-  repo: RepoRef,
-  mr: MergeRequest,
-  instruction: string,
-  thread: Comment[],
-  ctx: TickContext,
-): Promise<void> {
-  const handle = await ctx.workspace.ensureMrWorkspace(repo, mr.iid, mr.sourceBranch);
-  const result = await ctx.runner.run(buildMrRunnerInput(handle.dir, mr, instruction, thread, ctx));
-
-  if (result.rateLimit) {
-    const until = ctx.rateGate.trip(result.rateLimit.resetAt);
-    ctx.log.warn('claude rate-limited during mr-command: pausing spawns (#47)', {
-      repo: repoKey(repo),
-      mr: mr.iid,
-      resumeAt: new Date(until).toISOString(),
-    });
-    return; // no reply → edge stays hot, retried once the gate reopens
-  }
-  ctx.rateGate.clear();
-
-  let pushed = 0;
-  const unpushed = await ctx.workspace.countUnpushedCommits(handle);
-  if (unpushed > 0) {
-    await ctx.workspace.pushBranch(handle, mr.sourceBranch);
-    pushed = unpushed;
-  }
-  await ctx.adapter.commentMR(repo, mr.iid, mrReply(result, pushed));
 }
 
 /** Perform a daemon-action meta-command directly via the adapter (#88), then ALWAYS reply with
@@ -205,38 +168,4 @@ async function runMetaCommand(
 /** The meta-action reply body — carries the sentinel like every command-MR reply. */
 function metaReply(head: string): string {
   return `🎼 ${head}\n\n${MR_COMMAND_REPLY_SENTINEL}`;
-}
-
-function buildMrRunnerInput(
-  workspaceDir: string,
-  mr: MergeRequest,
-  instruction: string,
-  thread: Comment[],
-  ctx: TickContext,
-): RunnerInput {
-  return {
-    workspaceDir,
-    promptBody: buildMrCommandPrompt({ instruction, mr, workflowBody: ctx.promptBody }),
-    context: { mr, recentComments: thread }, // no issue — a command MR has none
-    claude: {
-      command: ctx.workflow.claude.command,
-      maxTurns: ctx.workflow.claude.max_turns,
-      permissionMode: ctx.workflow.claude.permission_mode,
-      stallTimeoutMs: ctx.workflow.claude.stall_timeout_seconds * 1000,
-    },
-  };
-}
-
-/** The reply body (§5). Every terminal status posts it WITH the sentinel, so the edge
- *  clears on every path — success, no-op, needs_input, ran-out-of-turns. */
-function mrReply(result: AgentResult, pushed: number): string {
-  const head =
-    result.status === 'done'
-      ? pushed > 0
-        ? `✅ Done — pushed ${pushed} commit${pushed === 1 ? '' : 's'} to this MR.`
-        : '✅ Done — no code changes were needed.'
-      : result.status === 'needs_input'
-        ? '🙋 I need a decision before continuing:'
-        : '⏳ Ran out of turns before finishing — re-comment `/maestro …` to continue.';
-  return `🎼 ${head}\n\n${result.summary}\n\n${MR_COMMAND_REPLY_SENTINEL}`;
 }

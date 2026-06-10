@@ -10,6 +10,7 @@ export * from './heartbeat.js';
 export * from './clock.js';
 export * from './progress-mirror.js';
 export * from './scheduler.js';
+export * from './executor.js';
 export * from './tick.js';
 export * from './run.js';
 export * from './reload.js';

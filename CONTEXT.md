@@ -110,8 +110,8 @@ commit text to plan checkboxes (decided in the issue).
 
 ## Intent executor
 
-The **intent executor** (`daemon/executor.ts`, decided 2026-06-10 round-2 review, not yet built)
-is the effect-side counterpart of the pure edges: one module owning the
+The **intent executor** (`daemon/executor.ts`, decided 2026-06-10 round-2 review, built
+2026-06-10) is the effect-side counterpart of the pure edges: one module owning the
 workspace → run → push → record → move choreography that the eight `run*` handlers in `tick.ts`
 and the command-MR `runMrCommand` each re-implement today. Interface:
 `executeIntent(intent, snapshot, ctx: ExecutorContext)` (plus the command-MR entry) — the switch
