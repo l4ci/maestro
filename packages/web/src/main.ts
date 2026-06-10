@@ -4,35 +4,23 @@
 // @maestro/core. Tokens are read from `process.env[token_env]` only to construct adapters
 // and never logged. Run via `node packages/web/dist/main.js` (or the `web` setup step).
 
-import { readFileSync } from 'node:fs';
 import {
   type AddRepoDeps,
   type AssembleDeps,
-  type Exec,
   FileLogReader,
-  type ForgeAdapter,
-  GithubAdapter,
-  GitlabAdapter,
-  type MaestroConfig,
   NodeExec,
-  type ReadOnlyForgeAdapter,
   type RepoRef,
-  type RepoSettings,
-  botUserForHost,
-  buildBootstrapWorkflow,
+  composeForges,
   deriveWatchSet,
-  parseConfig,
-  parseWorkflow,
+  loadConfig,
+  makeForgeAdapter,
   readHeartbeat,
-  resolveRepoSettings,
-  slugifyProject,
 } from '@maestro/core';
 import { buildServerDeps } from './deps.js';
 import { createServer } from './server.js';
 
 interface Env {
   configPath: string;
-  workflowsDir: string;
   logsRoot: string;
   host: string;
   port: number;
@@ -45,7 +33,6 @@ function readEnv(): Env {
   const token = process.env.MAESTRO_DASHBOARD_TOKEN?.trim();
   return {
     configPath: process.env.MAESTRO_CONFIG ?? './maestro.config.yaml',
-    workflowsDir: process.env.MAESTRO_WORKFLOWS_DIR ?? './workspaces',
     logsRoot: process.env.MAESTRO_LOGS_DIR ?? './logs',
     host: process.env.MAESTRO_WEB_HOST ?? '127.0.0.1',
     port: Number(process.env.MAESTRO_WEB_PORT ?? '4000'),
@@ -53,86 +40,13 @@ function readEnv(): Env {
   };
 }
 
-function loadConfig(configPath: string): MaestroConfig {
-  const parsed = parseConfig(readFileSync(configPath, 'utf8'));
-  if (!parsed.ok) throw new Error(`config invalid: ${parsed.error}`);
-  return parsed.value;
-}
-
-/** The M0 template — base for a bootstrap-mode repo's stand-in workflow (mirrors the
- *  daemon's readTemplate). Empty string if unreadable; the parse error then surfaces. */
-function readTemplate(): string {
-  try {
-    return readFileSync(process.env.MAESTRO_TEMPLATE ?? './templates/WORKFLOW.md', 'utf8');
-  } catch {
-    return '';
-  }
-}
-
-/** The one forge-aware seam — construct the concrete adapter for a repo's forge+host.
- *  botUser resolves per host (forge entry bot_user, else the global default). */
-function makeAdapter(repo: RepoRef, config: MaestroConfig, exec: Exec): ForgeAdapter {
-  const botUser = botUserForHost(repo.host, config);
-  if (repo.forge === 'gitlab') {
-    const entry = config.forges.gitlab?.find((e) => e.host === repo.host);
-    if (!entry) throw new Error(`no gitlab forge configured for host '${repo.host}'`);
-    return new GitlabAdapter(exec, {
-      token: process.env[entry.token_env] ?? '',
-      host: entry.host,
-      botUser,
-    });
-  }
-  const entry = config.forges.github?.find((e) => e.host === repo.host);
-  if (!entry) throw new Error(`no github forge configured for host '${repo.host}'`);
-  return new GithubAdapter(exec, {
-    token: process.env[entry.token_env] ?? '',
-    host: entry.host,
-    botUser,
-  });
-}
-
-/** Build everything createServer needs: read-only assembly deps + the write (addRepo) deps. */
+/** Build everything createServer needs: read-only assembly deps + the write (addRepo) deps.
+ *  Forge-aware construction lives in core's forge wiring (composeForges). */
 function buildDeps(env: Env) {
   const exec = new NodeExec();
   const config = loadConfig(env.configPath);
   const repos = deriveWatchSet(config);
-
-  // Cache per (forge, host) — two hosts of the same forge carry different tokens/bots.
-  const adapters = new Map<string, ReadOnlyForgeAdapter>();
-  const adapterFor = (repo: RepoRef): ReadOnlyForgeAdapter => {
-    const key = `${repo.forge}:${repo.host}`;
-    let a = adapters.get(key);
-    if (!a) {
-      a = makeAdapter(repo, config, exec);
-      adapters.set(key, a);
-    }
-    return a;
-  };
-
-  const settingsFor = (repo: RepoRef): RepoSettings => {
-    // The workflow cache only exists once the repo has a committed WORKFLOW.md; a missing
-    // file means BOOTSTRAP mode (the daemon's deriveCell does the same dance), so the
-    // dashboard must fall back to the template instead of reporting the repo unreachable.
-    const path = `${env.workflowsDir}/${slugifyProject(repo.project)}/WORKFLOW.md`;
-    let text: string | undefined;
-    try {
-      text = readFileSync(path, 'utf8');
-    } catch {
-      // no cache yet → bootstrap fallback below
-    }
-    const wf =
-      text !== undefined
-        ? parseWorkflow(text, repo.host)
-        : buildBootstrapWorkflow(repo, readTemplate(), botUserForHost(repo.host, config));
-    if (!wf.ok) throw new Error(`WORKFLOW invalid for ${repo.project}: ${wf.error}`);
-    const override = config.repos.find((r) => r.url === repo.url)?.overrides;
-    return resolveRepoSettings({
-      repo,
-      workflow: wf.value.frontMatter,
-      defaults: config.defaults,
-      ...(override ? { override } : {}),
-    });
-  };
+  const { adapterFor, settingsFor } = composeForges(config, exec);
 
   const assemble: AssembleDeps = {
     adapterFor,
@@ -145,7 +59,7 @@ function buildDeps(env: Env) {
   const add: AddRepoDeps = {
     exec,
     configPath: env.configPath,
-    adapterFor: (repo: RepoRef) => makeAdapter(repo, config, exec),
+    adapterFor: (repo: RepoRef) => makeForgeAdapter(repo, config, exec),
   };
 
   // v1 dashboard is single-repo-first (mirrors the CLI's `firstRepo`): the :id route maps

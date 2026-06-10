@@ -33,8 +33,6 @@ import {
   ConfigStore,
   type Exec,
   type ForgeAdapter,
-  GithubAdapter,
-  GitlabAdapter,
   HeartbeatWriter,
   InFlightSet,
   type Logger,
@@ -58,7 +56,8 @@ import {
   checkBinaries,
   handoff,
   inferForge,
-  parseConfig,
+  loadConfig,
+  makeForgeAdapter,
   parseWorkflow,
   proofAndComment,
   proofAndHandoff,
@@ -77,28 +76,15 @@ const log: Logger = {
 const systemClock: Clock = { now: () => Date.now() };
 const systemRng: Rng = { next: () => Math.random() };
 
-/** One forge adapter per unique (kind, host); selectAdapter() picks per repo. The bot's
- *  account name is per host (forge entry bot_user, else the global default) — usernames
- *  are per-forge namespaces. */
+/** One forge adapter per unique (kind, host); selectAdapter() picks per repo. Built once
+ *  at startup through core's forge wiring (makeForgeAdapter), which resolves the token
+ *  env and the per-host bot_user (forge entry bot_user, else the global default). */
 function buildAdapters(config: MaestroConfig, exec: Exec): ForgeAdapter[] {
   const out: ForgeAdapter[] = [];
-  for (const entry of config.forges.gitlab ?? []) {
-    out.push(
-      new GitlabAdapter(exec, {
-        token: process.env[entry.token_env] ?? '',
-        host: entry.host,
-        botUser: entry.bot_user ?? config.defaults.bot_user,
-      }),
-    );
-  }
-  for (const entry of config.forges.github ?? []) {
-    out.push(
-      new GithubAdapter(exec, {
-        token: process.env[entry.token_env] ?? '',
-        host: entry.host,
-        botUser: entry.bot_user ?? config.defaults.bot_user,
-      }),
-    );
+  for (const forge of ['gitlab', 'github'] as const) {
+    for (const entry of config.forges[forge] ?? []) {
+      out.push(makeForgeAdapter({ forge, host: entry.host }, config, exec));
+    }
   }
   return out;
 }
@@ -141,9 +127,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
   const tickIntervalMs = opts.tickIntervalMs ?? 1_000;
 
   const exec = new NodeExec();
-  const parsed = parseConfig(readFileSync(configPath, 'utf8'));
-  if (!parsed.ok) throw new Error(`config invalid: ${parsed.error}`);
-  const config = parsed.value;
+  const config = loadConfig(configPath);
 
   const watched = new WatchedConfig(new ConfigStore(config), log);
   const adapters = buildAdapters(config, exec);
@@ -383,9 +367,7 @@ export async function bootDaemon(): Promise<number> {
   const configPath = process.env.MAESTRO_CONFIG ?? './maestro.config.yaml';
   let config: MaestroConfig;
   try {
-    const parsed = parseConfig(readFileSync(configPath, 'utf8'));
-    if (!parsed.ok) throw new Error(`config invalid: ${parsed.error}`);
-    config = parsed.value;
+    config = loadConfig(configPath);
   } catch (err) {
     log.error('daemon: cannot start — config unreadable', { err: String(err) });
     return 1;
