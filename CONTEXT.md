@@ -35,6 +35,72 @@ Beneath that public interface, two shared modules carry what used to be duplicat
   operator account: the agent's commits wear the operator's git identity) and the issue bounced
   in-review↔in-progress forever (issue #5). Do not re-add an author filter here.
 
+## Forge wiring
+
+The **forge wiring** module (`core/src/compose/`, decided 2026-06-09, not yet built) is the one
+place forge-aware construction lives: token-env lookup, botUser-per-host resolution, the
+GitLab/GitHub adapter choice, plus the static settings path (config parse, WORKFLOW.md cache read
+with bootstrap-template fallback) that `cli/main` and `web/main` previously each implemented.
+Interface: `composeForges(config, exec) → { adapterFor, settingsFor }` plus the bare adapter
+constructor for the daemon's upfront `buildAdapters`. Direct `process.env`/fs I/O is in-contract —
+this *is* the composition layer; tests use temp dirs and env vars. The daemon's hot-refresh
+settings path (`deriveCell`/WorkflowSource) is intentionally NOT behind this interface — its
+validate-before-swap semantics differ from the static read.
+
+Known gap, out of scope for the extraction: the daemon builds adapters once at startup and never
+rebuilds them on config hot-reload (a forge host added live gets no adapter until restart). The
+wiring module makes that later fix one-place.
+
+## Claim
+
+A **claim** (decided 2026-06-09, not yet built) is the daemon's unit of work admission — one
+object owning both concurrency resources for one issue: **uniqueness** (this issue is not already
+being worked; today `InFlightSet`) and **capacity** (a worker slot under global and per-repo caps;
+today `SlotAccountant`). Interface: `claims.open(key, iid) → Claim | null` (null = already in
+flight, claimed before any await), `claim.slotAvailable(max)`, `claim.holdSlot()` (called once in
+`beginIntent`, keyed on the slot-consuming intent set — not per switch case), `claim.close()`
+(releases whatever is held, idempotent, the only release path). SlotAccountant and InFlightSet
+survive as internal seams behind the Claims interface; only Claims is exported. `holdSlot` is
+deliberately uncheck-and-take like today's `acquire` — capacity policy lives in the reconciler via
+`slotAvailable`, not in the claim.
+
+## After-run edge
+
+The **after-run edge** (`reconciler/after-run.ts`, decided 2026-06-09, not yet built) is the pure
+runner-result half of the issue lifecycle: `decideAfterRun(result, { hasMr, rolesDeclared }) →
+AfterRunDecision`, a tagged union in the Intent idiom (`pause-spawns` / `proof-and-handoff` /
+`proof-only-then-in-review` / `no-mr-error` / `mark-blocked` / `wait`). It lives beside
+`reconcile.ts` so every lifecycle decision — pre-run and post-run — reads from one directory; the
+tick's `applyAgentResult` shrinks to recordPlan (every kind except `pause-spawns`) plus one
+effects-only switch. Same idiom as the reconciler and `decideMrCommand`: decisions are pure edges,
+the tick only executes.
+
+## Public vs. runtime surface
+
+Core presents two interfaces via package.json subpath exports (decided 2026-06-09, not yet built):
+`@maestro/core` is the **public surface** — contracts, view assembly, onboarding, forge wiring —
+the only thing cli/web may import; `@maestro/core/runtime` is the **runtime surface** — daemon
+internals (tick, WorkspaceManager, ClaudeRunner, WorkflowSource, proof, handoff) — imported only
+by the daemon composition (`cli/daemon.ts`). Node resolution enforces the seam; the flat
+`index.ts` grab-bag retires.
+
+## Authorized actor
+
+`isAuthorizedActor(username | undefined, allowedActors)` (`core/src/security/`, decided
+2026-06-09, not yet built) is the one implementation of the trigger allowlist rule: empty list →
+allowed; missing username with a non-empty list → fail-closed. Both the issue trigger guard
+(`reconcile.ts`) and the command-MR edge (`mr-command/decide.ts`) call it; `isHumanComment` stays
+separate in the MR path. security/ is neutral ground, so the mr-command thesis guard (reconciler
+stays MR-free) is unaffected.
+
+## Reconciler FSMs (legacy + pipeline)
+
+The two FSMs in `reconcile.ts` (legacy `deriveState` switch vs. role-pipeline `deriveStage`,
+toggled by `rolesDeclared`) stay separate for now (decided 2026-06-09). First step is a property
+test asserting legacy ≡ pipeline-with-one-stage across generated snapshots; unification is a
+mechanical follow-up only if that equivalence holds. Do not unify without the test, and do not
+re-propose unify-now.
+
 ## Command MR
 
 A **command MR** is an open MR/PR assigned to the bot that has **no backing issue**, carrying a
