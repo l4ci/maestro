@@ -105,7 +105,10 @@ describe('Slice 1 — listAssignedOpenIssues', () => {
 
 // --- Slice 2: getSnapshot --------------------------------------------------
 
-function wireSnapshot(fake: FakeExec, opts: { pr?: boolean; closed?: boolean } = {}) {
+function wireSnapshot(
+  fake: FakeExec,
+  opts: { pr?: boolean; closed?: boolean; checkRuns?: unknown; combinedStatus?: unknown } = {},
+) {
   fake.onApi('GET', '/issues/42/timeline', [
     { event: 'labeled', actor: user(5, 'maintainer'), created_at: '2026-06-01T00:00:00Z' },
     { event: 'assigned', actor: user(2, 'reporter'), created_at: '2026-06-02T00:00:00Z' },
@@ -118,10 +121,20 @@ function wireSnapshot(fake: FakeExec, opts: { pr?: boolean; closed?: boolean } =
     fake.onApi('GET', '/pulls/7/reviews', []);
     fake.onApi('GET', '/issues/7/comments', []); // PR-conversation read (shared-account /maestro)
     fake.onApi('GET', '/pulls', [rawPr()]);
+    // CI status (#120): findMaestroMr reads it for every open candidate.
+    fake.onApi('GET', '/check-runs', opts.checkRuns ?? { total_count: 0, check_runs: [] });
+    fake.onApi('GET', '/status', opts.combinedStatus ?? { state: 'pending', total_count: 0 });
   } else {
     fake.onApi('GET', '/pulls', []);
   }
   fake.onApi('GET', '/issues/42', rawIssue({ state: opts.closed ? 'closed' : 'open' }));
+}
+
+/** CI status (#120): findMaestroMr reads check-runs + combined status for every open
+ *  candidate. Default to inert (no CI) so snapshot tests that don't care needn't wire it. */
+function wireInertCi(fake: FakeExec): void {
+  fake.onApi('GET', '/check-runs', { total_count: 0, check_runs: [] });
+  fake.onApi('GET', '/status', { state: 'pending', total_count: 0 });
 }
 
 describe('Slice 2 — getSnapshot', () => {
@@ -142,6 +155,34 @@ describe('Slice 2 — getSnapshot', () => {
     wireSnapshot(fake, { pr: false });
     const snap = await a.getSnapshot(repo, 42);
     expect(snap.mr).toBeUndefined();
+  });
+
+  it('surfaces the head-commit CI conclusion from check-runs (#120)', async () => {
+    const { a, fake } = mk();
+    wireSnapshot(fake, {
+      pr: true,
+      checkRuns: {
+        total_count: 1,
+        check_runs: [
+          {
+            status: 'completed',
+            conclusion: 'failure',
+            completed_at: '2026-06-11T10:00:00Z',
+            html_url: 'https://github.com/org/api/runs/2',
+          },
+        ],
+      },
+    });
+    const snap = await a.getSnapshot(repo, 42);
+    expect(snap.mr?.ci).toEqual({
+      conclusion: 'failed',
+      at: '2026-06-11T10:00:00Z',
+      webUrl: 'https://github.com/org/api/runs/2',
+    });
+    // queries the branch tip, not a resolved sha (no extra PR-detail round-trip)
+    expect(fake.callsTo('GET', '/check-runs')[0]?.args.join(' ')).toContain(
+      'maestro%2Fissue-42-add-oauth-login',
+    );
   });
 });
 
@@ -533,6 +574,7 @@ describe('Slice 13 — ApprovalState from PR reviews', () => {
     fake.onApi('GET', '/issues/7/comments', []);
     fake.onApi('GET', '/pulls', [rawPr()]);
     fake.onApi('GET', '/issues/42', rawIssue());
+    wireInertCi(fake);
     const snap = await a.getSnapshot(repo, 42);
     expect(snap.mr?.approvals.approved).toBe(true);
     expect(snap.mr?.approvals.approvedBy[0]?.username).toBe('maintainer');
@@ -566,6 +608,7 @@ describe('Slice 13 — ApprovalState from PR reviews', () => {
     fake.onApi('GET', '/issues/7/comments', []);
     fake.onApi('GET', '/pulls', [rawPr()]);
     fake.onApi('GET', '/issues/42', rawIssue());
+    wireInertCi(fake);
     expect((await a.getSnapshot(repo, 42)).mr?.approvals.approved).toBe(false);
   });
 });
@@ -618,6 +661,7 @@ function wireReviews(
   );
   fake.onApi('GET', '/pulls', [rawPr()]);
   fake.onApi('GET', '/issues/42', rawIssue());
+  wireInertCi(fake);
 }
 
 describe('Slice 14 — changesRequested edge-trigger (§0.3)', () => {

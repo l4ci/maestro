@@ -5,6 +5,7 @@
 
 import type {
   ApprovalState,
+  CiStatus,
   Comment,
   ForgeUser,
   Issue,
@@ -74,6 +75,85 @@ export interface RawTimelineEvent {
   event: string; // 'assigned' | 'labeled' | …
   actor?: RawUser | null;
   created_at?: string;
+}
+
+/** A single check-run for the head commit (`/commits/{ref}/check-runs`). `status` is the
+ *  run's lifecycle (queued|in_progress|completed); `conclusion` is set once completed. */
+export interface RawCheckRun {
+  status?: string;
+  conclusion?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  html_url?: string | null;
+  details_url?: string | null;
+}
+export interface RawCheckRunsResponse {
+  total_count?: number;
+  check_runs?: RawCheckRun[];
+}
+/** The legacy combined commit status (`/commits/{ref}/status`). `state` aggregates the
+ *  commit-status contexts; `total_count` is 0 when a commit has no statuses at all. */
+export interface RawCombinedStatus {
+  state?: string; // 'success' | 'pending' | 'failure' | 'error'
+  total_count?: number;
+}
+
+// A completed check-run with one of these conclusions is a hard failure. `action_required`
+// and `stale` are deliberately NOT failures: they fold into success for v1 (spec §12, the
+// GitLab `manual` twin) — maestro reacts to the aggregate, not manual gates.
+const CHECK_FAILED = new Set(['failure', 'timed_out', 'cancelled']);
+
+/** Newest `completed_at ?? started_at` across the runs — the round-cap / wait_timeout window. */
+function latestCheckAt(runs: RawCheckRun[]): string | undefined {
+  return runs
+    .map((r) => r.completed_at ?? r.started_at ?? '')
+    .filter(Boolean)
+    .sort()
+    .at(-1);
+}
+
+function ciStatusWith(
+  conclusion: CiStatus['conclusion'],
+  runs: RawCheckRun[],
+  deciding: RawCheckRun | undefined,
+): CiStatus {
+  const at = latestCheckAt(runs);
+  const webUrl = deciding?.html_url ?? deciding?.details_url ?? undefined;
+  return {
+    conclusion,
+    ...(at ? { at } : {}),
+    ...(webUrl ? { webUrl } : {}),
+  };
+}
+
+/**
+ * Fold GitHub's two CI surfaces — check-runs and the legacy combined commit status — into
+ * one §0.2 CiStatus for the head commit (#120). Precedence is failed → running → success →
+ * none, so a single red check or a `failure`/`error` combined status wins over greens, and
+ * an in-flight check or a `pending` combined status holds. `none` only when the commit has
+ * neither check-runs nor commit statuses (repos without CI are unaffected). A `pending`
+ * combined status with zero statuses is GitHub's empty default and never, on its own,
+ * promotes the conclusion above `none`.
+ */
+export function normalizeCiStatus(
+  checkRuns: RawCheckRun[],
+  combined: RawCombinedStatus | null | undefined,
+): CiStatus {
+  const hasStatuses = (combined?.total_count ?? 0) > 0;
+  const state = combined?.state;
+
+  const failedRun = checkRuns.find((c) => c.conclusion != null && CHECK_FAILED.has(c.conclusion));
+  if (failedRun || (hasStatuses && (state === 'failure' || state === 'error'))) {
+    return ciStatusWith('failed', checkRuns, failedRun);
+  }
+
+  const runningRun = checkRuns.find((c) => c.status != null && c.status !== 'completed');
+  if (runningRun || (hasStatuses && state === 'pending')) {
+    return ciStatusWith('running', checkRuns, runningRun);
+  }
+
+  if (checkRuns.length > 0 || hasStatuses) return ciStatusWith('success', checkRuns, undefined);
+  return { conclusion: 'none' };
 }
 
 export const EMPTY_APPROVALS: ApprovalState = {

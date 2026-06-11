@@ -14,6 +14,7 @@
 
 import type {
   ApprovalState,
+  CiStatus,
   Comment,
   CreateIssueArgs,
   CreateMRArgs,
@@ -33,6 +34,8 @@ import { ForgeCli } from '../cli.js';
 import { ForgeError } from '../errors.js';
 import { type ForgePrimitives, assembleSnapshot } from '../snapshot.js';
 import {
+  type RawCheckRunsResponse,
+  type RawCombinedStatus,
   type RawComment,
   type RawCommit,
   type RawIssue,
@@ -41,6 +44,7 @@ import {
   type RawTimelineEvent,
   type RawUser,
   changesRequestedSince,
+  normalizeCiStatus,
   normalizeComment,
   normalizeIssue,
   normalizeMergeRequest,
@@ -432,10 +436,26 @@ export class GithubAdapter implements ForgeAdapter {
           .at(-1);
       },
       lastBotPushAt: (mr) => this.#lastBotPushAt(repo, mr.iid),
-      // CI gate (#118) is GitLab-only in the MVP: reporting `none` keeps the gate inert on
-      // GitHub regardless of ci.gate. Check-runs / commit-status wiring is a follow-up.
-      ciStatus: async () => ({ conclusion: 'none' }),
+      ciStatus: (mr) => this.#ciStatus(repo, mr.sourceBranch),
     };
+  }
+
+  /** Head-commit CI conclusion (#120): fold check-runs + the legacy combined commit status
+   *  for the source branch's tip into one §0.2 CiStatus. The branch name resolves to its
+   *  HEAD commit on both endpoints, so no extra PR-detail round-trip for the sha. A 404
+   *  (branch gone / no commit) reads as `none` via the api()'s null. */
+  async #ciStatus(repo: RepoRef, sourceBranch: string): Promise<CiStatus> {
+    const base = this.#base(repo);
+    const ref = encodeURIComponent(sourceBranch);
+    const checks = await this.#c.api<RawCheckRunsResponse>(
+      'GET',
+      `${base}/commits/${ref}/check-runs`,
+      { query: { per_page: 100 } },
+    );
+    const status = await this.#c.api<RawCombinedStatus>('GET', `${base}/commits/${ref}/status`, {
+      query: { per_page: 100 },
+    });
+    return normalizeCiStatus(checks?.check_runs ?? [], status);
   }
 
   /** Shared-account escape hatch (mirror of the GitLab adapter's): the bot/operator
