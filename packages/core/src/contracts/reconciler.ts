@@ -59,6 +59,7 @@ export type Intent =
   | { kind: 'handoff' }
   | { kind: 'poll-review' }
   | { kind: 'apply-changes-requested'; feedback: AgentFeedback }
+  | { kind: 'apply-ci-fix'; feedback: AgentFeedback } // red CI bounced back to the agent (#118)
   | { kind: 'apply-unblock'; feedback: AgentFeedback; role?: AgentRole }
   | { kind: 'merge'; strategy: MergeStrategy; deleteSource: boolean }
   | { kind: 'cleanup' }

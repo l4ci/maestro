@@ -10,6 +10,7 @@ import type {
   RepoRef,
   RepoSettings,
 } from '../src/contracts/index.js';
+import { CI_FAIL_SENTINEL } from '../src/contracts/index.js';
 import { labelNames } from '../src/contracts/labels.js';
 import { reconcile } from '../src/reconciler/reconcile.js';
 
@@ -76,6 +77,7 @@ function settings(over: Partial<RepoSettings> = {}): RepoSettings {
     manageBoard: true,
     labels,
     concurrency: { globalMax: 2, maxActive: 2 },
+    ci: { gate: false },
     ...over,
   };
 }
@@ -789,5 +791,76 @@ describe('R — internal review gate (#29 P3)', () => {
       pin([comment(BOT, `proof ok ${DONE}`, '2026-06-05T10:00:00Z')], { slotAvailable: false }),
     );
     expect(out.kind).toBe('mark-queued');
+  });
+});
+
+// --- CI gate (#118) — legacy FSM, the workComplete → handoff transition -----
+
+describe('CI gate at handoff (#118)', () => {
+  const cmt = (author: string, body: string, createdAt: string): Comment => ({
+    id: `c-${createdAt}`,
+    author: user(author),
+    body,
+    createdAt,
+  });
+
+  // in-progress + workComplete (agent done, proof posted) is the handoff gate.
+  const atHandoff = (
+    ci: MergeRequest['ci'],
+    over: { gate?: boolean; comments?: Comment[] } = {},
+  ): ReconcileInput =>
+    buildInput({
+      workComplete: true,
+      settings: settings({ ci: { gate: over.gate ?? true } }),
+      snapshot: snapshot({
+        issue: issue({ labels: [labels.inProgress] }),
+        mr: mr({ ci }),
+        recentComments: over.comments ?? [],
+      }),
+    });
+
+  it('gate off: a failed pipeline still hands off (legacy behaviour unchanged)', () => {
+    expect(reconcile(atHandoff({ conclusion: 'failed' }, { gate: false })).kind).toBe('handoff');
+  });
+
+  it('gate on, pipeline passed: hands off', () => {
+    expect(reconcile(atHandoff({ conclusion: 'success' })).kind).toBe('handoff');
+  });
+
+  it('gate on, no pipeline (none): hands off', () => {
+    expect(reconcile(atHandoff({ conclusion: 'none' })).kind).toBe('handoff');
+  });
+
+  it('gate on, ci absent on the MR: hands off', () => {
+    expect(reconcile(atHandoff(undefined)).kind).toBe('handoff');
+  });
+
+  it('gate on, pipeline failed, no prior CI-fix: bounces with apply-ci-fix', () => {
+    expect(reconcile(atHandoff({ conclusion: 'failed' })).kind).toBe('apply-ci-fix');
+  });
+
+  it('gate on, pipeline failed, one CI-fix already done (cap reached): hands off', () => {
+    const out = reconcile(
+      atHandoff(
+        { conclusion: 'failed' },
+        { comments: [cmt(BOT, `ci failed ${CI_FAIL_SENTINEL}`, '2026-06-05T10:00:00Z')] },
+      ),
+    );
+    expect(out.kind).toBe('handoff');
+  });
+
+  it('gate on, a human comment after the CI-fix resets the cap window: bounces again', () => {
+    const out = reconcile(
+      atHandoff(
+        { conclusion: 'failed' },
+        {
+          comments: [
+            cmt('reporter', 'try again', '2026-06-05T12:00:00Z'),
+            cmt(BOT, `ci failed ${CI_FAIL_SENTINEL}`, '2026-06-05T10:00:00Z'),
+          ],
+        },
+      ),
+    );
+    expect(out.kind).toBe('apply-ci-fix');
   });
 });

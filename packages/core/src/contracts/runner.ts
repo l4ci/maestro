@@ -68,6 +68,12 @@ export function reviewFailMarker(round: number): string {
   return `<!-- maestro:review-fail round=${round} -->`;
 }
 
+/** CI-failure marker (#118). The daemon posts it alongside the failing pipeline's logs
+ *  when it bounces a red-CI handoff back to the agent; counting occurrences since the
+ *  last human comment makes the CI-fix round cap derivable read-only from the snapshot,
+ *  exactly like {@link REVIEW_FAIL_RE}. */
+export const CI_FAIL_SENTINEL = '<!-- maestro:ci-fail -->';
+
 export interface RunnerInput {
   workspaceDir: string;
   promptBody: string; // WORKFLOW.md body + operating protocol (§9)
