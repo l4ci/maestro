@@ -147,6 +147,19 @@ function ciHandoff(snapshot: IssueSnapshot, settings: RepoSettings, now: string)
   }
 }
 
+/**
+ * In-review CI regression (#120 task 7, spec §12): a pipeline that was conclusive at handoff
+ * can later go red — the target branch moved, or a human pushed to the MR. While the MR is
+ * still AWAITING review (checked after approval / changes-requested, so those human signals
+ * win), a failed head pipeline bounces back to the agent via the same fix loop as the
+ * handoff gate. Deliberately narrow: it does NOT block an approval-driven merge (forge
+ * branch protection owns merge-time required-checks) and is inert when `ci.gate` is off, so
+ * the changes-requested edge remains the primary human-driven bounce.
+ */
+function ciRegressed(snapshot: IssueSnapshot, settings: RepoSettings): boolean {
+  return settings.ci.gate && snapshot.mr?.ci?.conclusion === 'failed';
+}
+
 /** Idempotent capacity marker (#53/#29): one label write, then a stable no-op. */
 function markQueuedOnce(snapshot: IssueSnapshot, settings: RepoSettings, why: string): Intent {
   return snapshot.issue.labels.includes(settings.labels.queued)
@@ -300,6 +313,8 @@ function reconcilePipeline(input: ReconcileInput): Intent {
           feedback: { reviewComments: snapshot.recentComments },
         };
       }
+      // CI regressed under the human (#120 task 7): same bounce as the legacy in-review row.
+      if (ciRegressed(snapshot, settings)) return ciFixIntent(snapshot, settings);
       return { kind: 'poll-review' };
     }
 
@@ -369,6 +384,8 @@ export function reconcile(input: ReconcileInput): Intent {
           feedback: { reviewComments: snapshot.recentComments },
         };
       }
+      // CI regressed under the human (#120 task 7): bounce/park before polling again.
+      if (ciRegressed(snapshot, settings)) return ciFixIntent(snapshot, settings);
       return { kind: 'poll-review' };
     }
 

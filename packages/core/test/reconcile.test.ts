@@ -338,6 +338,57 @@ describe('In-review row (§7)', () => {
     );
     expect(out.kind).toBe('merge');
   });
+
+  // --- In-review CI regression (#120 task 7, spec §12) -----------------------
+  const inReviewCi = (ci: MergeRequest['ci'], over: { gate?: boolean } = {}): ReconcileInput =>
+    buildInput({
+      settings: settings({ ci: { gate: over.gate ?? true } }),
+      snapshot: snapshot({ issue: inReviewIssue(), mr: mr({ ci }) }),
+    });
+
+  it('A14a gate on, pending review, CI regressed to failed: bounces with apply-ci-fix', () => {
+    expect(reconcile(inReviewCi({ conclusion: 'failed' })).kind).toBe('apply-ci-fix');
+  });
+
+  it('A14b gate off: a failed pipeline in review just polls (regression edge inert)', () => {
+    expect(reconcile(inReviewCi({ conclusion: 'failed' }, { gate: false })).kind).toBe(
+      'poll-review',
+    );
+  });
+
+  it('A14c gate on, green/running CI in review: just polls', () => {
+    expect(reconcile(inReviewCi({ conclusion: 'success' })).kind).toBe('poll-review');
+    expect(reconcile(inReviewCi({ conclusion: 'running' })).kind).toBe('poll-review');
+  });
+
+  it('A14d an approval still merges even with red CI (forge branch protection owns merge)', () => {
+    const out = reconcile(
+      buildInput({
+        settings: settings({ ci: { gate: true } }),
+        snapshot: snapshot({
+          issue: inReviewIssue(),
+          mr: mr({ ci: { conclusion: 'failed' }, approvals: approvals({ approved: true }) }),
+        }),
+      }),
+    );
+    expect(out.kind).toBe('merge');
+  });
+
+  it('A14e changes-requested takes precedence over a CI regression', () => {
+    const out = reconcile(
+      buildInput({
+        settings: settings({ ci: { gate: true } }),
+        snapshot: snapshot({
+          issue: inReviewIssue(),
+          mr: mr({
+            ci: { conclusion: 'failed' },
+            approvals: approvals({ changesRequested: true }),
+          }),
+        }),
+      }),
+    );
+    expect(out.kind).toBe('apply-changes-requested');
+  });
 });
 
 // --- A14 Blocked ----------------------------------------------------------
