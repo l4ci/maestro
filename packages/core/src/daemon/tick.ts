@@ -300,6 +300,7 @@ const ACTING_INTENTS: ReadonlySet<Intent['kind']> = new Set([
   'mark-queued',
   'merge',
   'handoff',
+  'park-ci-blocked', // #120: label flip + escalation comment, no agent (no slot)
 ]);
 
 /** Isolate one issue's launched work: a rejection is caught + logged (retried next

@@ -74,11 +74,9 @@ function repliesSinceBlock(recentComments: Comment[], botUser: string): Comment[
   return recentComments.filter((c) => isHumanComment(c, botUser) && c.createdAt > blockedAt);
 }
 
-/** MVP CI-fix round cap (#118): bounce a red pipeline back to the agent at most this many
- *  times before handing off anyway. Counts CI_FAIL_SENTINEL comments since the last human
- *  comment (the analyzeReview idiom), so the window resets on any human action. */
-const CI_MAX_FIX_ROUNDS = 1;
-
+/** CI-fix round cap (#120): count CI_FAIL_SENTINEL comments since the last human comment
+ *  (the analyzeReview idiom), so the window resets on any human action. `ciFixIntent` parks
+ *  the issue as blocked once this reaches `ci.max_fix_rounds`. */
 function ciFixRounds(snapshot: IssueSnapshot, botUser: string): number {
   const comments = snapshot.recentComments; // newest-first
   const lastHumanAt = comments.find((c) => isHumanComment(c, botUser))?.createdAt ?? '';
@@ -99,11 +97,11 @@ function agedPast(at: string, timeoutSeconds: number, now: string): boolean {
 /**
  * The CI handoff gate (#118/#120): opt-in per repo (`ci.gate`), a three-way read of the
  * head-commit pipeline straight off world state. A repo that doesn't opt in, has no
- * pipeline (`none`), or whose pipeline passed hands off (`pass`). A `failed` pipeline
- * bounces back to the agent (`fix`) until the round cap, then hands off anyway. A `running`
- * pipeline HOLDS the handoff (`wait`) until it ages past `ci.wait_timeout`, after which a
- * stuck/external pipeline hands off anyway (`pass`). The `blocked` escalation over the
- * round cap is layered on in task 2 (spec §6).
+ * pipeline (`none`), or whose pipeline passed hands off (`pass`). A `failed` pipeline goes
+ * to `fix` (the caller applies the round cap). A `running` pipeline HOLDS the handoff
+ * (`wait`) until it ages past `ci.wait_timeout`, after which a stuck/external pipeline
+ * hands off anyway (`pass`). The gate reads the conclusion only — the round cap and the
+ * over-cap `blocked` escalation live in `ciFixIntent`.
  */
 function ciGate(
   snapshot: IssueSnapshot,
@@ -113,13 +111,25 @@ function ciGate(
   if (!settings.ci.gate) return 'pass';
   const ci = snapshot.mr?.ci;
   const conclusion = ci?.conclusion ?? 'none';
+  if (conclusion === 'failed') return 'fix';
   if (conclusion === 'running') {
     return ci?.at && agedPast(ci.at, settings.ci.waitTimeoutSeconds, now) ? 'pass' : 'wait';
   }
-  if (conclusion === 'failed' && ciFixRounds(snapshot, settings.botUser) < CI_MAX_FIX_ROUNDS) {
-    return 'fix';
+  return 'pass'; // success | none
+}
+
+/**
+ * Failed-CI loop control (#120 task 2): bounce back to the agent under the round cap, else
+ * park the issue as blocked. The cap (CI-fail markers since the last human comment) resets
+ * the window on any human action by construction; at `ci.max_fix_rounds` the daemon
+ * escalates to a human rather than bouncing a likely-unfixable failure forever — the exact
+ * shape as the review bounce cap (`runReview`) and the proof-failure 3-strike.
+ */
+function ciFixIntent(snapshot: IssueSnapshot, settings: RepoSettings): Intent {
+  if (ciFixRounds(snapshot, settings.botUser) < settings.ci.maxFixRounds) {
+    return { kind: 'apply-ci-fix', feedback: { reviewComments: snapshot.recentComments } };
   }
-  return 'pass'; // success | none | failed-over-cap
+  return { kind: 'park-ci-blocked' };
 }
 
 /** Idempotent capacity marker (#53/#29): one label write, then a stable no-op. */
@@ -322,7 +332,7 @@ export function reconcile(input: ReconcileInput): Intent {
         // (AM-1; no slot consumed).
         switch (ciGate(snapshot, settings, input.now)) {
           case 'fix':
-            return { kind: 'apply-ci-fix', feedback: { reviewComments: snapshot.recentComments } };
+            return ciFixIntent(snapshot, settings);
           case 'wait':
             return { kind: 'none', reason: 'ci running — holding handoff (#120)' };
           case 'pass':

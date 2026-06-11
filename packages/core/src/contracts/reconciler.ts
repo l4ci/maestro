@@ -67,6 +67,7 @@ export type Intent =
   | { kind: 'poll-review' }
   | { kind: 'apply-changes-requested'; feedback: AgentFeedback }
   | { kind: 'apply-ci-fix'; feedback: AgentFeedback } // red CI bounced back to the agent (#118)
+  | { kind: 'park-ci-blocked' } // red CI over the fix-round cap → park as blocked (#120)
   | { kind: 'apply-unblock'; feedback: AgentFeedback; role?: AgentRole }
   | { kind: 'merge'; strategy: MergeStrategy; deleteSource: boolean }
   | { kind: 'cleanup' }

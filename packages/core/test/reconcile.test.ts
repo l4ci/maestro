@@ -843,24 +843,29 @@ describe('CI gate at handoff (#118/#120)', () => {
     expect(reconcile(atHandoff({ conclusion: 'failed' })).kind).toBe('apply-ci-fix');
   });
 
-  it('gate on, pipeline failed, one CI-fix already done (cap reached): hands off', () => {
-    const out = reconcile(
-      atHandoff(
-        { conclusion: 'failed' },
-        { comments: [cmt(BOT, `ci failed ${CI_FAIL_SENTINEL}`, '2026-06-05T10:00:00Z')] },
-      ),
+  const ciFails = (n: number): Comment[] =>
+    Array.from({ length: n }, (_, i) =>
+      cmt(BOT, `ci failed ${CI_FAIL_SENTINEL}`, `2026-06-05T1${i}:00:00Z`),
     );
-    expect(out.kind).toBe('handoff');
+
+  it('gate on, failed under the round cap (2 of 3 done): bounces again', () => {
+    const out = reconcile(atHandoff({ conclusion: 'failed' }, { comments: ciFails(2) }));
+    expect(out.kind).toBe('apply-ci-fix');
   });
 
-  it('gate on, a human comment after the CI-fix resets the cap window: bounces again', () => {
+  it('gate on, failed AT the round cap (3 of 3): parks as blocked instead of bouncing', () => {
+    const out = reconcile(atHandoff({ conclusion: 'failed' }, { comments: ciFails(3) }));
+    expect(out.kind).toBe('park-ci-blocked');
+  });
+
+  it('gate on, a human comment after the CI-fails resets the cap window: bounces again', () => {
     const out = reconcile(
       atHandoff(
         { conclusion: 'failed' },
         {
           comments: [
-            cmt('reporter', 'try again', '2026-06-05T12:00:00Z'),
-            cmt(BOT, `ci failed ${CI_FAIL_SENTINEL}`, '2026-06-05T10:00:00Z'),
+            cmt('reporter', 'try again', '2026-06-05T20:00:00Z'),
+            ...ciFails(3), // all three predate the human comment ⇒ window reset
           ],
         },
       ),

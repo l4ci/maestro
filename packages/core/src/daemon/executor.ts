@@ -141,6 +141,8 @@ export async function executeIntent(
       return runApplyChanges(intent, snapshot, ctx);
     case 'apply-ci-fix':
       return runApplyCiFix(intent, snapshot, ctx);
+    case 'park-ci-blocked':
+      return runParkCiBlocked(snapshot, ctx);
     case 'apply-unblock':
       return runApplyUnblock(intent, snapshot, ctx);
     case 'mark-queued':
@@ -368,6 +370,42 @@ async function runApplyCiFix(
     createdAt: new Date().toISOString(),
   };
   await runAgent(snapshot, snapshot.mr, [marker, ...intent.feedback.reviewComments], ctx);
+}
+
+/** Over the CI fix-round cap (#120): the agent bounced `max_fix_rounds` times and still
+ *  couldn't get the pipeline green. @-mention the ticket creator, point at the failing
+ *  logs in the CI-fix comments above, and reset on any human reply. The block marker is
+ *  this (newest daemon) comment — repliesSinceBlock retires the block on the human's answer. */
+function ciBlockedComment(mr: MergeRequest | undefined, human: string, maxRounds: number): string {
+  const link = mr?.ci?.webUrl ? ` ([pipeline](${mr.ci.webUrl}))` : '';
+  return [
+    `### 🚧 Blocked — CI fix-round cap reached (${maxRounds} rounds)${link}`,
+    '',
+    `@${human} the head pipeline kept failing and the agent couldn't get it green in ${maxRounds} attempts. The failing logs are in the CI-fix comments above.`,
+    '',
+    '_Reply in this thread to reset the count and resume; any human comment clears it (from the bot’s own account, start with `/maestro`)._',
+  ].join('\n');
+}
+
+/** Red CI over the fix-round cap (#120): park the issue as blocked instead of bouncing a
+ *  likely-unfixable failure forever. Flip in-progress→blocked and post the escalation
+ *  comment — the mirror of the review bounce cap in `runReview`. No agent runs; the human's
+ *  reply re-derives the stage from artifacts (blocked is a modifier, #29) and resumes. */
+async function runParkCiBlocked(snapshot: IssueSnapshot, ctx: ExecutorContext): Promise<void> {
+  const { repo, issue } = snapshot;
+  const maxRounds = ctx.settings.ci.maxFixRounds;
+  const m = lifecycleMove('park-blocked', ctx.settings.labels);
+  await ctx.adapter.setIssueLabels(repo, issue.iid, m.set, m.unset);
+  await ctx.adapter.commentIssue(
+    repo,
+    issue.iid,
+    ciBlockedComment(snapshot.mr, issue.author.username, maxRounds),
+  );
+  ctx.log.warn('ci fix-round cap hit — escalated to blocked (#120)', {
+    repo: repoKey(repo),
+    iid: issue.iid,
+    rounds: maxRounds,
+  });
 }
 
 /** Maintainer answered a blocked issue: flip blocked→in-progress, then run the agent with

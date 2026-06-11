@@ -196,6 +196,26 @@ describe('executeIntent through a from-scratch ExecutorContext (#105)', () => {
     ).toBe(true);
   });
 
+  it('park-ci-blocked: flips in-progress→blocked and posts an @-mention escalation, no agent (#120)', async () => {
+    const adapter = recordingAdapter({ snapshot: makeSnapshot() });
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    const { ctx } = executorContext({ adapter, runner });
+    const snap = makeSnapshot({ mr: { ci: { conclusion: 'failed', webUrl: 'https://ci/9' } } });
+
+    await executeIntent({ kind: 'park-ci-blocked' }, snap, ctx);
+
+    // flipped to blocked (the mirror of the review bounce cap)
+    expect(adapter.labelOps).toEqual([
+      { iid: 42, set: [labels.blocked], unset: [labels.inProgress] },
+    ]);
+    // escalation comment @-mentions the ticket creator and points at the pipeline
+    const blocked = adapter.issueComments.find((c) => c.body.includes('Blocked'));
+    expect(blocked?.body).toContain(`@${snap.issue.author.username}`);
+    expect(blocked?.body).toContain('https://ci/9');
+    // no agent ran
+    expect(runner.inputs).toHaveLength(0);
+  });
+
   it('non-acting kinds are no-ops', async () => {
     const adapter = recordingAdapter({ snapshot: makeSnapshot() });
     const runner = scriptedRunner({ status: 'done', summary: '' });
