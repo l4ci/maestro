@@ -196,6 +196,54 @@ describe('executeIntent through a from-scratch ExecutorContext (#105)', () => {
     ).toBe(true);
   });
 
+  it('apply-ci-fix: folds the fetched failing logs + a per-sha marker into the comment (#120)', async () => {
+    const adapter = recordingAdapter({
+      snapshot: makeSnapshot(),
+      ciFailureLogs: { headSha: 'abc123', logs: 'FAILED test/foo.spec.ts: expected 1, got 2' },
+    });
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    const { ctx } = executorContext({ adapter, runner });
+    const snap = makeSnapshot({ mr: { ci: { conclusion: 'failed', webUrl: 'https://ci/9' } } });
+
+    await executeIntent(
+      { kind: 'apply-ci-fix', feedback: { reviewComments: snap.recentComments } },
+      snap,
+      ctx,
+    );
+
+    const posted = adapter.issueComments.find((c) => c.body.includes(CI_FAIL_SENTINEL));
+    expect(posted?.body).toContain('FAILED test/foo.spec.ts');
+    expect(posted?.body).toContain('<!-- maestro:ci-fail-sha=abc123 -->');
+    expect(runner.inputs).toHaveLength(1);
+  });
+
+  it('apply-ci-fix: idempotent — a failure already posted for this sha is not re-posted (#120)', async () => {
+    const adapter = recordingAdapter({
+      snapshot: makeSnapshot(),
+      ciFailureLogs: { headSha: 'abc123', logs: 'still red' },
+    });
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    const { ctx } = executorContext({ adapter, runner });
+    // the prior tick already posted the marker for sha abc123
+    const snap = makeSnapshot({
+      mr: { ci: { conclusion: 'failed' } },
+      comments: [`### 🔴 CI failed\n${CI_FAIL_SENTINEL}\n<!-- maestro:ci-fail-sha=abc123 -->`],
+    });
+
+    await executeIntent(
+      { kind: 'apply-ci-fix', feedback: { reviewComments: snap.recentComments } },
+      snap,
+      ctx,
+    );
+
+    // no new comment for the same sha; the agent still re-runs with the existing one in context
+    expect(adapter.calls).not.toContain('commentIssue');
+    expect(runner.inputs).toHaveLength(1);
+    expect(
+      runner.inputs[0]?.context.recentComments.some((c) => c.body.includes(CI_FAIL_SENTINEL)),
+    ).toBe(true);
+  });
+
   it('park-ci-blocked: flips in-progress→blocked and posts an @-mention escalation, no agent (#120)', async () => {
     const adapter = recordingAdapter({ snapshot: makeSnapshot() });
     const runner = scriptedRunner({ status: 'in_progress', summary: '' });

@@ -14,6 +14,7 @@
 
 import type {
   ApprovalState,
+  CiFailureLogs,
   CiStatus,
   Comment,
   CreateIssueArgs,
@@ -30,6 +31,7 @@ import type {
 import { MAESTRO_COMMAND_RE } from '../../contracts/index.js';
 import { labelNames } from '../../contracts/labels.js';
 import { TtlMemoizer } from '../../utils/ttl-memo.js';
+import { formatJobLog, truncateCiLogs } from '../ci-logs.js';
 import { ForgeCli } from '../cli.js';
 import { ForgeError } from '../errors.js';
 import { type ForgePrimitives, assembleSnapshot } from '../snapshot.js';
@@ -44,6 +46,7 @@ import {
   type RawTimelineEvent,
   type RawUser,
   changesRequestedSince,
+  isFailedCheckRun,
   normalizeCiStatus,
   normalizeComment,
   normalizeIssue,
@@ -456,6 +459,33 @@ export class GithubAdapter implements ForgeAdapter {
       query: { per_page: 100 },
     });
     return normalizeCiStatus(checks?.check_runs ?? [], status);
+  }
+
+  /** Failing-check logs for the head commit (#120): the failed check-runs' `output`
+   *  (title + summary — GitHub's failure annotations), concatenated and truncated. The
+   *  check-run `head_sha` keys the CI-fix comment for idempotency. Returns undefined when
+   *  there are no failed checks / no head sha. (Full Actions logs are a zip artifact; the
+   *  check output carries the human-readable failure, which is what the cold session needs.) */
+  async ciFailureLogs(repo: RepoRef, mr: MergeRequest): Promise<CiFailureLogs | undefined> {
+    const ref = encodeURIComponent(mr.sourceBranch);
+    const resp = await this.#c.api<RawCheckRunsResponse>(
+      'GET',
+      `${this.#base(repo)}/commits/${ref}/check-runs`,
+      { query: { per_page: 100 } },
+    );
+    const runs = resp?.check_runs ?? [];
+    const headSha = runs.find((r) => r.head_sha)?.head_sha;
+    if (!headSha) return undefined;
+    const sections = runs
+      .filter(isFailedCheckRun)
+      .map((r) =>
+        formatJobLog(
+          r.name ?? 'check',
+          [r.output?.title, r.output?.summary].filter(Boolean).join('\n') || '(no check output)',
+        ),
+      );
+    if (sections.length === 0) return undefined;
+    return { headSha, logs: truncateCiLogs(sections.join('\n\n')) };
   }
 
   /** Shared-account escape hatch (mirror of the GitLab adapter's): the bot/operator

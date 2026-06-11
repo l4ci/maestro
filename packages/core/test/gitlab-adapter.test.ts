@@ -158,6 +158,33 @@ describe('Slice 2 — getSnapshot', () => {
     const snap = await a.getSnapshot(repo, 42);
     expect(snap.mr?.ci).toEqual({ conclusion: 'failed', at: '2026-06-11T10:00:00Z', webUrl: 'p' });
   });
+
+  it('ciFailureLogs: concatenates failed-job traces, keyed on the head sha (#120)', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/merge_requests/7', {
+      head_pipeline: { id: 55, sha: 'deadbeef', status: 'failed' },
+    });
+    fake.onApi('GET', '/pipelines/55/jobs', [
+      { id: 100, name: 'unit', status: 'failed' },
+      { id: 101, name: 'lint', status: 'success' }, // green job — not included
+    ]);
+    fake.on((c) => c.args.join(' ').includes('/jobs/100/trace'), {
+      code: 0,
+      stdout: 'npm ERR! 1 failing\n  expected 1, got 2',
+      stderr: '',
+    });
+    const logs = await a.ciFailureLogs(repo, { iid: 7 } as never);
+    expect(logs?.headSha).toBe('deadbeef');
+    expect(logs?.logs).toContain('npm ERR! 1 failing');
+    expect(logs?.logs).toContain('── unit ──');
+    expect(logs?.logs).not.toContain('lint'); // green job omitted
+  });
+
+  it('ciFailureLogs: returns undefined when the head pipeline has no sha (#120)', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/merge_requests/7', { head_pipeline: null });
+    expect(await a.ciFailureLogs(repo, { iid: 7 } as never)).toBeUndefined();
+  });
 });
 
 // --- Slice 3: getIssueState ------------------------------------------------

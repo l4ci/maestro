@@ -6,6 +6,7 @@ import { vi } from 'vitest';
 import { resolveRepoSettings } from '../../src/config/resolve-settings.js';
 import type {
   AgentResult,
+  CiFailureLogs,
   Comment,
   CreateMRArgs,
   ForgeAdapter,
@@ -113,6 +114,7 @@ export interface AdapterConfig {
   mrComments?: Map<number, Comment[]>; // getMrComments per mrIid
   mrCommits?: Map<number, string[]>; // listMrCommits per mrIid (#86 progress mirror)
   mrStates?: Map<number, 'open' | 'closed' | 'merged' | 'missing'>; // getMergeRequestState
+  ciFailureLogs?: CiFailureLogs; // failing-log fetch for apply-ci-fix (#120); undefined ⇒ no logs
   fail?: Partial<Record<keyof ForgeAdapter, () => Error>>; // inject throws
 }
 
@@ -229,6 +231,10 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
     createIssue: async () => {
       r.calls.push('createIssue');
       return makeIssue();
+    },
+    ciFailureLogs: async () => {
+      r.calls.push('ciFailureLogs');
+      return cfg.ciFailureLogs;
     },
   };
   r.adapter = a;

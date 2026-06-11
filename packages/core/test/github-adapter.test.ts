@@ -184,6 +184,37 @@ describe('Slice 2 — getSnapshot', () => {
       'maestro%2Fissue-42-add-oauth-login',
     );
   });
+
+  it('ciFailureLogs: gathers failed check-run output, keyed on head_sha (#120)', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/check-runs', {
+      total_count: 2,
+      check_runs: [
+        {
+          name: 'build',
+          status: 'completed',
+          conclusion: 'failure',
+          head_sha: 'abc123',
+          output: { title: 'Build failed', summary: 'tsc: error TS1234: bad type' },
+        },
+        { name: 'lint', status: 'completed', conclusion: 'success', head_sha: 'abc123' },
+      ],
+    });
+    const logs = await a.ciFailureLogs(repo, { iid: 7, sourceBranch: 'feature' } as never);
+    expect(logs?.headSha).toBe('abc123');
+    expect(logs?.logs).toContain('Build failed');
+    expect(logs?.logs).toContain('tsc: error TS1234');
+    expect(logs?.logs).toContain('── build ──');
+    expect(logs?.logs).not.toContain('lint'); // green check omitted
+  });
+
+  it('ciFailureLogs: undefined when no check-runs carry a head_sha (#120)', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/check-runs', { total_count: 0, check_runs: [] });
+    expect(
+      await a.ciFailureLogs(repo, { iid: 7, sourceBranch: 'feature' } as never),
+    ).toBeUndefined();
+  });
 });
 
 // --- Slice 3: getIssueState ------------------------------------------------

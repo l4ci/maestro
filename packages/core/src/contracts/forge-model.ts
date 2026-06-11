@@ -68,6 +68,14 @@ export interface CiStatus {
   webUrl?: string; // link to the pipeline/run, surfaced in the CI-fix comment
 }
 
+/** Failing-job logs for a red head pipeline (#120). The daemon threads `logs` into the
+ *  CI-fix comment so the cold session sees the actual failure, and keys that comment on
+ *  `headSha` (spec §7) so the same failure is posted at most once. */
+export interface CiFailureLogs {
+  headSha: string; // the head commit whose pipeline failed — idempotency key for the comment
+  logs: string; // failing job logs, already truncated to an adapter-side bound
+}
+
 export interface ApprovalState {
   approved: boolean; // GitLab: required approval met; GitHub: an APPROVED review exists, none later request changes
   approvedBy: ForgeUser[];

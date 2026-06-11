@@ -127,10 +127,19 @@ export function normalizeMergeRequest(
 
 /** A GitLab pipeline object (the MR's `head_pipeline`, or a `/pipelines` list entry). */
 export interface RawPipeline {
+  id?: number; // pipeline id — to list its jobs for the failing-log fetch (#120)
+  sha?: string; // the head commit the pipeline ran on — idempotency key for the CI-fix comment
   status?: string;
   web_url?: string;
   created_at?: string;
   updated_at?: string;
+}
+
+/** A GitLab job within a pipeline (`/pipelines/:id/jobs`) — its trace is the failing log. */
+export interface RawJob {
+  id?: number;
+  name?: string;
+  status?: string;
 }
 
 // GitLab pipeline statuses that are still in flight vs. terminally failed. Everything else

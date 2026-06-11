@@ -86,6 +86,9 @@ export interface RawCheckRun {
   completed_at?: string | null;
   html_url?: string | null;
   details_url?: string | null;
+  head_sha?: string; // the commit this check ran on — idempotency key for the CI-fix comment (#120)
+  name?: string;
+  output?: { title?: string | null; summary?: string | null } | null;
 }
 export interface RawCheckRunsResponse {
   total_count?: number;
@@ -102,6 +105,11 @@ export interface RawCombinedStatus {
 // and `stale` are deliberately NOT failures: they fold into success for v1 (spec §12, the
 // GitLab `manual` twin) — maestro reacts to the aggregate, not manual gates.
 const CHECK_FAILED = new Set(['failure', 'timed_out', 'cancelled']);
+
+/** A completed check-run whose conclusion is a hard failure (#120 failing-log fetch). */
+export function isFailedCheckRun(run: RawCheckRun): boolean {
+  return run.conclusion != null && CHECK_FAILED.has(run.conclusion);
+}
 
 /** Newest `completed_at ?? started_at` across the runs — the round-cap / wait_timeout window. */
 function latestCheckAt(runs: RawCheckRun[]): string | undefined {

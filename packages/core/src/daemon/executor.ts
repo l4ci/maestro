@@ -14,6 +14,7 @@ import {
   AC_DRAFT_SENTINEL,
   type AgentResult,
   CI_FAIL_SENTINEL,
+  type CiFailureLogs,
   type Comment,
   type Exec,
   type ForgeAdapter,
@@ -338,38 +339,70 @@ async function runApplyChanges(
   await runAgent(snapshot, snapshot.mr, intent.feedback.reviewComments, ctx);
 }
 
-/** The CI-failure comment (#118): the round-cap marker AND the next cold session's context.
- *  Leads with a human-readable heading + the pipeline link; the sentinel is what the
- *  reconciler counts and the daemon would key idempotency on. */
-function ciFailComment(mr: MergeRequest | undefined): string {
-  const link = mr?.ci?.webUrl ? ` ([pipeline](${mr.ci.webUrl}))` : '';
-  return [
-    `### 🔴 CI failed${link}`,
-    '',
-    "The head commit's pipeline failed. Re-run the failing checks in the workspace, fix the cause, and push — the gate re-evaluates on the new pipeline.",
-    '',
-    CI_FAIL_SENTINEL,
-  ].join('\n');
+/** Per-sha idempotency key (#120, spec §7): a stable marker carrying the head sha, so the
+ *  same failing pipeline is posted at most once even across ticks. */
+function ciFailShaMarker(headSha: string): string {
+  return `<!-- maestro:ci-fail-sha=${headSha} -->`;
 }
 
-/** Red CI bounced back to the agent (#118): post the failure marker on the issue thread,
- *  then resume the agent with that marker threaded into context. No lifecycle flip — the
- *  issue is already in-progress; the marker on the forge both feeds the cold session and
- *  makes the round cap derivable read-only (mirror of runApplyChanges, sans the label move). */
+/** The CI-failure comment (#118/#120): the round-cap marker AND the next cold session's
+ *  context. Leads with a heading + the pipeline link, folds in the truncated failing logs
+ *  when the adapter could fetch them, and carries the countable sentinel plus (when known)
+ *  the per-sha idempotency marker. */
+function ciFailComment(mr: MergeRequest | undefined, logs: CiFailureLogs | undefined): string {
+  const link = mr?.ci?.webUrl ? ` ([pipeline](${mr.ci.webUrl}))` : '';
+  const lines = [
+    `### 🔴 CI failed${link}`,
+    '',
+    "The head commit's pipeline failed. Fix the cause and push — the gate re-evaluates on the new pipeline.",
+  ];
+  if (logs?.logs) {
+    lines.push(
+      '',
+      '<details><summary>Failing job logs (truncated)</summary>',
+      '',
+      '```',
+      logs.logs,
+      '```',
+      '',
+      '</details>',
+    );
+  }
+  lines.push('', CI_FAIL_SENTINEL);
+  if (logs?.headSha) lines.push(ciFailShaMarker(logs.headSha));
+  return lines.join('\n');
+}
+
+/** Red CI bounced back to the agent (#118/#120): fetch the failing logs, post them as the
+ *  failure marker on the issue thread, then resume the agent with that marker threaded into
+ *  context. No lifecycle flip — the issue is already in-progress; the marker on the forge
+ *  both feeds the cold session and makes the round cap derivable read-only (mirror of
+ *  runApplyChanges, sans the label move). Idempotent on the head sha (spec §7): a failure
+ *  already posted for this sha is not re-posted — the agent just re-runs with it in context. */
 async function runApplyCiFix(
   intent: Extract<Intent, { kind: 'apply-ci-fix' }>,
   snapshot: IssueSnapshot,
   ctx: ExecutorContext,
 ): Promise<void> {
-  const body = ciFailComment(snapshot.mr);
-  await ctx.adapter.commentIssue(snapshot.repo, snapshot.issue.iid, body);
-  const marker: Comment = {
-    id: `ci-fail-${snapshot.issue.iid}`,
-    author: { username: ctx.settings.botUser, id: ctx.settings.botUser },
-    body,
-    createdAt: new Date().toISOString(),
-  };
-  await runAgent(snapshot, snapshot.mr, [marker, ...intent.feedback.reviewComments], ctx);
+  const logs = snapshot.mr
+    ? await ctx.adapter.ciFailureLogs?.(snapshot.repo, snapshot.mr)
+    : undefined;
+  const sha = logs?.headSha;
+  const alreadyPosted =
+    sha !== undefined && snapshot.recentComments.some((c) => c.body.includes(ciFailShaMarker(sha)));
+
+  const threaded: Comment[] = [];
+  if (!alreadyPosted) {
+    const body = ciFailComment(snapshot.mr, logs);
+    await ctx.adapter.commentIssue(snapshot.repo, snapshot.issue.iid, body);
+    threaded.push({
+      id: `ci-fail-${snapshot.issue.iid}`,
+      author: { username: ctx.settings.botUser, id: ctx.settings.botUser },
+      body,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  await runAgent(snapshot, snapshot.mr, [...threaded, ...intent.feedback.reviewComments], ctx);
 }
 
 /** Over the CI fix-round cap (#120): the agent bounced `max_fix_rounds` times and still

@@ -77,6 +77,20 @@ export class ForgeCli {
     return parseJson<T>(res.stdout);
   }
 
+  /** Raw call returning the response body as TEXT (no JSON parse), or `null` on 404. For
+   *  plain-text endpoints — e.g. a GitLab job trace (#120). Throws ForgeError otherwise. */
+  async apiText(method: HttpMethod, path: string, opts: ApiOptions = {}): Promise<string | null> {
+    const fullPath = buildPath(path, opts.query);
+    const args = ['api', fullPath, '-X', method];
+    if (opts.paginate) args.push('--paginate');
+    const res = await this.#exec.run(this.#cfg.bin, args, { env: this.#cfg.env });
+    if (res.code !== 0) {
+      if (is404(res.stderr)) return null;
+      throw new ForgeError(this.#cfg.forge, method, fullPath, res.code, res.stderr);
+    }
+    return res.stdout;
+  }
+
   /** Like api() but throws ForgeError on 404 too (for endpoints where absence is a bug). */
   async apiRequired<T = unknown>(
     method: HttpMethod,

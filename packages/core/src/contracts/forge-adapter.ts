@@ -1,7 +1,15 @@
 // Forge adapter interface (spec §0.3). The ONLY forge-aware seam. GitLab (M2) is
 // the reference impl; GitHub (M7) mirrors it. All mutations idempotent. FROZEN.
 
-import type { Comment, Issue, IssueSnapshot, Label, MergeRequest, RepoRef } from './forge-model.js';
+import type {
+  CiFailureLogs,
+  Comment,
+  Issue,
+  IssueSnapshot,
+  Label,
+  MergeRequest,
+  RepoRef,
+} from './forge-model.js';
 
 export type MergeStrategy = 'squash' | 'merge' | 'rebase';
 
@@ -74,6 +82,12 @@ export interface ForgeAdapter {
   setIssueLabels(repo: RepoRef, issueIid: number, set: string[], unset: string[]): Promise<void>;
   commentIssue(repo: RepoRef, issueIid: number, body: string): Promise<void>;
   commentMR(repo: RepoRef, mrIid: number, body: string): Promise<void>;
+
+  /** Failing-job logs for the head commit's pipeline (#120), with the head sha that keys
+   *  the CI-fix comment for idempotency (spec §7). Returns undefined when there is no failed
+   *  pipeline or no retrievable logs. Optional capability: a forge/runtime that can't surface
+   *  logs omits it, and the daemon falls back to the pipeline link alone. */
+  ciFailureLogs?(repo: RepoRef, mr: MergeRequest): Promise<CiFailureLogs | undefined>;
 
   // --- onboarding / setup (§11, §16) ---
   ensureLabels(repo: RepoRef, labels: Label[]): Promise<void>; // create missing; no-op existing

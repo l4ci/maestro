@@ -7,6 +7,7 @@
 
 import type {
   ApprovalState,
+  CiFailureLogs,
   CiStatus,
   Comment,
   CreateIssueArgs,
@@ -21,12 +22,14 @@ import type {
   RepoRef,
 } from '../../contracts/index.js';
 import { MAESTRO_COMMAND_RE } from '../../contracts/index.js';
+import { formatJobLog, truncateCiLogs } from '../ci-logs.js';
 import { ForgeCli } from '../cli.js';
 import { ForgeError } from '../errors.js';
 import { type ForgePrimitives, assembleSnapshot } from '../snapshot.js';
 import {
   type RawApprovals,
   type RawIssue,
+  type RawJob,
   type RawMr,
   type RawNote,
   type RawPipeline,
@@ -451,6 +454,31 @@ export class GitlabAdapter implements ForgeAdapter {
       `/projects/${this.#pid(repo)}/merge_requests/${mrIid}`,
     );
     return normalizeCiStatus(detail?.head_pipeline);
+  }
+
+  /** Failing-job logs for the head pipeline (#120): list the pipeline's failed jobs and
+   *  concatenate each job's trace (plain text), truncated. The head sha keys the CI-fix
+   *  comment for idempotency. Returns undefined when there is no head pipeline / sha. */
+  async ciFailureLogs(repo: RepoRef, mr: MergeRequest): Promise<CiFailureLogs | undefined> {
+    const pid = this.#pid(repo);
+    const detail = await this.#c.api<{ head_pipeline?: RawPipeline | null }>(
+      'GET',
+      `/projects/${pid}/merge_requests/${mr.iid}`,
+    );
+    const pipe = detail?.head_pipeline;
+    if (!pipe?.id || !pipe.sha) return undefined;
+    const jobs =
+      (await this.#c.api<RawJob[]>('GET', `/projects/${pid}/pipelines/${pipe.id}/jobs`, {
+        query: { per_page: 100 },
+      })) ?? [];
+    const sections: string[] = [];
+    for (const job of jobs) {
+      if (job.status !== 'failed' || !job.id) continue;
+      const trace = await this.#c.apiText('GET', `/projects/${pid}/jobs/${job.id}/trace`);
+      if (trace?.trim()) sections.push(formatJobLog(job.name ?? `job ${job.id}`, trace));
+    }
+    if (sections.length === 0) return undefined;
+    return { headSha: pipe.sha, logs: truncateCiLogs(sections.join('\n\n')) };
   }
 
   async #approvalState(repo: RepoRef, mrIid: number): Promise<ApprovalState> {
