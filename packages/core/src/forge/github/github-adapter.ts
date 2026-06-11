@@ -432,6 +432,9 @@ export class GithubAdapter implements ForgeAdapter {
           .at(-1);
       },
       lastBotPushAt: (mr) => this.#lastBotPushAt(repo, mr.iid),
+      // CI gate (#118) is GitLab-only in the MVP: reporting `none` keeps the gate inert on
+      // GitHub regardless of ci.gate. Check-runs / commit-status wiring is a follow-up.
+      ciStatus: async () => ({ conclusion: 'none' }),
     };
   }
 

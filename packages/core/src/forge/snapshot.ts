@@ -11,6 +11,7 @@
 import { z } from 'zod';
 import type {
   ApprovalState,
+  CiStatus,
   Comment,
   ForgeKind,
   ForgeUser,
@@ -83,6 +84,10 @@ export interface ForgePrimitives {
    *  agent's commits wear the operator's git identity; the daemon owns the branch, so any
    *  commit post-dating the blocking signal counts as the feedback being addressed (issue #5). */
   lastBotPushAt(mr: MergeRequest): Promise<string | undefined>;
+  /** Head-commit pipeline conclusion for the MR's source branch (#118). `none` when the
+   *  head commit has no pipeline. Read only for an OPEN candidate (the gate only fires at
+   *  the handoff of in-flight work); the snapshot short-circuits it otherwise. */
+  ciStatus(mr: MergeRequest): Promise<CiStatus>;
 }
 
 /**
@@ -133,8 +138,11 @@ export async function findMaestroMr(
   const lastBotPushAt = blockingAt === undefined ? undefined : await prim.lastBotPushAt(candidate);
   const changesRequested = computeChangesRequested(blockingAt, lastBotPushAt);
   const activityAt = newestMrActivity(blockingAt, lastBotPushAt);
+  // CI status (#118): only an OPEN candidate can reach the handoff gate, so a closed/merged
+  // match never pays the pipeline read. The reconciler ignores it unless the repo opts in.
+  const ci = candidate.state === 'opened' ? await prim.ciStatus(candidate) : undefined;
   return {
-    mr: { ...candidate, approvals: { ...base, changesRequested } },
+    mr: { ...candidate, approvals: { ...base, changesRequested }, ...(ci ? { ci } : {}) },
     ...(activityAt ? { activityAt } : {}),
   };
 }

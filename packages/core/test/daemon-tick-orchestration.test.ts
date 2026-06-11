@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DONE_SENTINEL, type RepoRef } from '../src/contracts/index.js';
+import { CI_FAIL_SENTINEL, DONE_SENTINEL, type RepoRef } from '../src/contracts/index.js';
 import { Claims } from '../src/daemon/claims.js';
 import { repoKey } from '../src/daemon/ports.js';
 import { evaluateLifecycle, selectAdapter, tick, tickRepo } from '../src/daemon/tick.js';
@@ -396,6 +396,28 @@ describe('G2 — workComplete=false keeps normal resume', () => {
 
     expect(runnerSpy.inputs).toHaveLength(1);
     expect(handoffSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('G3 — a red head pipeline bounces the handoff back to the agent (#118)', () => {
+  it('workComplete + ci.gate + failed pipeline runs the agent and posts the CI marker, no handoff', async () => {
+    const adapter = recordingAdapter({
+      snapshot: makeSnapshot({
+        issue: { labels: [labels.inProgress] },
+        mr: { ci: { conclusion: 'failed', webUrl: 'https://ci/9' } },
+        comments: [`### ✅ Proof\nall green\n${DONE_SENTINEL}`],
+      }),
+    });
+    const { ctx, runnerSpy, handoffSpy } = buildContext({
+      adapter,
+      settings: defaultSettings({ ci: { gate: true } }),
+    });
+
+    await tickRepo(repo, ctx);
+
+    expect(runnerSpy.inputs).toHaveLength(1); // the agent ran to fix CI
+    expect(handoffSpy).not.toHaveBeenCalled(); // handoff held back
+    expect(adapter.issueComments.some((c) => c.body.includes(CI_FAIL_SENTINEL))).toBe(true);
   });
 });
 

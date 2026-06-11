@@ -17,6 +17,7 @@ import type {
 } from '../contracts/index.js';
 import {
   AC_DRAFT_SENTINEL,
+  CI_FAIL_SENTINEL,
   DONE_SENTINEL,
   REVIEW_FAIL_RE,
   REVIEW_PASS_SENTINEL,
@@ -71,6 +72,33 @@ function repliesSinceBlock(recentComments: Comment[], botUser: string): Comment[
   )?.createdAt;
   if (blockedAt === undefined) return [];
   return recentComments.filter((c) => isHumanComment(c, botUser) && c.createdAt > blockedAt);
+}
+
+/** MVP CI-fix round cap (#118): bounce a red pipeline back to the agent at most this many
+ *  times before handing off anyway. Counts CI_FAIL_SENTINEL comments since the last human
+ *  comment (the analyzeReview idiom), so the window resets on any human action. */
+const CI_MAX_FIX_ROUNDS = 1;
+
+function ciFixRounds(snapshot: IssueSnapshot, botUser: string): number {
+  const comments = snapshot.recentComments; // newest-first
+  const lastHumanAt = comments.find((c) => isHumanComment(c, botUser))?.createdAt ?? '';
+  return comments.filter((c) => c.body.includes(CI_FAIL_SENTINEL) && c.createdAt > lastHumanAt)
+    .length;
+}
+
+/**
+ * The CI handoff gate (#118), MVP cut: opt-in per repo (`ci.gate`). A repo that doesn't
+ * opt in, has no pipeline for the head commit (`none`), whose pipeline passed, or that is
+ * still `running` (no wait in the MVP) hands off as before. A `failed` head pipeline
+ * bounces back to the agent (`fix`) until the round cap, then hands off anyway. The full
+ * design adds a `wait` arm (hold on `running` with a timeout) and a `blocked` escalation
+ * over cap — both are layered on later (spec §6/§10).
+ */
+function ciGate(snapshot: IssueSnapshot, settings: RepoSettings): 'fix' | 'pass' {
+  if (!settings.ci.gate) return 'pass';
+  if (snapshot.mr?.ci?.conclusion !== 'failed') return 'pass';
+  if (ciFixRounds(snapshot, settings.botUser) >= CI_MAX_FIX_ROUNDS) return 'pass';
+  return 'fix';
 }
 
 /** Idempotent capacity marker (#53/#29): one label write, then a stable no-op. */
@@ -267,7 +295,14 @@ export function reconcile(input: ReconcileInput): Intent {
       return markQueuedOnce(snapshot, settings, 'new issue queued: no concurrency slot');
 
     case 'in-progress':
-      if (workComplete) return { kind: 'handoff' }; // crash-recovery (AM-1); no slot consumed
+      if (workComplete) {
+        // CI gate (#118): a red head pipeline bounces back to the agent instead of
+        // handing off; otherwise crash-recovery handoff (AM-1; no slot consumed).
+        if (ciGate(snapshot, settings) === 'fix') {
+          return { kind: 'apply-ci-fix', feedback: { reviewComments: snapshot.recentComments } };
+        }
+        return { kind: 'handoff' };
+      }
       return slotAvailable
         ? { kind: 'run-agent', resume: true }
         : { kind: 'none', reason: 'in-progress waiting: no concurrency slot' };

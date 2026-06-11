@@ -103,6 +103,7 @@ const settings: RepoSettings = {
   manageBoard: true,
   labels,
   concurrency: { globalMax: 2, maxActive: 2 },
+  ci: { gate: false }, // #118: gate off keeps both FSMs byte-for-byte (inert divergence)
 };
 
 // --- input grid dimensions ---------------------------------------------------

@@ -26,6 +26,7 @@ export interface RepoSettings {
   manageBoard: boolean;
   labels: LabelNames; // namespaced names for this forge (§0.7)
   concurrency: { globalMax: number; maxActive: number }; // resolved caps; M5 accounts (AM-3)
+  ci: { gate: boolean }; // CI handoff gate (#118); opt-in per WORKFLOW, default off
 }
 
 /** The single source of truth for "should we act on this issue at all". */
@@ -58,6 +59,7 @@ export type Intent =
   | { kind: 'handoff' }
   | { kind: 'poll-review' }
   | { kind: 'apply-changes-requested'; feedback: AgentFeedback }
+  | { kind: 'apply-ci-fix'; feedback: AgentFeedback } // red CI bounced back to the agent (#118)
   | { kind: 'apply-unblock'; feedback: AgentFeedback; role?: AgentRole }
   | { kind: 'merge'; strategy: MergeStrategy; deleteSource: boolean }
   | { kind: 'cleanup' }

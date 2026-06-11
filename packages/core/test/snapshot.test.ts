@@ -75,6 +75,7 @@ function fakePrimitives(over: Partial<ForgePrimitives> = {}): ForgePrimitives {
     approvalBase: async () => ({ approved: false, approvedBy: [], changesRequested: false }),
     blockingThreadAt: async () => undefined,
     lastBotPushAt: async () => undefined,
+    ciStatus: async () => ({ conclusion: 'none' }),
     ...over,
   };
 }
@@ -200,6 +201,27 @@ describe('findMaestroMr', () => {
       '2026-01-05',
     );
     expect(found?.mr.approvals.changesRequested).toBe(false); // addressed → no loop
+  });
+
+  it('attaches the head pipeline CI status to an open MR (#118)', async () => {
+    const found = await findMaestroMr(
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr()],
+        ciStatus: async () => ({ conclusion: 'failed', at: '2026-01-03', webUrl: 'p' }),
+      }),
+    );
+    expect(found?.mr.ci).toEqual({ conclusion: 'failed', at: '2026-01-03', webUrl: 'p' });
+  });
+
+  it('does not read CI for a non-open candidate (short-circuit) (#118)', async () => {
+    const ciStatus = vi.fn(async () => ({ conclusion: 'failed' as const }));
+    const found = await findMaestroMr(
+      42,
+      fakePrimitives({ openMergeRequests: async () => [mr({ state: 'merged' })], ciStatus }),
+    );
+    expect(found?.mr.ci).toBeUndefined();
+    expect(ciStatus).not.toHaveBeenCalled();
   });
 
   it('takes the later of an MR thread and an issue command as the blocking edge', async () => {

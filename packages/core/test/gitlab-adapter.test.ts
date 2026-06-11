@@ -100,7 +100,7 @@ describe('Slice 1 — listAssignedOpenIssues', () => {
 
 // --- Slice 2: getSnapshot --------------------------------------------------
 
-function wireSnapshot(fake: FakeExec, opts: { mr?: boolean; closed?: boolean } = {}) {
+function wireSnapshot(fake: FakeExec, opts: { mr?: boolean; closed?: boolean; ci?: unknown } = {}) {
   // order: specific sub-issue paths before the bare /issues/42
   fake.onApi('GET', '/issues/42/resource_label_events', [
     { id: 1, user: user(5, 'maintainer'), created_at: '2026-06-01T00:00:00Z' },
@@ -122,6 +122,9 @@ function wireSnapshot(fake: FakeExec, opts: { mr?: boolean; closed?: boolean } =
     fake.onApi('GET', '/merge_requests/7/approvals', { approved: false, approved_by: [] });
     fake.onApi('GET', '/repository/commits', []);
     fake.onApi('GET', '/merge_requests/7/discussions', []);
+    // #118 head-pipeline read; registered after the sub-paths so substring matching of the
+    // bare /merge_requests/7 never shadows /approvals or /discussions.
+    fake.onApi('GET', '/merge_requests/7', { ...rawMr(), head_pipeline: opts.ci ?? null });
   }
   fake.onApi('GET', '/issues/42', rawIssue({ state: opts.closed ? 'closed' : 'opened' }));
 }
@@ -144,6 +147,16 @@ describe('Slice 2 — getSnapshot', () => {
     wireSnapshot(fake, { mr: false });
     const snap = await a.getSnapshot(repo, 42);
     expect(snap.mr).toBeUndefined();
+  });
+
+  it('surfaces the head pipeline CI conclusion on the MR (#118)', async () => {
+    const { a, fake } = mk();
+    wireSnapshot(fake, {
+      mr: true,
+      ci: { status: 'failed', web_url: 'p', updated_at: '2026-06-11T10:00:00Z' },
+    });
+    const snap = await a.getSnapshot(repo, 42);
+    expect(snap.mr?.ci).toEqual({ conclusion: 'failed', at: '2026-06-11T10:00:00Z', webUrl: 'p' });
   });
 });
 
@@ -480,6 +493,7 @@ describe('Slice 13 — ApprovalState normalization', () => {
     });
     fake.onApi('GET', '/repository/commits', []);
     fake.onApi('GET', '/merge_requests/7/discussions', []);
+    fake.onApi('GET', '/merge_requests/7', { ...rawMr(), head_pipeline: null }); // #118
     fake.onApi('GET', '/issues/42', rawIssue());
     const snap = await a.getSnapshot(repo, 42);
     expect(snap.mr?.approvals.approved).toBe(true);
@@ -534,6 +548,7 @@ function wireChanges(
     '/merge_requests/7/discussions',
     notes.map((n, i) => ({ id: `d${i + 1}`, notes: [n] })),
   );
+  fake.onApi('GET', '/merge_requests/7', { ...rawMr(), head_pipeline: null }); // #118
   fake.onApi('GET', '/issues/42', rawIssue());
 }
 

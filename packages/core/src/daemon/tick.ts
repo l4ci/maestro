@@ -242,6 +242,10 @@ function beginIntent(
     ctx.log.info('unblock queued: no concurrency slot', { repo: key, iid: issue.iid });
     return { active: false };
   }
+  if (!slotAvailable && intent.kind === 'apply-ci-fix') {
+    ctx.log.info('ci-fix queued: no concurrency slot', { repo: key, iid: issue.iid });
+    return { active: false };
+  }
 
   // poll-review · blocked-wait · none · skip-untrusted · cleanup (pass B owns it):
   // nothing to launch, nothing to claim.
@@ -278,6 +282,7 @@ const SPAWNING_INTENTS: ReadonlySet<Intent['kind']> = new Set([
   'run-review',
   'run-agent',
   'apply-changes-requested',
+  'apply-ci-fix',
   'apply-unblock',
 ]);
 
