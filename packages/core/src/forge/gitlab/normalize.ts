@@ -3,6 +3,7 @@
 
 import type {
   ApprovalState,
+  CiStatus,
   Comment,
   ForgeUser,
   Issue,
@@ -121,6 +122,43 @@ export function normalizeMergeRequest(
     approvals,
     webUrl: raw.web_url,
     ...(closes !== undefined ? { closesIssueIid: closes } : {}),
+  };
+}
+
+/** A GitLab pipeline object (the MR's `head_pipeline`, or a `/pipelines` list entry). */
+export interface RawPipeline {
+  status?: string;
+  web_url?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// GitLab pipeline statuses that are still in flight vs. terminally failed. Everything else
+// terminal (success, skipped, manual) is non-blocking → `success`. (#118)
+const CI_RUNNING = new Set([
+  'created',
+  'waiting_for_resource',
+  'preparing',
+  'pending',
+  'running',
+  'scheduled',
+]);
+const CI_FAILED = new Set(['failed', 'canceled']);
+
+/** GitLab head_pipeline → §0.2 CiStatus (#118). A missing pipeline (or one with no status)
+ *  is `none` — the head commit has no CI, so the gate treats the MR as passing. */
+export function normalizeCiStatus(p: RawPipeline | null | undefined): CiStatus {
+  if (!p?.status) return { conclusion: 'none' };
+  const conclusion = CI_FAILED.has(p.status)
+    ? 'failed'
+    : CI_RUNNING.has(p.status)
+      ? 'running'
+      : 'success';
+  const at = p.updated_at ?? p.created_at;
+  return {
+    conclusion,
+    ...(at ? { at } : {}),
+    ...(p.web_url ? { webUrl: p.web_url } : {}),
   };
 }
 

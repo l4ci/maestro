@@ -7,6 +7,7 @@
 
 import type {
   ApprovalState,
+  CiStatus,
   Comment,
   CreateIssueArgs,
   CreateMRArgs,
@@ -28,8 +29,10 @@ import {
   type RawIssue,
   type RawMr,
   type RawNote,
+  type RawPipeline,
   type RawUser,
   normalizeApprovals,
+  normalizeCiStatus,
   normalizeComment,
   normalizeIssue,
   normalizeMergeRequest,
@@ -436,7 +439,18 @@ export class GitlabAdapter implements ForgeAdapter {
       approvalBase: (mrIid) => this.#approvalState(repo, mrIid),
       blockingThreadAt: (mrIid) => this.#blockingThreadAt(repo, mrIid),
       lastBotPushAt: (mr) => this.#lastBotPushAt(repo, mr.sourceBranch),
+      ciStatus: (mr) => this.#ciStatus(repo, mr.iid),
     };
+  }
+
+  /** Head-commit CI conclusion (#118): the MR detail endpoint carries `head_pipeline`,
+   *  GitLab's canonical pipeline for the source branch's tip. Absent → `none`. */
+  async #ciStatus(repo: RepoRef, mrIid: number): Promise<CiStatus> {
+    const detail = await this.#c.api<{ head_pipeline?: RawPipeline | null }>(
+      'GET',
+      `/projects/${this.#pid(repo)}/merge_requests/${mrIid}`,
+    );
+    return normalizeCiStatus(detail?.head_pipeline);
   }
 
   async #approvalState(repo: RepoRef, mrIid: number): Promise<ApprovalState> {
