@@ -33,6 +33,11 @@ claude:
   permission_mode: bypassPermissions
 concurrency:
   max_active: 2
+ci: # opt-in CI handoff gate (#118/#120). Default off — repos without CI are unaffected.
+  gate: false # true ⇒ hold the human handoff until the head pipeline is conclusive,
+  #            and bounce a failed pipeline back to the agent with the failing logs.
+  wait_timeout_seconds: 1200 # a `running` pipeline older than this hands off anyway (stuck/external CI)
+  max_fix_rounds: 3 # CI-fix bounces since the last human comment before parking as blocked
 ---
 
 # Agent operating protocol

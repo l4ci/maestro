@@ -25,6 +25,10 @@ claude:
   permission_mode: bypassPermissions
 concurrency:
   max_active: 2
+ci: # CI handoff gate (#118/#120); off until Phase-2 lands end-to-end on this repo.
+  gate: false
+  wait_timeout_seconds: 1200
+  max_fix_rounds: 3
 ---
 
 # Agent operating protocol

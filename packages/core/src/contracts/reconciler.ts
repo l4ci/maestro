@@ -26,7 +26,10 @@ export interface RepoSettings {
   manageBoard: boolean;
   labels: LabelNames; // namespaced names for this forge (§0.7)
   concurrency: { globalMax: number; maxActive: number }; // resolved caps; M5 accounts (AM-3)
-  ci: { gate: boolean }; // CI handoff gate (#118); opt-in per WORKFLOW, default off
+  // CI handoff gate (#118/#120); opt-in per WORKFLOW, default off. `waitTimeoutSeconds`:
+  // a `running` head pipeline older than this hands off anyway. `maxFixRounds`: CI-fix
+  // bounces since the last human comment before parking as blocked.
+  ci: { gate: boolean; waitTimeoutSeconds: number; maxFixRounds: number };
 }
 
 /** The single source of truth for "should we act on this issue at all". */

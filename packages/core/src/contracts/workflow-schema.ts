@@ -74,10 +74,22 @@ export const WorkflowSchema = z.object({
     })
     .default({}),
   concurrency: z.object({ max_active: z.number().int().positive() }).default({ max_active: 2 }),
-  // CI gate (#118): opt-in per repo. When true, the daemon holds the human handoff until
-  // the head commit's pipeline is conclusive and bounces a failed pipeline back to the
-  // agent. Default false — repos without CI, or that don't want the gate, are unaffected.
-  ci: z.object({ gate: z.boolean().default(false) }).default({}),
+  // CI gate (#118/#120): opt-in per repo. When `gate` is true, the daemon holds the human
+  // handoff until the head commit's pipeline is conclusive (a `running` pipeline holds the
+  // handoff) and bounces a failed pipeline back to the agent. Default off — repos without
+  // CI, or that don't want the gate, are unaffected.
+  //  - wait_timeout_seconds: a `running` pipeline older than this hands off anyway, so a
+  //    stuck/external CI can't block the handoff forever (seconds, matching
+  //    `claude.stall_timeout_seconds`; default 1200 = 20m).
+  //  - max_fix_rounds: CI-fix bounces allowed since the last human comment before the
+  //    daemon parks the issue as blocked (mirrors review.max_rounds; default 3).
+  ci: z
+    .object({
+      gate: z.boolean().default(false),
+      wait_timeout_seconds: z.number().int().positive().default(1200),
+      max_fix_rounds: z.number().int().positive().default(3),
+    })
+    .default({}),
 });
 
 export type WorkflowFrontMatter = z.infer<typeof WorkflowSchema>;

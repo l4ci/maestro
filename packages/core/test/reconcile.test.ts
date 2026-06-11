@@ -77,8 +77,10 @@ function settings(over: Partial<RepoSettings> = {}): RepoSettings {
     manageBoard: true,
     labels,
     concurrency: { globalMax: 2, maxActive: 2 },
-    ci: { gate: false },
     ...over,
+    // Deep-merge `ci` so a partial override (e.g. `{ ci: { gate: true } }`) keeps the
+    // wait_timeout / max_fix_rounds defaults instead of dropping them (#120).
+    ci: { gate: false, waitTimeoutSeconds: 1200, maxFixRounds: 3, ...over.ci },
   };
 }
 

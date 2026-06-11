@@ -351,7 +351,9 @@ export function defaultSettings(over: Partial<RepoSettings> = {}): RepoSettings 
       workspaces: { root: './workspaces', disk_cap: 1, cleanup: 'lru' },
     } as never,
   });
-  return { ...base, ...over };
+  // Deep-merge `ci` so a partial override (e.g. `{ ci: { gate: true } }`) keeps the
+  // resolved wait_timeout / max_fix_rounds defaults instead of dropping them (#120).
+  return { ...base, ...over, ci: { ...base.ci, ...over.ci } };
 }
 
 export interface BuiltContext {

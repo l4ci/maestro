@@ -76,19 +76,26 @@ describe('D1 — concurrency precedence (operator override > WORKFLOW > implicit
   });
 });
 
-describe('D3 — CI gate opt-in (#118)', () => {
-  it('defaults ci.gate to false', () => {
+describe('D3 — CI gate opt-in (#118 / #120)', () => {
+  it('defaults the full ci block: gate off, wait_timeout 20m, 3 fix rounds', () => {
     const s = resolveRepoSettings({ repo, workflow: workflow(), defaults });
-    expect(s.ci.gate).toBe(false);
+    expect(s.ci).toEqual({ gate: false, waitTimeoutSeconds: 1200, maxFixRounds: 3 });
   });
 
-  it('carries WORKFLOW ci.gate=true through', () => {
+  it('carries the full WORKFLOW ci block through', () => {
     const s = resolveRepoSettings({
       repo,
-      workflow: workflow({ ci: { gate: true } }),
+      workflow: workflow({
+        ci: { gate: true, wait_timeout_seconds: 600, max_fix_rounds: 5 },
+      }),
       defaults,
     });
-    expect(s.ci.gate).toBe(true);
+    expect(s.ci).toEqual({ gate: true, waitTimeoutSeconds: 600, maxFixRounds: 5 });
+  });
+
+  it('fills ci defaults when only gate is set (back-compat with the MVP block)', () => {
+    const s = resolveRepoSettings({ repo, workflow: workflow({ ci: { gate: true } }), defaults });
+    expect(s.ci).toEqual({ gate: true, waitTimeoutSeconds: 1200, maxFixRounds: 3 });
   });
 });
 

@@ -51,6 +51,10 @@ export function resolveRepoSettings({
       globalMax: defaults.concurrency.global_max,
       maxActive: override?.concurrency?.max_active ?? workflow.concurrency.max_active,
     },
-    ci: { gate: workflow.ci.gate },
+    ci: {
+      gate: workflow.ci.gate,
+      waitTimeoutSeconds: workflow.ci.wait_timeout_seconds,
+      maxFixRounds: workflow.ci.max_fix_rounds,
+    },
   };
 }

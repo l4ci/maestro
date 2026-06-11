@@ -103,7 +103,9 @@ const settings: RepoSettings = {
   manageBoard: true,
   labels,
   concurrency: { globalMax: 2, maxActive: 2 },
-  ci: { gate: false }, // #118: gate off keeps both FSMs byte-for-byte (inert divergence)
+  // #118: gate off keeps both FSMs byte-for-byte (inert divergence). Task 4 (#120) wires
+  // the pipeline-FSM handoff site; that becomes a real divergence only when gate is ON.
+  ci: { gate: false, waitTimeoutSeconds: 1200, maxFixRounds: 3 },
 };
 
 // --- input grid dimensions ---------------------------------------------------
