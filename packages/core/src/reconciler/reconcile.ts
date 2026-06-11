@@ -132,6 +132,21 @@ function ciFixIntent(snapshot: IssueSnapshot, settings: RepoSettings): Intent {
   return { kind: 'park-ci-blocked' };
 }
 
+/** The CI-gated handoff decision, shared by BOTH FSMs (#120 task 4): the legacy
+ *  `workComplete → handoff` and the #29 pipeline `passed → handoff`. Bounce/park a red
+ *  pipeline, hold on a running one, otherwise hand off. With `ci.gate` off this is a
+ *  constant `handoff`, so both FSMs stay byte-for-byte for non-opted repos. */
+function ciHandoff(snapshot: IssueSnapshot, settings: RepoSettings, now: string): Intent {
+  switch (ciGate(snapshot, settings, now)) {
+    case 'fix':
+      return ciFixIntent(snapshot, settings);
+    case 'wait':
+      return { kind: 'none', reason: 'ci running — holding handoff (#120)' };
+    case 'pass':
+      return { kind: 'handoff' };
+  }
+}
+
 /** Idempotent capacity marker (#53/#29): one label write, then a stable no-op. */
 function markQueuedOnce(snapshot: IssueSnapshot, settings: RepoSettings, why: string): Intent {
   return snapshot.issue.labels.includes(settings.labels.queued)
@@ -262,7 +277,9 @@ function reconcilePipeline(input: ReconcileInput): Intent {
           if (!slotAvailable) return markQueuedOnce(snapshot, settings, 'review queued: no slot');
           return { kind: 'run-review', rounds: rv.rounds };
         case 'passed':
-          return { kind: 'handoff' }; // idempotent ordered sequence (M4) → review:human
+          // CI gate (#120 task 4): the same handoff gate as the legacy FSM, here at the
+          // pipeline's passed→handoff. Inert when ci.gate is off (idempotent handoff → review:human).
+          return ciHandoff(snapshot, settings, input.now);
         default:
           return assertNever(rv.phase);
       }
@@ -329,15 +346,8 @@ export function reconcile(input: ReconcileInput): Intent {
       if (workComplete) {
         // CI gate (#118/#120): a red head pipeline bounces back to the agent; a running
         // pipeline holds the handoff until it ages out; otherwise crash-recovery handoff
-        // (AM-1; no slot consumed).
-        switch (ciGate(snapshot, settings, input.now)) {
-          case 'fix':
-            return ciFixIntent(snapshot, settings);
-          case 'wait':
-            return { kind: 'none', reason: 'ci running — holding handoff (#120)' };
-          case 'pass':
-            return { kind: 'handoff' };
-        }
+        // (AM-1; no slot consumed). Shared with the pipeline FSM's passed→handoff (task 4).
+        return ciHandoff(snapshot, settings, input.now);
       }
       return slotAvailable
         ? { kind: 'run-agent', resume: true }

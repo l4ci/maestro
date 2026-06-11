@@ -797,6 +797,53 @@ describe('R — internal review gate (#29 P3)', () => {
   });
 });
 
+// --- D4 — CI gate at the #29 pipeline passed → handoff (rolesDeclared) -------
+
+describe('CI gate at the pipeline handoff (#120 task 4)', () => {
+  const DONE = '<!-- maestro:proof:done -->';
+  const PASS = '<!-- maestro:review-pass -->';
+  const comment = (author: string, body: string, createdAt: string): Comment => ({
+    id: `c-${createdAt}`,
+    author: user(author),
+    body,
+    createdAt,
+  });
+  // A passed internal review (PASS marker after a DONE proof) on a draft MR is the
+  // pipeline's passed → handoff transition — the gate's second site.
+  const passedComments = (): Comment[] => [
+    comment(BOT, `lgtm ${PASS}`, '2026-06-05T11:00:00Z'),
+    comment(BOT, `proof ok ${DONE}`, '2026-06-05T10:00:00Z'),
+  ];
+  const atPipelineHandoff = (
+    ci: MergeRequest['ci'],
+    over: { gate?: boolean; now?: string } = {},
+  ): ReconcileInput =>
+    buildInput({
+      rolesDeclared: true,
+      now: over.now ?? '2026-06-11T10:00:00Z',
+      settings: settings({ ci: { gate: over.gate ?? true } }),
+      snapshot: snapshot({ mr: mr({ isDraft: true, ci }), recentComments: passedComments() }),
+    });
+
+  it('gate off: a failed pipeline still hands off (legacy parity, gate inert)', () => {
+    expect(reconcile(atPipelineHandoff({ conclusion: 'failed' }, { gate: false })).kind).toBe(
+      'handoff',
+    );
+  });
+
+  it('gate on, passed review + green CI: hands off', () => {
+    expect(reconcile(atPipelineHandoff({ conclusion: 'success' })).kind).toBe('handoff');
+  });
+
+  it('gate on, passed review but failed CI: bounces with apply-ci-fix', () => {
+    expect(reconcile(atPipelineHandoff({ conclusion: 'failed' })).kind).toBe('apply-ci-fix');
+  });
+
+  it('gate on, passed review but running CI: holds the handoff (none)', () => {
+    expect(reconcile(atPipelineHandoff({ conclusion: 'running' })).kind).toBe('none');
+  });
+});
+
 // --- CI gate (#118) — legacy FSM, the workComplete → handoff transition -----
 
 describe('CI gate at handoff (#118/#120)', () => {

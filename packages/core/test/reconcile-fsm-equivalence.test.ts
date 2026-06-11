@@ -51,6 +51,17 @@
 //      construction. The daemon's label projections keep real snapshots consistent
 //      at fixpoints.
 //
+//  D4 — CI handoff gate (#120). Both FSMs gate their handoff transition on the head
+//      pipeline (legacy `workComplete → handoff`, pipeline `passed → handoff`) via the
+//      SAME `ciHandoff` helper, so a red/running pipeline can yield apply-ci-fix /
+//      park-ci-blocked / none instead of handoff. This grid fixes `ci.gate: false`, under
+//      which `ciHandoff` is a constant `handoff` — so D4 is INERT here and both FSMs stay
+//      byte-for-byte. It is documented, not silent: the gate-on behavior at each site is
+//      pinned directly in reconcile.test.ts ("CI gate at handoff" and "CI gate at the
+//      pipeline handoff"). Were the grid run gate-on, the gate fires at each FSM's own
+//      completion signal (workComplete vs the marker-derived `passed`), so the red-CI
+//      divergence rides inside D1's existing completion-signal window, not a new row.
+//
 // Everything else — terminal/cleanup, trigger guard, blocked modifier (incl. the
 // edge-triggered unblock and reply threading), new/todo queueing, the whole
 // review:human row (merge / changes-requested / poll) — is asserted strictly equal.
