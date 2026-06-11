@@ -25,10 +25,10 @@ claude:
   permission_mode: bypassPermissions
 concurrency:
   max_active: 2
-ci: # CI handoff gate (#118/#120); off until Phase-2 lands end-to-end on this repo.
-  gate: false
-  wait_timeout_seconds: 1200
-  max_fix_rounds: 3
+ci: # CI handoff gate (#118/#120). On: this repo's CI (build + typecheck + test + lint)
+  gate: true #          runs on every branch push, so hold the handoff until it's green.
+  wait_timeout_seconds: 1200 # hand off anyway if a run is stuck past 20m
+  max_fix_rounds: 3 #          red-CI bounces before parking the ticket as blocked
 ---
 
 # Agent operating protocol
