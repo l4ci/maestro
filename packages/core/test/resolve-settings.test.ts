@@ -76,6 +76,22 @@ describe('D1 — concurrency precedence (operator override > WORKFLOW > implicit
   });
 });
 
+describe('D3 — CI gate opt-in (#118)', () => {
+  it('defaults ci.gate to false', () => {
+    const s = resolveRepoSettings({ repo, workflow: workflow(), defaults });
+    expect(s.ci.gate).toBe(false);
+  });
+
+  it('carries WORKFLOW ci.gate=true through', () => {
+    const s = resolveRepoSettings({
+      repo,
+      workflow: workflow({ ci: { gate: true } }),
+      defaults,
+    });
+    expect(s.ci.gate).toBe(true);
+  });
+});
+
 describe('D2 — TriggerGuard mapping fidelity (§13.1 → §0.4)', () => {
   it('maps default trigger to {requireLabel:null, allowedActors:[]}', () => {
     const s = resolveRepoSettings({ repo, workflow: workflow(), defaults });

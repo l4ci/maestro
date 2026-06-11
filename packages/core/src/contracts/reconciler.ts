@@ -26,6 +26,7 @@ export interface RepoSettings {
   manageBoard: boolean;
   labels: LabelNames; // namespaced names for this forge (§0.7)
   concurrency: { globalMax: number; maxActive: number }; // resolved caps; M5 accounts (AM-3)
+  ci: { gate: boolean }; // CI handoff gate (#118); opt-in per WORKFLOW, default off
 }
 
 /** The single source of truth for "should we act on this issue at all". */

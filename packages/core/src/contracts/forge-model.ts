@@ -54,6 +54,18 @@ export interface MergeRequest {
   webUrl: string;
   /** linkage back to the issue this MR Closes (parsed from body or API), if resolvable */
   closesIssueIid?: number;
+  /** CI conclusion for the head commit of sourceBranch (#118). Absent when the adapter
+   *  did not fetch it; `conclusion: 'none'` means the head commit has no pipeline. */
+  ci?: CiStatus;
+}
+
+/** The head commit's CI conclusion (#118). Read directly off world state — a fresh push
+ *  changes the head sha, yielding a new pipeline and a `running` conclusion the gate holds
+ *  on. `none` = no pipeline for this commit (repos without CI are unaffected). */
+export interface CiStatus {
+  conclusion: 'success' | 'failed' | 'running' | 'none';
+  at?: string; // ISO 8601; when the conclusion was reached/updated (round-cap + timeout window)
+  webUrl?: string; // link to the pipeline/run, surfaced in the CI-fix comment
 }
 
 export interface ApprovalState {

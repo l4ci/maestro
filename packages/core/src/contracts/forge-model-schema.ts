@@ -11,7 +11,14 @@
 // validation — only the schema/type pair must move together.
 
 import { z } from 'zod';
-import type { ApprovalState, Comment, ForgeUser, Issue, MergeRequest } from './forge-model.js';
+import type {
+  ApprovalState,
+  CiStatus,
+  Comment,
+  ForgeUser,
+  Issue,
+  MergeRequest,
+} from './forge-model.js';
 
 export const ForgeUserSchema = z.object({
   username: z.string(),
@@ -38,6 +45,12 @@ export const ApprovalStateSchema = z.object({
   changesRequested: z.boolean(),
 });
 
+export const CiStatusSchema = z.object({
+  conclusion: z.enum(['success', 'failed', 'running', 'none']),
+  at: z.string().optional(),
+  webUrl: z.string().optional(),
+});
+
 export const MergeRequestSchema = z.object({
   iid: z.number(),
   id: z.string(),
@@ -53,6 +66,7 @@ export const MergeRequestSchema = z.object({
   approvals: ApprovalStateSchema,
   webUrl: z.string(),
   closesIssueIid: z.number().optional(),
+  ci: CiStatusSchema.optional(),
 });
 
 export const CommentSchema = z.object({
@@ -80,6 +94,7 @@ type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B 
   ? true
   : false;
 
+true satisfies Equals<Norm<z.infer<typeof CiStatusSchema>>, Norm<CiStatus>>;
 true satisfies Equals<Norm<z.infer<typeof ForgeUserSchema>>, Norm<ForgeUser>>;
 true satisfies Equals<Norm<z.infer<typeof IssueSchema>>, Norm<Issue>>;
 true satisfies Equals<Norm<z.infer<typeof ApprovalStateSchema>>, Norm<ApprovalState>>;

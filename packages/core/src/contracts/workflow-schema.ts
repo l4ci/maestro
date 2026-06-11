@@ -74,6 +74,10 @@ export const WorkflowSchema = z.object({
     })
     .default({}),
   concurrency: z.object({ max_active: z.number().int().positive() }).default({ max_active: 2 }),
+  // CI gate (#118): opt-in per repo. When true, the daemon holds the human handoff until
+  // the head commit's pipeline is conclusive and bounces a failed pipeline back to the
+  // agent. Default false — repos without CI, or that don't want the gate, are unaffected.
+  ci: z.object({ gate: z.boolean().default(false) }).default({}),
 });
 
 export type WorkflowFrontMatter = z.infer<typeof WorkflowSchema>;
