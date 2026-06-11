@@ -493,6 +493,11 @@ claude:                        # how the agent runs
 
 concurrency:
   max_active: 2                # most tickets this one repo will work at once
+
+ci:                            # gate the handoff on the head commit's pipeline (default off)
+  gate: false                  #   true: hold the handoff until CI is conclusive, bounce red CI back to the agent
+  wait_timeout_seconds: 1200   #   a pipeline still running after this hands off anyway (stuck/external CI)
+  max_fix_rounds: 3            #   red-CI bounces before the ticket is parked as blocked for a human
 ---
 ```
 
@@ -518,6 +523,18 @@ The blocks worth understanding:
   `health_check` to know it's ready.
 - **`git`** lets each repo keep its own merge habits — Maestro never imposes one
   global rule.
+- **`ci`** is an opt-in extra gate (off by default). With `gate: true`, Maestro
+  reads the head commit's pipeline before handing off: a **passing** pipeline hands
+  off as usual, a **running** one *holds* the handoff (so you're never pinged
+  seconds before CI goes red) until it ages past `wait_timeout_seconds`, and a
+  **failed** one bounces straight back to the agent with the failing job logs
+  threaded in as context. After `max_fix_rounds` red bounces (counted since your
+  last comment, so any reply resets it) the ticket parks as blocked for you, the
+  same way the internal-review cap does. Works on GitLab pipelines and GitHub
+  check-runs; repos without CI are unaffected. While in review, a pipeline that
+  *regresses* (the target branch moved, someone pushed) bounces the same way —
+  but an approval still merges, so your branch-protection rules own merge-time
+  enforcement.
 
 ### The prompt body — the agent's instructions
 
