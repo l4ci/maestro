@@ -130,13 +130,6 @@ function wireSnapshot(
   fake.onApi('GET', '/issues/42', rawIssue({ state: opts.closed ? 'closed' : 'open' }));
 }
 
-/** CI status (#120): findMaestroMr reads check-runs + combined status for every open
- *  candidate. Default to inert (no CI) so snapshot tests that don't care needn't wire it. */
-function wireInertCi(fake: FakeExec): void {
-  fake.onApi('GET', '/check-runs', { total_count: 0, check_runs: [] });
-  fake.onApi('GET', '/status', { state: 'pending', total_count: 0 });
-}
-
 describe('Slice 2 — getSnapshot', () => {
   it('assembles issue + maestro PR + newest-first capped comments + lastActor', async () => {
     const { a, fake } = mk();
@@ -173,7 +166,7 @@ describe('Slice 2 — getSnapshot', () => {
         ],
       },
     });
-    const snap = await a.getSnapshot(repo, 42);
+    const snap = await a.getSnapshot(repo, 42, true); // ciGate on
     expect(snap.mr?.ci).toEqual({
       conclusion: 'failed',
       at: '2026-06-11T10:00:00Z',
@@ -183,6 +176,14 @@ describe('Slice 2 — getSnapshot', () => {
     expect(fake.callsTo('GET', '/check-runs')[0]?.args.join(' ')).toContain(
       'maestro%2Fissue-42-add-oauth-login',
     );
+  });
+
+  it('skips the check-runs read when the CI gate is off (#120)', async () => {
+    const { a, fake } = mk();
+    wireSnapshot(fake, { pr: true });
+    const snap = await a.getSnapshot(repo, 42); // gate off (default)
+    expect(snap.mr?.ci).toBeUndefined();
+    expect(fake.callsTo('GET', '/check-runs')).toHaveLength(0);
   });
 
   it('ciFailureLogs: gathers failed check-run output, keyed on head_sha (#120)', async () => {
@@ -605,7 +606,6 @@ describe('Slice 13 — ApprovalState from PR reviews', () => {
     fake.onApi('GET', '/issues/7/comments', []);
     fake.onApi('GET', '/pulls', [rawPr()]);
     fake.onApi('GET', '/issues/42', rawIssue());
-    wireInertCi(fake);
     const snap = await a.getSnapshot(repo, 42);
     expect(snap.mr?.approvals.approved).toBe(true);
     expect(snap.mr?.approvals.approvedBy[0]?.username).toBe('maintainer');
@@ -639,7 +639,6 @@ describe('Slice 13 — ApprovalState from PR reviews', () => {
     fake.onApi('GET', '/issues/7/comments', []);
     fake.onApi('GET', '/pulls', [rawPr()]);
     fake.onApi('GET', '/issues/42', rawIssue());
-    wireInertCi(fake);
     expect((await a.getSnapshot(repo, 42)).mr?.approvals.approved).toBe(false);
   });
 });
@@ -692,7 +691,6 @@ function wireReviews(
   );
   fake.onApi('GET', '/pulls', [rawPr()]);
   fake.onApi('GET', '/issues/42', rawIssue());
-  wireInertCi(fake);
 }
 
 describe('Slice 14 — changesRequested edge-trigger (§0.3)', () => {

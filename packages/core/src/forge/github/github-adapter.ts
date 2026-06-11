@@ -128,9 +128,9 @@ export class GithubAdapter implements ForgeAdapter {
     return raw.filter((i) => i.pull_request === undefined).map(normalizeIssue);
   }
 
-  async getSnapshot(repo: RepoRef, issueIid: number): Promise<IssueSnapshot> {
-    return this.#snapMemo.get(`${repo.url}-${issueIid}`, () =>
-      assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap),
+  async getSnapshot(repo: RepoRef, issueIid: number, ciGate = false): Promise<IssueSnapshot> {
+    return this.#snapMemo.get(`${repo.url}-${issueIid}-${ciGate}`, () =>
+      assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap, ciGate),
     );
   }
 

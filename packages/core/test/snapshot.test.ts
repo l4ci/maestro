@@ -203,22 +203,38 @@ describe('findMaestroMr', () => {
     expect(found?.mr.approvals.changesRequested).toBe(false); // addressed → no loop
   });
 
-  it('attaches the head pipeline CI status to an open MR (#118)', async () => {
+  it('attaches the head pipeline CI status to an open MR when the gate is on (#118/#120)', async () => {
     const found = await findMaestroMr(
       42,
       fakePrimitives({
         openMergeRequests: async () => [mr()],
         ciStatus: async () => ({ conclusion: 'failed', at: '2026-01-03', webUrl: 'p' }),
       }),
+      undefined,
+      true, // ciGate on
     );
     expect(found?.mr.ci).toEqual({ conclusion: 'failed', at: '2026-01-03', webUrl: 'p' });
   });
 
-  it('does not read CI for a non-open candidate (short-circuit) (#118)', async () => {
+  it('does not read CI when the gate is off, even for an open candidate (#120)', async () => {
+    const ciStatus = vi.fn(async () => ({ conclusion: 'failed' as const }));
+    const found = await findMaestroMr(
+      42,
+      fakePrimitives({ openMergeRequests: async () => [mr()], ciStatus }),
+      undefined,
+      false, // ciGate off (also the default)
+    );
+    expect(found?.mr.ci).toBeUndefined();
+    expect(ciStatus).not.toHaveBeenCalled();
+  });
+
+  it('does not read CI for a non-open candidate even with the gate on (short-circuit) (#118)', async () => {
     const ciStatus = vi.fn(async () => ({ conclusion: 'failed' as const }));
     const found = await findMaestroMr(
       42,
       fakePrimitives({ openMergeRequests: async () => [mr({ state: 'merged' })], ciStatus }),
+      undefined,
+      true, // gate on — the merged state, not the gate, is what short-circuits
     );
     expect(found?.mr.ci).toBeUndefined();
     expect(ciStatus).not.toHaveBeenCalled();

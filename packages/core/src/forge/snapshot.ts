@@ -85,8 +85,9 @@ export interface ForgePrimitives {
    *  commit post-dating the blocking signal counts as the feedback being addressed (issue #5). */
   lastBotPushAt(mr: MergeRequest): Promise<string | undefined>;
   /** Head-commit pipeline conclusion for the MR's source branch (#118). `none` when the
-   *  head commit has no pipeline. Read only for an OPEN candidate (the gate only fires at
-   *  the handoff of in-flight work); the snapshot short-circuits it otherwise. */
+   *  head commit has no pipeline. Read only for an OPEN candidate AND only when the repo
+   *  opts into the gate (#120) — the gate only fires at the handoff of in-flight work; the
+   *  snapshot short-circuits it otherwise. */
   ciStatus(mr: MergeRequest): Promise<CiStatus>;
 }
 
@@ -114,6 +115,7 @@ export async function findMaestroMr(
   issueIid: number,
   prim: ForgePrimitives,
   issueBlockingAt?: string,
+  ciGate = false,
 ): Promise<{ mr: MergeRequest; activityAt?: MrActivity } | undefined> {
   const pool = await prim.openMergeRequests(issueIid);
   const prefix = `maestro/issue-${issueIid}-`;
@@ -138,9 +140,10 @@ export async function findMaestroMr(
   const lastBotPushAt = blockingAt === undefined ? undefined : await prim.lastBotPushAt(candidate);
   const changesRequested = computeChangesRequested(blockingAt, lastBotPushAt);
   const activityAt = newestMrActivity(blockingAt, lastBotPushAt);
-  // CI status (#118): only an OPEN candidate can reach the handoff gate, so a closed/merged
-  // match never pays the pipeline read. The reconciler ignores it unless the repo opts in.
-  const ci = candidate.state === 'opened' ? await prim.ciStatus(candidate) : undefined;
+  // CI status (#118/#120): gated twice — only when the repo opts into the gate (`ciGate`)
+  // AND only for an OPEN candidate (a closed/merged match never reaches the handoff). A
+  // gate-off repo pays NO pipeline read; the reconciler treats an absent ci as `none`.
+  const ci = ciGate && candidate.state === 'opened' ? await prim.ciStatus(candidate) : undefined;
   return {
     mr: { ...candidate, approvals: { ...base, changesRequested }, ...(ci ? { ci } : {}) },
     ...(activityAt ? { activityAt } : {}),
@@ -177,6 +180,7 @@ export async function assembleSnapshot(
   issueIid: number,
   prim: ForgePrimitives,
   commentCap: number,
+  ciGate = false,
 ): Promise<IssueSnapshot> {
   const issue = await prim.issue(issueIid);
   const lastActor = await prim.lastActor(issueIid);
@@ -201,7 +205,7 @@ export async function assembleSnapshot(
 
   // Comments are read BEFORE the MR so the issue-thread /maestro signal can feed the MR's
   // changes-requested edge (shared-account rework on the issue thread, self-clearing on push).
-  const found = await findMaestroMr(issueIid, prim, issueCommandAt(recentComments));
+  const found = await findMaestroMr(issueIid, prim, issueCommandAt(recentComments), ciGate);
   // The CHOSEN MR is validated after its approvals are filled, covering both the
   // openMergeRequests and approvalBase primitives. The rest of the candidate pool is
   // not — on GitHub it is repo-wide, and other issues' MRs are other ticks' business.

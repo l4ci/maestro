@@ -155,8 +155,18 @@ describe('Slice 2 — getSnapshot', () => {
       mr: true,
       ci: { status: 'failed', web_url: 'p', updated_at: '2026-06-11T10:00:00Z' },
     });
-    const snap = await a.getSnapshot(repo, 42);
+    const snap = await a.getSnapshot(repo, 42, true); // ciGate on
     expect(snap.mr?.ci).toEqual({ conclusion: 'failed', at: '2026-06-11T10:00:00Z', webUrl: 'p' });
+  });
+
+  it('skips the head-pipeline read when the CI gate is off (#120)', async () => {
+    const { a, fake } = mk();
+    wireSnapshot(fake, {
+      mr: true,
+      ci: { status: 'failed', web_url: 'p', updated_at: '2026-06-11T10:00:00Z' },
+    });
+    const snap = await a.getSnapshot(repo, 42); // gate off (default)
+    expect(snap.mr?.ci).toBeUndefined();
   });
 
   it('ciFailureLogs: concatenates failed-job traces, keyed on the head sha (#120)', async () => {

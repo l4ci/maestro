@@ -35,8 +35,11 @@ export interface ForgeAdapter {
   // --- discovery ---
   /** Open issues assigned to bot_user in this repo. Drives active lifecycle. */
   listAssignedOpenIssues(repo: RepoRef): Promise<Issue[]>;
-  /** Full snapshot for one issue (issue + its maestro MR + recent comments). */
-  getSnapshot(repo: RepoRef, issueIid: number): Promise<IssueSnapshot>;
+  /** Full snapshot for one issue (issue + its maestro MR + recent comments). `ciGate`
+   *  (default false) opts into the head-pipeline CI read for an open maestro MR — only the
+   *  daemon, and only when the repo's `ci.gate` is on, needs it (#120); every other caller
+   *  skips the extra per-tick API call. */
+  getSnapshot(repo: RepoRef, issueIid: number, ciGate?: boolean): Promise<IssueSnapshot>;
   /** State of ONE issue by iid regardless of open/closed — used by the cleanup sweep (§0.5). */
   getIssueState(repo: RepoRef, issueIid: number): Promise<'open' | 'closed' | 'missing'>;
   /** Open issues carrying a label — the sweep uses it to retract stale maestro:todo

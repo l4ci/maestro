@@ -136,7 +136,9 @@ export async function evaluateLifecycle(
     if (!claim) continue;
     let launched: { active: boolean; promise?: Promise<void> } = { active: false };
     try {
-      const snapshot = await ctx.adapter.getSnapshot(repo, iid);
+      // Pass the repo's CI-gate opt-in so the snapshot fetches the head pipeline only when
+      // the gate is on (#120) — a gate-off repo pays no per-tick pipeline read.
+      const snapshot = await ctx.adapter.getSnapshot(repo, iid, ctx.settings.ci.gate);
       // #86: refresh the commit-derived progress mirror on EVERY due tick the issue has a
       // maestro MR — independent of the intent (a poll-review no-op still refreshes), so a
       // session that died before emitting `mrDescription` still leaves "where it's at" on
