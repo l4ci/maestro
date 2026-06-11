@@ -6,7 +6,7 @@
 // suites, which run the same code through the tick.
 
 import { describe, expect, it, vi } from 'vitest';
-import { MR_COMMAND_REPLY_SENTINEL } from '../src/contracts/index.js';
+import { CI_FAIL_SENTINEL, MR_COMMAND_REPLY_SENTINEL } from '../src/contracts/index.js';
 import type { ExecutorContext, ExecutorWorkspace } from '../src/daemon/executor.js';
 import { executeIntent, executeMrCommand } from '../src/daemon/executor.js';
 import {
@@ -170,6 +170,30 @@ describe('executeIntent through a from-scratch ExecutorContext (#105)', () => {
     expect(workspace.calls[0]).toBe('ensureWorkspace');
     // the review feedback — not the snapshot comments — reached the agent
     expect(runner.inputs[0]?.context.recentComments.map((c) => c.body)).toEqual(['rename it']);
+  });
+
+  it('apply-ci-fix: posts the CI-failure marker, then runs the agent with it in context (#118)', async () => {
+    const adapter = recordingAdapter({ snapshot: makeSnapshot() });
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    const { ctx } = executorContext({ adapter, runner });
+    const snap = makeSnapshot({ mr: { ci: { conclusion: 'failed', webUrl: 'https://ci/9' } } });
+
+    await executeIntent(
+      { kind: 'apply-ci-fix', feedback: { reviewComments: snap.recentComments } },
+      snap,
+      ctx,
+    );
+
+    // the failure marker is posted on the issue thread (drives the round cap + visibility)
+    expect(adapter.calls).toContain('commentIssue');
+    expect(adapter.issueComments.some((c) => c.body.includes(CI_FAIL_SENTINEL))).toBe(true);
+    // no lifecycle flip — the issue stays in-progress
+    expect(adapter.labelOps).toEqual([]);
+    // the agent ran, and saw the CI failure in its context
+    expect(runner.inputs).toHaveLength(1);
+    expect(
+      runner.inputs[0]?.context.recentComments.some((c) => c.body.includes(CI_FAIL_SENTINEL)),
+    ).toBe(true);
   });
 
   it('non-acting kinds are no-ops', async () => {

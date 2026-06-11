@@ -13,6 +13,7 @@
 import {
   AC_DRAFT_SENTINEL,
   type AgentResult,
+  CI_FAIL_SENTINEL,
   type Comment,
   type Exec,
   type ForgeAdapter,
@@ -138,6 +139,8 @@ export async function executeIntent(
       return runReview(intent, snapshot, ctx);
     case 'apply-changes-requested':
       return runApplyChanges(intent, snapshot, ctx);
+    case 'apply-ci-fix':
+      return runApplyCiFix(intent, snapshot, ctx);
     case 'apply-unblock':
       return runApplyUnblock(intent, snapshot, ctx);
     case 'mark-queued':
@@ -331,6 +334,40 @@ async function runApplyChanges(
 ): Promise<void> {
   await applyIntentMove('apply-changes-requested', snapshot, ctx);
   await runAgent(snapshot, snapshot.mr, intent.feedback.reviewComments, ctx);
+}
+
+/** The CI-failure comment (#118): the round-cap marker AND the next cold session's context.
+ *  Leads with a human-readable heading + the pipeline link; the sentinel is what the
+ *  reconciler counts and the daemon would key idempotency on. */
+function ciFailComment(mr: MergeRequest | undefined): string {
+  const link = mr?.ci?.webUrl ? ` ([pipeline](${mr.ci.webUrl}))` : '';
+  return [
+    `### 🔴 CI failed${link}`,
+    '',
+    "The head commit's pipeline failed. Re-run the failing checks in the workspace, fix the cause, and push — the gate re-evaluates on the new pipeline.",
+    '',
+    CI_FAIL_SENTINEL,
+  ].join('\n');
+}
+
+/** Red CI bounced back to the agent (#118): post the failure marker on the issue thread,
+ *  then resume the agent with that marker threaded into context. No lifecycle flip — the
+ *  issue is already in-progress; the marker on the forge both feeds the cold session and
+ *  makes the round cap derivable read-only (mirror of runApplyChanges, sans the label move). */
+async function runApplyCiFix(
+  intent: Extract<Intent, { kind: 'apply-ci-fix' }>,
+  snapshot: IssueSnapshot,
+  ctx: ExecutorContext,
+): Promise<void> {
+  const body = ciFailComment(snapshot.mr);
+  await ctx.adapter.commentIssue(snapshot.repo, snapshot.issue.iid, body);
+  const marker: Comment = {
+    id: `ci-fail-${snapshot.issue.iid}`,
+    author: { username: ctx.settings.botUser, id: ctx.settings.botUser },
+    body,
+    createdAt: new Date().toISOString(),
+  };
+  await runAgent(snapshot, snapshot.mr, [marker, ...intent.feedback.reviewComments], ctx);
 }
 
 /** Maintainer answered a blocked issue: flip blocked→in-progress, then run the agent with
