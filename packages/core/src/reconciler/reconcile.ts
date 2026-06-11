@@ -86,19 +86,40 @@ function ciFixRounds(snapshot: IssueSnapshot, botUser: string): number {
     .length;
 }
 
+/** Has the ISO timestamp `at` aged past `timeoutSeconds` relative to the tick's `now`?
+ *  A missing or unparseable `at`/`now` reads as NOT-yet-aged (hold), so a malformed
+ *  pipeline timestamp never short-circuits the wait into a premature handoff (fail-safe). */
+function agedPast(at: string, timeoutSeconds: number, now: string): boolean {
+  const a = Date.parse(at);
+  const n = Date.parse(now);
+  if (Number.isNaN(a) || Number.isNaN(n)) return false;
+  return n - a > timeoutSeconds * 1000;
+}
+
 /**
- * The CI handoff gate (#118), MVP cut: opt-in per repo (`ci.gate`). A repo that doesn't
- * opt in, has no pipeline for the head commit (`none`), whose pipeline passed, or that is
- * still `running` (no wait in the MVP) hands off as before. A `failed` head pipeline
- * bounces back to the agent (`fix`) until the round cap, then hands off anyway. The full
- * design adds a `wait` arm (hold on `running` with a timeout) and a `blocked` escalation
- * over cap — both are layered on later (spec §6/§10).
+ * The CI handoff gate (#118/#120): opt-in per repo (`ci.gate`), a three-way read of the
+ * head-commit pipeline straight off world state. A repo that doesn't opt in, has no
+ * pipeline (`none`), or whose pipeline passed hands off (`pass`). A `failed` pipeline
+ * bounces back to the agent (`fix`) until the round cap, then hands off anyway. A `running`
+ * pipeline HOLDS the handoff (`wait`) until it ages past `ci.wait_timeout`, after which a
+ * stuck/external pipeline hands off anyway (`pass`). The `blocked` escalation over the
+ * round cap is layered on in task 2 (spec §6).
  */
-function ciGate(snapshot: IssueSnapshot, settings: RepoSettings): 'fix' | 'pass' {
+function ciGate(
+  snapshot: IssueSnapshot,
+  settings: RepoSettings,
+  now: string,
+): 'fix' | 'wait' | 'pass' {
   if (!settings.ci.gate) return 'pass';
-  if (snapshot.mr?.ci?.conclusion !== 'failed') return 'pass';
-  if (ciFixRounds(snapshot, settings.botUser) >= CI_MAX_FIX_ROUNDS) return 'pass';
-  return 'fix';
+  const ci = snapshot.mr?.ci;
+  const conclusion = ci?.conclusion ?? 'none';
+  if (conclusion === 'running') {
+    return ci?.at && agedPast(ci.at, settings.ci.waitTimeoutSeconds, now) ? 'pass' : 'wait';
+  }
+  if (conclusion === 'failed' && ciFixRounds(snapshot, settings.botUser) < CI_MAX_FIX_ROUNDS) {
+    return 'fix';
+  }
+  return 'pass'; // success | none | failed-over-cap
 }
 
 /** Idempotent capacity marker (#53/#29): one label write, then a stable no-op. */
@@ -296,12 +317,17 @@ export function reconcile(input: ReconcileInput): Intent {
 
     case 'in-progress':
       if (workComplete) {
-        // CI gate (#118): a red head pipeline bounces back to the agent instead of
-        // handing off; otherwise crash-recovery handoff (AM-1; no slot consumed).
-        if (ciGate(snapshot, settings) === 'fix') {
-          return { kind: 'apply-ci-fix', feedback: { reviewComments: snapshot.recentComments } };
+        // CI gate (#118/#120): a red head pipeline bounces back to the agent; a running
+        // pipeline holds the handoff until it ages out; otherwise crash-recovery handoff
+        // (AM-1; no slot consumed).
+        switch (ciGate(snapshot, settings, input.now)) {
+          case 'fix':
+            return { kind: 'apply-ci-fix', feedback: { reviewComments: snapshot.recentComments } };
+          case 'wait':
+            return { kind: 'none', reason: 'ci running — holding handoff (#120)' };
+          case 'pass':
+            return { kind: 'handoff' };
         }
-        return { kind: 'handoff' };
       }
       return slotAvailable
         ? { kind: 'run-agent', resume: true }

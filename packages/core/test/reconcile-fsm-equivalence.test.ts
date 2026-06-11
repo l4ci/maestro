@@ -257,6 +257,7 @@ function* enumerateGrid(): Generator<GridCase> {
                             slotAvailable,
                             workspaceExists,
                             workComplete,
+                            now: '2026-06-11T10:00:00Z',
                           },
                         };
                       }

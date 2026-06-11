@@ -151,6 +151,7 @@ export async function evaluateLifecycle(
         workspaceExists: ctx.workspace.workspaceExists(repo, iid),
         workComplete: detectWorkComplete(snapshot),
         rolesDeclared: declaresRoles(ctx.promptBody), // #29 pipeline opt-in per repo
+        now: new Date().toISOString(), // tick clock for the CI wait_timeout gate (#120)
       });
       launched = beginIntent(intent, snapshot, ctx, key, claim, slotAvailable);
       if (launched.active) active = true;

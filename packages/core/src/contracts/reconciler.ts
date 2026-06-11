@@ -45,6 +45,10 @@ export interface ReconcileInput {
   /** Does the repo's WORKFLOW body declare `## role:` sections? Gates the #29 per-stage
    *  pipeline; false (or absent) keeps the legacy generalist FSM. */
   rolesDeclared?: boolean;
+  /** This tick's wall-clock as an ISO 8601 string (#120). The reconciler stays pure — the
+   *  daemon supplies the clock so the CI `wait_timeout` (a `running` pipeline aged past the
+   *  bound hands off anyway) can be evaluated inside `ciGate` without I/O. */
+  now: string;
 }
 
 export interface AgentFeedback {

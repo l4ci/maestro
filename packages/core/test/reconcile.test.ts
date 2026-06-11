@@ -95,6 +95,7 @@ function buildInput(over: Partial<ReconcileInput> = {}): ReconcileInput {
     slotAvailable: true,
     workspaceExists: false,
     workComplete: false,
+    now: '2026-06-11T10:00:00Z',
     ...over,
   };
 }
@@ -798,7 +799,7 @@ describe('R — internal review gate (#29 P3)', () => {
 
 // --- CI gate (#118) — legacy FSM, the workComplete → handoff transition -----
 
-describe('CI gate at handoff (#118)', () => {
+describe('CI gate at handoff (#118/#120)', () => {
   const cmt = (author: string, body: string, createdAt: string): Comment => ({
     id: `c-${createdAt}`,
     author: user(author),
@@ -809,10 +810,11 @@ describe('CI gate at handoff (#118)', () => {
   // in-progress + workComplete (agent done, proof posted) is the handoff gate.
   const atHandoff = (
     ci: MergeRequest['ci'],
-    over: { gate?: boolean; comments?: Comment[] } = {},
+    over: { gate?: boolean; comments?: Comment[]; now?: string } = {},
   ): ReconcileInput =>
     buildInput({
       workComplete: true,
+      now: over.now ?? '2026-06-11T10:00:00Z',
       settings: settings({ ci: { gate: over.gate ?? true } }),
       snapshot: snapshot({
         issue: issue({ labels: [labels.inProgress] }),
@@ -864,5 +866,38 @@ describe('CI gate at handoff (#118)', () => {
       ),
     );
     expect(out.kind).toBe('apply-ci-fix');
+  });
+
+  // --- running → wait + wait_timeout (#120 task 1) ---------------------------
+  it('gate on, pipeline running with no `at`: holds the handoff (none)', () => {
+    const out = reconcile(atHandoff({ conclusion: 'running' }));
+    expect(out.kind).toBe('none');
+  });
+
+  it('gate on, running and younger than wait_timeout: holds the handoff (none)', () => {
+    // default wait_timeout is 1200s (20m); 5m old ⇒ still waiting.
+    const out = reconcile(
+      atHandoff(
+        { conclusion: 'running', at: '2026-06-11T09:55:00Z' },
+        { now: '2026-06-11T10:00:00Z' },
+      ),
+    );
+    expect(out.kind).toBe('none');
+  });
+
+  it('gate on, running PAST wait_timeout: hands off anyway (stuck/external CI)', () => {
+    // 21m old > 20m default ⇒ fall through to pass.
+    const out = reconcile(
+      atHandoff(
+        { conclusion: 'running', at: '2026-06-11T09:39:00Z' },
+        { now: '2026-06-11T10:00:00Z' },
+      ),
+    );
+    expect(out.kind).toBe('handoff');
+  });
+
+  it('gate off: a running pipeline hands off immediately (no wait)', () => {
+    const out = reconcile(atHandoff({ conclusion: 'running' }, { gate: false }));
+    expect(out.kind).toBe('handoff');
   });
 });
