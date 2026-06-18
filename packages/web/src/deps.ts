@@ -7,7 +7,9 @@
 import {
   type AddRepoDeps,
   type AssembleDeps,
+  type OpenIssueItem,
   type RepoRef,
+  type WorkResult,
   addRepo,
   assembleDashboard,
   assembleIssue,
@@ -36,6 +38,10 @@ export function buildServerDeps(args: BuildServerDepsArgs): ServerDeps {
     loadIssue: (repoId, iid) => assembleIssue(args.repoForId(repoId), iid, args.assemble),
     // commit:true by default — the web `add` has the same effect as `maestro add` (§8).
     addRepo: (url) => addRepo({ url, commit: true }, args.add),
+    // Stubs — wired up in Task 6 (next step: deps.ts + main.ts integration).
+    loadOpenIssues: (_repoId: string): Promise<OpenIssueItem[]> => Promise.resolve([]),
+    workOnIssue: (_repoId: string, _iid: number): Promise<WorkResult> =>
+      Promise.resolve({ ok: true }),
     ...(args.writeToken ? { writeToken: args.writeToken } : {}),
   };
 }

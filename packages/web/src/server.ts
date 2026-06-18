@@ -8,7 +8,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createServer as httpCreateServer } from 'node:http';
-import type { AddResult, DashboardView, IssueView } from '@maestro/core';
+import type { AddResult, DashboardView, IssueView, OpenIssueItem, WorkResult } from '@maestro/core';
 import { DASHBOARD_HTML } from './page.js';
 
 export interface ServerDeps {
@@ -18,6 +18,10 @@ export interface ServerDeps {
   loadIssue: (repoId: string, iid: number) => Promise<IssueView>;
   /** The ONLY write path — wraps core addRepo (commit:true default). */
   addRepo: (url: string) => Promise<AddResult>;
+  /** Read-only: wraps assembleOpenIssues for one repo — the grabbable backlog modal. */
+  loadOpenIssues: (repoId: string) => Promise<OpenIssueItem[]>;
+  /** A write path (bearer-gated): wraps core workOnIssue — assign the bot + optional label. */
+  workOnIssue: (repoId: string, iid: number) => Promise<WorkResult>;
   /**
    * Bearer token that POST /repos must present. Writes are DISABLED unless this is set
    * (fail closed: no token configured → the write path is unreachable, returns 404). When
@@ -54,6 +58,19 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     return postRepos(req, res, deps);
   }
 
+  // --- write path: hand an issue to the bot (assign + optional trigger label) ---
+  const work = path.match(/^\/repos\/([^/]+)\/issues\/([^/]+)\/work$/);
+  if (method === 'POST' && work?.[1] && work[2]) {
+    if (!writesEnabled) return sendJson(res, 404, { error: 'not found' });
+    const authz = checkAuth(req, deps.writeToken);
+    if (authz) return sendJson(res, authz.status, { error: authz.error });
+    const repoId = decodeURIComponent(work[1]);
+    const iid = Number(work[2]);
+    if (!Number.isInteger(iid) || iid <= 0)
+      return sendJson(res, 400, { error: 'invalid issue id' });
+    return sendJson(res, 200, await deps.workOnIssue(repoId, iid));
+  }
+
   // --- read paths: these close over read-only deps only ---
   if (method === 'GET' && path === '/') {
     // A browser (Accept: text/html) gets the dashboard page; everything else — API
@@ -74,6 +91,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: ServerDep
     if (!Number.isInteger(iid) || iid <= 0)
       return sendJson(res, 400, { error: 'invalid issue id' });
     return sendJson(res, 200, await deps.loadIssue(repoId, iid));
+  }
+
+  const open = path.match(/^\/repos\/([^/]+)\/open-issues$/);
+  if (method === 'GET' && open?.[1]) {
+    const repoId = decodeURIComponent(open[1]);
+    return sendJson(res, 200, { issues: await deps.loadOpenIssues(repoId) });
   }
 
   sendJson(res, 404, { error: 'not found' });
