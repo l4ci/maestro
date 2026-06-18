@@ -1045,7 +1045,10 @@ async function requestWork(btn, repoUrl, iid) {
       method: 'POST',
       headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) },
     });
-    if (!res.ok) throw new Error('work returned ' + res.status);
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) dashToken = '';
+      throw new Error('work returned ' + res.status);
+    }
     const data = await res.json();
     if (data.warning === 'actor-allowlist-blocks-autostart') {
       btn.textContent = 'Assigned (blocked)';
