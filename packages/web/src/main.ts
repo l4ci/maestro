@@ -10,6 +10,7 @@ import {
   FileLogReader,
   NodeExec,
   type RepoRef,
+  type WorkOnIssueDeps,
   composeForges,
   deriveWatchSet,
   loadConfig,
@@ -62,12 +63,17 @@ function buildDeps(env: Env) {
     adapterFor: (repo: RepoRef) => makeForgeAdapter(repo, config, exec),
   };
 
-  // v1 dashboard is single-repo-first (mirrors the CLI's `firstRepo`): the :id route maps
-  // to the first watched repo. Multi-repo issue routing lands with the richer board view.
-  const repoForId = (_repoId: string): RepoRef => {
-    const repo = repos[0];
-    if (!repo) throw new Error('no repos are watched');
+  // Resolve a repo id (the URL-encoded :id path segment = repo.url) back to its RepoRef.
+  // The frontend sends r.repo.url; an unknown id is a 500 (the outer handler guards it).
+  const repoForId = (repoId: string): RepoRef => {
+    const repo = repos.find((r) => r.url === repoId);
+    if (!repo) throw new Error(`unknown repo: ${repoId}`);
     return repo;
+  };
+
+  const work: WorkOnIssueDeps = {
+    adapterFor: (repo: RepoRef) => makeForgeAdapter(repo, config, exec),
+    settingsFor,
   };
 
   return buildServerDeps({
@@ -75,6 +81,7 @@ function buildDeps(env: Env) {
     assemble,
     add,
     repoForId,
+    work,
     ...(env.writeToken ? { writeToken: env.writeToken } : {}),
   });
 }
