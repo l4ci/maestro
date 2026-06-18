@@ -845,3 +845,21 @@ describe('#86 — listMrCommits', () => {
     expect(await a.listMrCommits(repo, 7)).toEqual([]);
   });
 });
+
+describe('listGrabbableIssues — open issues not assigned to the bot', () => {
+  it('returns open issues and filters out bot-assigned ones', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/issues', [
+      rawIssue({ iid: 42, assignees: [user(1, 'maestro-bot')] }), // bot-assigned → dropped
+      rawIssue({ iid: 43, assignees: [user(2, 'reporter')] }), // human → kept
+      rawIssue({ iid: 44, assignees: [] }), // unassigned → kept
+    ]);
+    const out = await a.listGrabbableIssues(repo);
+    expect(out.map((i) => i.iid)).toEqual([43, 44]);
+    // bounded single page, no --paginate
+    const call = fake.callsTo('GET', '/issues')[0];
+    expect(call?.args.join(' ')).toContain('state=opened');
+    expect(call?.args.join(' ')).toContain('per_page=100');
+    expect(call?.args).not.toContain('--paginate');
+  });
+});

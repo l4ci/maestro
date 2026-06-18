@@ -128,6 +128,19 @@ export class GithubAdapter implements ForgeAdapter {
     return raw.filter((i) => i.pull_request === undefined).map(normalizeIssue);
   }
 
+  async listGrabbableIssues(repo: RepoRef): Promise<Issue[]> {
+    const raw = await this.#c.apiRequired<RawIssue[]>('GET', `${this.#base(repo)}/issues`, {
+      query: { state: 'open', per_page: 100 },
+    });
+    const bot = this.#c.botUser;
+    // GitHub's /issues list includes PRs (every PR is an issue) — drop them; and drop issues
+    // already assigned to the bot (those ride the board, not the grabbable list).
+    return raw
+      .filter((i) => i.pull_request === undefined)
+      .filter((i) => !(i.assignees ?? []).some((u) => u.login === bot))
+      .map(normalizeIssue);
+  }
+
   async getSnapshot(repo: RepoRef, issueIid: number, ciGate = false): Promise<IssueSnapshot> {
     return this.#snapMemo.get(`${repo.url}-${issueIid}-${ciGate}`, () =>
       assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap, ciGate),
