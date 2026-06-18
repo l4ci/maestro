@@ -940,3 +940,38 @@ describe('#86 — listMrCommits', () => {
     expect(await a.listMrCommits(repo, 7)).toEqual([]);
   });
 });
+
+describe('listGrabbableIssues — open issues not assigned to the bot', () => {
+  it('returns open issues, dropping bot-assigned ones and PRs', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/issues', [
+      rawIssue({ number: 42, assignees: [user(1, 'maestro-bot')] }), // bot-assigned → dropped
+      rawIssue({ number: 43, assignees: [user(2, 'reporter')] }), // human → kept
+      rawIssue({ number: 44, assignees: [], pull_request: { url: 'x' } }), // PR → dropped
+      rawIssue({ number: 45, assignees: [user(2, 'reporter'), user(1, 'maestro-bot')] }), // bot among many → dropped
+    ]);
+    const out = await a.listGrabbableIssues(repo);
+    expect(out.map((i) => i.iid)).toEqual([43]);
+    const call = fake.callsTo('GET', '/issues')[0];
+    expect(call?.args.join(' ')).toContain('state=open');
+    expect(call?.args.join(' ')).toContain('per_page=100');
+    expect(call?.args).not.toContain('--paginate');
+  });
+});
+
+describe('assignIssue — hand an issue to a user', () => {
+  it('POSTs the assignee when not already assigned', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/issues/42', rawIssue({ number: 42, assignees: [] }));
+    fake.onApi('POST', '/issues/42/assignees', rawIssue({ number: 42 }));
+    await a.assignIssue(repo, 42, 'maestro-bot');
+    expect(bodyOf(fake, 'POST', '/issues/42/assignees')).toEqual({ assignees: ['maestro-bot'] });
+  });
+
+  it('is a no-op when the user is already assigned', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/issues/42', rawIssue({ number: 42, assignees: [user(1, 'maestro-bot')] }));
+    await a.assignIssue(repo, 42, 'maestro-bot');
+    expect(fake.callsTo('POST', '/issues/42/assignees')).toHaveLength(0);
+  });
+});

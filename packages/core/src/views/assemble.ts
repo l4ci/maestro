@@ -7,6 +7,7 @@
 import type {
   Comment,
   ForgeUser,
+  Issue,
   IssueSnapshot,
   LifecycleState,
   LogLine,
@@ -71,6 +72,9 @@ export interface RepoView {
   repo: RepoRef;
   issues: IssueView[];
   counts: Record<LifecycleState, number>;
+  /** Count of open issues NOT yet assigned to the bot — the grabbable backlog badge. Capped
+   *  at the adapter's single-page fetch; absent on a repo whose forge call failed (`error`). */
+  grabbableCount?: number;
   error?: string; // per-repo degradation marker (E3) — never a whole-dashboard 500
 }
 
@@ -215,6 +219,32 @@ export function assembleIssue(repo: RepoRef, iid: number, deps: AssembleDeps): P
   return issueView(repo, iid, deps, true);
 }
 
+/** One grabbable issue row for the dashboard modal (#open-issues). Forge content (title,
+ *  labels, author) stays raw — the renderer keeps it inert (§13.1), never this projection. */
+export interface OpenIssueItem {
+  iid: number;
+  title: string;
+  author: ForgeUser;
+  labels: string[];
+  issueUrl: string;
+}
+
+/** Project a repo's grabbable backlog (open issues NOT assigned to the bot) for the modal.
+ *  Read-only: the single forge call is `listGrabbableIssues`, on the narrowed adapter. */
+export async function assembleOpenIssues(
+  repo: RepoRef,
+  deps: AssembleDeps,
+): Promise<OpenIssueItem[]> {
+  const issues = await deps.adapterFor(repo).listGrabbableIssues(repo);
+  return issues.map((i: Issue) => ({
+    iid: i.iid,
+    title: i.title,
+    author: i.author,
+    labels: i.labels,
+    issueUrl: i.webUrl,
+  }));
+}
+
 /** The full read-only dashboard: per-repo issues + per-state tallies, resilient to a
  *  forge that can't be reached for one repo (E3). */
 export async function assembleDashboard(
@@ -224,7 +254,8 @@ export async function assembleDashboard(
   const out: RepoView[] = [];
   for (const repo of repos) {
     try {
-      const issues = await deps.adapterFor(repo).listAssignedOpenIssues(repo);
+      const adapter = deps.adapterFor(repo);
+      const issues = await adapter.listAssignedOpenIssues(repo);
       const views: IssueView[] = [];
       const counts = zeroCounts();
       for (const issue of issues) {
@@ -232,7 +263,8 @@ export async function assembleDashboard(
         views.push(v);
         counts[v.state] += 1;
       }
-      out.push({ repo, issues: views, counts });
+      const grabbable = await adapter.listGrabbableIssues(repo);
+      out.push({ repo, issues: views, counts, grabbableCount: grabbable.length });
     } catch (err) {
       out.push({ repo, issues: [], counts: zeroCounts(), error: String((err as Error).message) });
     }

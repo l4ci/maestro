@@ -45,6 +45,10 @@ export interface ForgeAdapter {
   /** Open issues carrying a label — the sweep uses it to retract stale maestro:todo
    *  marks from issues whose bot assignment was removed (#53). */
   listOpenIssuesByLabel(repo: RepoRef, label: string): Promise<Issue[]>;
+  /** Open issues NOT assigned to bot_user — the dashboard's grabbable backlog. One bounded
+   *  page (per_page 100, no pagination); bot-assigned issues (they ride the board already)
+   *  and PRs are filtered out. The badge count is this list's length (capped at the page). */
+  listGrabbableIssues(repo: RepoRef): Promise<Issue[]>;
   /** Open MRs/PRs assigned to bot_user. Drives the command-MR pass (the standalone-MR
    *  `/maestro` trigger, §MR-command) — no backing issue. */
   listAssignedOpenMergeRequests(repo: RepoRef): Promise<MergeRequest[]>;
@@ -67,6 +71,9 @@ export interface ForgeAdapter {
   updateMRDescription(repo: RepoRef, mrIid: number, body: string): Promise<void>;
   setDraft(repo: RepoRef, mrIid: number, draft: boolean): Promise<void>;
   assignMR(repo: RepoRef, mrIid: number, username: string): Promise<void>;
+  /** Assign one user to an ISSUE (assignMR covers MRs only). Idempotent: a no-op when the
+   *  user is already an assignee. Backs the dashboard "Work on this" hand-off to the bot. */
+  assignIssue(repo: RepoRef, issueIid: number, username: string): Promise<void>;
   /** Request review from a user (GitLab reviewer_ids / GitHub requested_reviewers) — the
    *  handoff ping (§7). Idempotent. A forge that refuses (GitHub 422: the requested user is
    *  the PR author on a shared bot account, or a non-collaborator) treats it as a no-op; the
@@ -101,5 +108,5 @@ export interface ForgeAdapter {
 /** Compile-time read-only narrowing for the web dashboard (AM-15). */
 export type ReadOnlyForgeAdapter = Pick<
   ForgeAdapter,
-  'kind' | 'listAssignedOpenIssues' | 'getSnapshot' | 'getIssueState'
+  'kind' | 'listAssignedOpenIssues' | 'getSnapshot' | 'getIssueState' | 'listGrabbableIssues'
 >;

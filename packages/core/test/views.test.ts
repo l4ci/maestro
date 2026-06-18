@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type {
+  Issue,
   IssueSnapshot,
   LogLine,
   ReadOnlyForgeAdapter,
@@ -8,6 +9,7 @@ import type {
 import {
   assembleDashboard,
   assembleIssue,
+  assembleOpenIssues,
   lastActivityOf,
   parsePlan,
 } from '../src/views/assemble.js';
@@ -21,7 +23,7 @@ interface RoRecorder {
 }
 function roAdapter(
   snaps: Map<number, IssueSnapshot>,
-  opts: { throwList?: boolean } = {},
+  opts: { throwList?: boolean; grabbable?: Issue[] } = {},
 ): RoRecorder {
   const calls: string[] = [];
   const adapter: ReadOnlyForgeAdapter = {
@@ -40,6 +42,10 @@ function roAdapter(
     getIssueState: async () => {
       calls.push('getIssueState');
       return 'open';
+    },
+    listGrabbableIssues: async () => {
+      calls.push('listGrabbableIssues');
+      return opts.grabbable ?? [];
     },
   };
   return { adapter, calls };
@@ -80,7 +86,9 @@ describe('E1 — assembleDashboard projects forge + logs, read-only', () => {
     expect(view.repos[0]?.issues[0]?.author).toEqual({ username: 'reporter', id: 'id-reporter' });
     expect(view.repos[0]?.issues[0]?.lastLog).toBe('cloned workspace');
     // only read methods exist on a ReadOnlyForgeAdapter; assert none beyond reads ran
-    expect(new Set(rec.calls)).toEqual(new Set(['listAssignedOpenIssues', 'getSnapshot']));
+    expect(new Set(rec.calls)).toEqual(
+      new Set(['listAssignedOpenIssues', 'getSnapshot', 'listGrabbableIssues']),
+    );
   });
 });
 
@@ -149,6 +157,7 @@ describe('E3 — assembly degrades per-repo on a forge error', () => {
     const failing = view.repos.find((r) => r.repo.url === repo.url);
     const healthy = view.repos.find((r) => r.repo.url === repoB.url);
     expect(failing?.error).toBeTruthy();
+    expect(failing?.grabbableCount).toBeUndefined();
     expect(healthy?.error).toBeUndefined();
     expect(healthy?.issues).toHaveLength(1);
   });
@@ -208,6 +217,34 @@ describe('assembleIssue — single issue view for status', () => {
     const view = await assembleIssue(repo, 8, deps(new Map([[repo.url, rec.adapter]])));
 
     expect(view.reviewer).toBeUndefined();
+  });
+});
+
+describe('assembleDashboard', () => {
+  it('reports grabbableCount from listGrabbableIssues length', async () => {
+    const snaps = new Map([[42, makeSnapshot({ issue: { iid: 42 } })]]);
+    const rec = roAdapter(snaps, {
+      grabbable: [
+        makeSnapshot({ issue: { iid: 50 } }).issue,
+        makeSnapshot({ issue: { iid: 51 } }).issue,
+      ],
+    });
+    const view = await assembleDashboard([repo], deps(new Map([[repo.url, rec.adapter]])));
+    expect(view.repos[0]?.grabbableCount).toBe(2);
+  });
+});
+
+describe('assembleOpenIssues — the grabbable backlog projection', () => {
+  it('projects iid/title/author/labels/issueUrl from listGrabbableIssues', async () => {
+    const rec = roAdapter(new Map(), {
+      grabbable: [makeSnapshot({ issue: { iid: 77, title: 'Fix the thing' } }).issue],
+    });
+    const items = await assembleOpenIssues(repo, deps(new Map([[repo.url, rec.adapter]])));
+    expect(items).toHaveLength(1);
+    expect(items[0]?.iid).toBe(77);
+    expect(items[0]?.title).toBe('Fix the thing');
+    expect(items[0]?.author).toEqual({ username: 'reporter', id: 'id-reporter' });
+    expect(items[0]?.issueUrl).toBe('u');
   });
 });
 

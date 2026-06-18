@@ -1346,6 +1346,333 @@ describe('drill-down panel CSS is themed, not hardcoded (#41/#44)', () => {
   });
 });
 
+// Grabbable-issues UI: the open-badge on each repo card, the issues modal, the Work button.
+// The modal itself relies on openDialog/closeDialog which feature-detect showModal (jsdom
+// doesn't implement it) and fall back to setting .open directly, so dialog.open assertions
+// work fine. window.prompt is not implemented in jsdom — we pre-seed dashToken via the
+// add-form submit path (which writes to dashToken directly) instead of stubbing prompt.
+describe('grabbable-issues UI', () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  // Build a view that includes grabbableCount on the first repo. writesEnabled is a
+  // page-level variable updated only by refresh(), not render(), so badge/render tests that
+  // don't need Work buttons use render() directly; tests that need writesEnabled use
+  // refreshWith() (same pattern as the "add-repo button" describe above).
+  type GrabbableView = View & {
+    writesEnabled?: boolean;
+    repos: Array<View['repos'][number] & { grabbableCount?: number }>;
+  };
+
+  function viewWith(grabbable: number | undefined): GrabbableView {
+    const v = view() as GrabbableView;
+    v.repos[0]!.grabbableCount = grabbable;
+    return v;
+  }
+
+  // refreshWith adapted from the existing add-repo tests: stubs the / endpoint and awaits
+  // refresh() to set writesEnabled AND render the repos in one shot.
+  async function refreshWithGrabbable(
+    grabbable: number | undefined,
+    writesEnabled: boolean,
+    openIssues: object,
+    workResponse?: object,
+  ): Promise<{ w: PageWindow; calls: Array<{ url: string; init?: RequestInit }> }> {
+    const w = loadPage();
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const dashView: GrabbableView = viewWith(grabbable);
+    dashView.writesEnabled = writesEnabled;
+    w.fetch = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url === '/' || url === '') return { ok: true, status: 200, json: async () => dashView };
+      if (url.includes('/open-issues'))
+        return { ok: true, status: 200, json: async () => openIssues };
+      if (url.includes('/work'))
+        return { ok: true, status: 200, json: async () => workResponse ?? { ok: true } };
+      // add-repo POST:
+      return { ok: true, status: 200, json: async () => ({ added: false, reason: 'ok' }) };
+    }) as unknown as typeof fetch;
+    await w.refresh();
+    return { w, calls };
+  }
+
+  // --- Badge visibility / text ---
+
+  it('renders an .open-badge with "3 open" when grabbableCount is 3', () => {
+    const w = loadPage();
+    w.render(viewWith(3));
+    const badge = w.document.querySelector(
+      '[data-key="gitlab.com/g/api"] .open-badge',
+    ) as HTMLElement | null;
+    expect(badge).toBeTruthy();
+    expect(badge!.hidden).toBe(false);
+    expect(badge!.textContent).toBe('3 open');
+  });
+
+  it('renders no visible badge when grabbableCount is 0', () => {
+    const w = loadPage();
+    w.render(viewWith(0));
+    const badge = w.document.querySelector(
+      '[data-key="gitlab.com/g/api"] .open-badge',
+    ) as HTMLElement | null;
+    expect(badge!.hidden).toBe(true);
+  });
+
+  it('renders no visible badge when grabbableCount is undefined', () => {
+    const w = loadPage();
+    w.render(viewWith(undefined));
+    const badge = w.document.querySelector(
+      '[data-key="gitlab.com/g/api"] .open-badge',
+    ) as HTMLElement | null;
+    expect(badge!.hidden).toBe(true);
+  });
+
+  it('renders no visible badge on an error repo even if grabbableCount is set', () => {
+    const w = loadPage();
+    const v = viewWith(5);
+    v.repos[0]!.error = 'auth failed';
+    w.render(v);
+    const badge = w.document.querySelector(
+      '[data-key="gitlab.com/g/api"] .open-badge',
+    ) as HTMLElement | null;
+    expect(badge!.hidden).toBe(true);
+  });
+
+  it('renders "100+ open" when grabbableCount is >= 100', () => {
+    const w = loadPage();
+    w.render(viewWith(120));
+    const badge = w.document.querySelector(
+      '[data-key="gitlab.com/g/api"] .open-badge',
+    ) as HTMLElement | null;
+    expect(badge!.textContent).toBe('100+ open');
+  });
+
+  it('renders "99 open" (not capped) when grabbableCount is 99', () => {
+    const w = loadPage();
+    w.render(viewWith(99));
+    const badge = w.document.querySelector(
+      '[data-key="gitlab.com/g/api"] .open-badge',
+    ) as HTMLElement | null;
+    expect(badge!.textContent).toBe('99 open');
+  });
+
+  // --- Badge opens modal + lazy fetch ---
+
+  it('clicking the badge opens the issues dialog and fetches /repos/<enc>/open-issues', async () => {
+    const { w, calls } = await refreshWithGrabbable(1, false, {
+      issues: [
+        {
+          iid: 42,
+          title: 'Fix the bug',
+          issueUrl: 'https://gitlab.com/g/api/-/issues/42',
+          labels: [],
+        },
+      ],
+    });
+    (w.document.querySelector('[data-key="gitlab.com/g/api"] .open-badge') as HTMLElement).click();
+    await flush();
+    const dlg = w.document.getElementById('issuesDialog') as HTMLDialogElement;
+    expect(dlg.open).toBe(true);
+    expect(calls.some((c) => c.url === '/repos/gitlab.com%2Fg%2Fapi/open-issues')).toBe(true);
+  });
+
+  it('populates #issuesList with one .issue-row per returned issue', async () => {
+    const { w } = await refreshWithGrabbable(2, false, {
+      issues: [
+        {
+          iid: 1,
+          title: 'First issue',
+          issueUrl: 'https://gitlab.com/g/api/-/issues/1',
+          labels: [],
+        },
+        {
+          iid: 2,
+          title: 'Second issue',
+          issueUrl: 'https://gitlab.com/g/api/-/issues/2',
+          labels: [],
+        },
+      ],
+    });
+    (w.document.querySelector('[data-key="gitlab.com/g/api"] .open-badge') as HTMLElement).click();
+    await flush();
+    const issueRows = [...w.document.querySelectorAll('#issuesList .issue-row')];
+    expect(issueRows).toHaveLength(2);
+    expect(issueRows[0]?.textContent).toContain('First issue');
+    expect(issueRows[1]?.textContent).toContain('Second issue');
+  });
+
+  it('issue title is rendered as inert text via the link helper, not innerHTML', async () => {
+    const { w } = await refreshWithGrabbable(1, false, {
+      issues: [
+        {
+          iid: 3,
+          title: '<img src=x onerror=alert(1)>',
+          issueUrl: 'https://gitlab.com/g/api/-/issues/3',
+          labels: [],
+        },
+      ],
+    });
+    (w.document.querySelector('[data-key="gitlab.com/g/api"] .open-badge') as HTMLElement).click();
+    await flush();
+    const list = w.document.getElementById('issuesList')!;
+    expect(list.querySelector('img')).toBeNull();
+    expect(list.textContent).toContain('<img src=x onerror=alert(1)>');
+  });
+
+  // --- Work button gating on writesEnabled ---
+
+  it('renders .work-btn on each issue row when writesEnabled is true', async () => {
+    const { w } = await refreshWithGrabbable(1, true, {
+      issues: [
+        { iid: 5, title: 'Do work', issueUrl: 'https://gitlab.com/g/api/-/issues/5', labels: [] },
+      ],
+    });
+    (w.document.querySelector('[data-key="gitlab.com/g/api"] .open-badge') as HTMLElement).click();
+    await flush();
+    expect(w.document.querySelector('#issuesList .work-btn')).toBeTruthy();
+  });
+
+  it('renders no .work-btn when writesEnabled is false', async () => {
+    const { w } = await refreshWithGrabbable(1, false, {
+      issues: [
+        { iid: 5, title: 'Do work', issueUrl: 'https://gitlab.com/g/api/-/issues/5', labels: [] },
+      ],
+    });
+    (w.document.querySelector('[data-key="gitlab.com/g/api"] .open-badge') as HTMLElement).click();
+    await flush();
+    expect(w.document.querySelector('#issuesList .work-btn')).toBeNull();
+  });
+
+  // --- Work button POST ---
+  // window.prompt is not available in jsdom. We pre-seed dashToken by triggering the
+  // add-form submit (which sets `if (token) dashToken = token`) so requestWork's getToken()
+  // finds a non-falsy dashToken and skips the prompt entirely.
+
+  async function seedToken(w: PageWindow, token: string): Promise<void> {
+    (w.document.getElementById('addBtn') as HTMLElement).hidden = false;
+    (w.document.getElementById('addBtn') as HTMLElement).click();
+    (w.document.getElementById('token') as HTMLInputElement).value = token;
+    (w.document.getElementById('url') as HTMLInputElement).value = 'example.com/test';
+    const form = w.document.getElementById('addForm') as HTMLFormElement;
+    form.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+    await flush();
+  }
+
+  it('clicking .work-btn POSTs to /repos/<enc>/issues/<iid>/work with Authorization header', async () => {
+    const { w, calls } = await refreshWithGrabbable(
+      1,
+      true,
+      {
+        issues: [
+          {
+            iid: 7,
+            title: 'Work item',
+            issueUrl: 'https://gitlab.com/g/api/-/issues/7',
+            labels: [],
+          },
+        ],
+      },
+      { ok: true },
+    );
+    await seedToken(w, 'my-secret-token');
+    (w.document.querySelector('[data-key="gitlab.com/g/api"] .open-badge') as HTMLElement).click();
+    await flush();
+    const btn = w.document.querySelector('#issuesList .work-btn') as HTMLElement;
+    btn.click();
+    await flush();
+    const workCall = calls.find((c) => c.url.includes('/work'));
+    expect(workCall).toBeTruthy();
+    expect(workCall!.url).toBe('/repos/gitlab.com%2Fg%2Fapi/issues/7/work');
+    expect((workCall!.init as RequestInit).method).toBe('POST');
+    expect((workCall!.init as RequestInit).headers).toMatchObject({
+      Authorization: 'Bearer my-secret-token',
+    });
+  });
+
+  it('on ok:true response the button text becomes "Queued ✓"', async () => {
+    const { w } = await refreshWithGrabbable(
+      1,
+      true,
+      {
+        issues: [
+          { iid: 8, title: 'Task', issueUrl: 'https://gitlab.com/g/api/-/issues/8', labels: [] },
+        ],
+      },
+      { ok: true },
+    );
+    await seedToken(w, 'tok');
+    (w.document.querySelector('[data-key="gitlab.com/g/api"] .open-badge') as HTMLElement).click();
+    await flush();
+    const btn = w.document.querySelector('#issuesList .work-btn') as HTMLElement;
+    btn.click();
+    await flush();
+    expect(btn.textContent).toBe('Queued ✓');
+  });
+
+  it('on warning:actor-allowlist-blocks-autostart the button text becomes "Assigned (blocked)"', async () => {
+    const { w } = await refreshWithGrabbable(
+      1,
+      true,
+      {
+        issues: [
+          {
+            iid: 9,
+            title: 'Blocked task',
+            issueUrl: 'https://gitlab.com/g/api/-/issues/9',
+            labels: [],
+          },
+        ],
+      },
+      { ok: true, warning: 'actor-allowlist-blocks-autostart' },
+    );
+    await seedToken(w, 'tok');
+    (w.document.querySelector('[data-key="gitlab.com/g/api"] .open-badge') as HTMLElement).click();
+    await flush();
+    const btn = w.document.querySelector('#issuesList .work-btn') as HTMLElement;
+    btn.click();
+    await flush();
+    expect(btn.textContent).toBe('Assigned (blocked)');
+  });
+
+  // --- Token retry trap fix ---
+
+  it('a 401 from /work clears dashToken so the next click re-prompts (token reset)', async () => {
+    const w = loadPage();
+    const dashView: GrabbableView = Object.assign(viewWith(1), { writesEnabled: true });
+    w.fetch = (async (url: string, init?: RequestInit) => {
+      if (url === '/' || url === '') return { ok: true, status: 200, json: async () => dashView };
+      if (url.includes('/open-issues'))
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            issues: [{ iid: 10, title: 'T', issueUrl: 'https://x.com/i/10', labels: [] }],
+          }),
+        };
+      if (url.includes('/work')) return { ok: false, status: 401, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({ added: false, reason: 'ok' }) };
+    }) as unknown as typeof fetch;
+    await w.refresh();
+    await seedToken(w, 'bad-token');
+    (w.document.querySelector('[data-key="gitlab.com/g/api"] .open-badge') as HTMLElement).click();
+    await flush();
+    const btn = w.document.querySelector('#issuesList .work-btn') as HTMLElement;
+    btn.click();
+    await flush();
+    // After the 401, the button is re-enabled with the error tooltip.
+    expect(btn.disabled).toBe(false);
+    expect(btn.title).toContain('401');
+    // dashToken must have been cleared — stub prompt to observe it being called.
+    let promptCalled = false;
+    w.prompt = (() => {
+      promptCalled = true;
+      return null;
+    }) as unknown as typeof w.prompt;
+    btn.click();
+    await flush();
+    expect(promptCalled).toBe(true);
+  });
+});
+
 // Keyboard navigation + live filter. Drive the shipped artifact: render the fixture, then
 // dispatch real KeyboardEvents at document (where the page binds its single handler) and
 // observe the .selected class, the filter's .filtered hides, and the help dialog.

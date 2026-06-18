@@ -177,6 +177,10 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
       r.calls.push('listOpenIssuesByLabel');
       return cfg.labeled ?? [];
     },
+    listGrabbableIssues: async () => {
+      r.calls.push('listGrabbableIssues');
+      return [];
+    },
     getIssueState: async (_repo, iid) => {
       r.calls.push('getIssueState');
       maybeThrow('getIssueState');
@@ -199,6 +203,9 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
     assignMR: async (_repo, mrIid, username) => {
       r.calls.push('assignMR');
       r.assigned.push({ mrIid, username });
+    },
+    assignIssue: async () => {
+      r.calls.push('assignIssue');
     },
     requestReview: async (_repo, mrIid, username) => {
       r.calls.push('requestReview');

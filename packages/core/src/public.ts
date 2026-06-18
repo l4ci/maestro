@@ -50,6 +50,7 @@ export { ForgeError } from './forge/errors.js';
 export * from './exec/node-exec.js';
 export * from './views/assemble.js';
 export * from './onboarding/add-repo.js';
+export * from './onboarding/work-on-issue.js';
 export * from './onboarding/public-guard.js';
 export * from './security/scan-for-secrets.js';
 export { isAuthorizedActor } from './security/authorized-actor.js';

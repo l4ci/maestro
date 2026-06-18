@@ -138,6 +138,21 @@ export class GitlabAdapter implements ForgeAdapter {
     return raw.map(normalizeIssue);
   }
 
+  async listGrabbableIssues(repo: RepoRef): Promise<Issue[]> {
+    const raw = await this.#c.apiRequired<RawIssue[]>(
+      'GET',
+      `/projects/${this.#pid(repo)}/issues`,
+      {
+        query: { state: 'opened', per_page: 100 },
+      },
+    );
+    const bot = this.#c.botUser;
+    // Drop issues already assigned to the bot — those ride the board, not the grabbable list.
+    return raw
+      .filter((i) => !(i.assignees ?? []).some((u) => u.username === bot))
+      .map(normalizeIssue);
+  }
+
   async getSnapshot(repo: RepoRef, issueIid: number, ciGate = false): Promise<IssueSnapshot> {
     return assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap, ciGate);
   }
@@ -260,6 +275,19 @@ export class GitlabAdapter implements ForgeAdapter {
     );
     if ((mr.assignees ?? []).some((a) => String(a.id) === String(id))) return; // already assigned
     await this.#c.api('PUT', `/projects/${pid}/merge_requests/${mrIid}`, {
+      body: { assignee_ids: [id] },
+    });
+  }
+
+  async assignIssue(repo: RepoRef, issueIid: number, username: string): Promise<void> {
+    const pid = this.#pid(repo);
+    const id = Number(await this.#resolveUserId(username));
+    const issue = await this.#c.apiRequired<RawIssue & { assignees?: RawUser[] }>(
+      'GET',
+      `/projects/${pid}/issues/${issueIid}`,
+    );
+    if ((issue.assignees ?? []).some((u) => String(u.id) === String(id))) return; // already assigned
+    await this.#c.api('PUT', `/projects/${pid}/issues/${issueIid}`, {
       body: { assignee_ids: [id] },
     });
   }

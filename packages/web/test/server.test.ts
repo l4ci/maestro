@@ -1,4 +1,4 @@
-import type { AddResult, DashboardView, IssueView } from '@maestro/core';
+import type { AddResult, DashboardView, IssueView, OpenIssueItem, WorkResult } from '@maestro/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from '../src/server.js';
 import type { ServerDeps } from '../src/server.js';
@@ -34,6 +34,16 @@ const cannedIssue: IssueView = {
   issueUrl: 'gitlab.com/g/r/-/issues/42',
 };
 
+const cannedOpenIssues: OpenIssueItem[] = [
+  {
+    iid: 7,
+    title: 'Add OAuth',
+    author: { username: 'reporter', id: '2' },
+    labels: [],
+    issueUrl: 'https://x/7',
+  },
+];
+
 // A shared token the write-path tests authenticate with. Writes are DISABLED unless a
 // deps.writeToken is set, so fakeDeps enables them by default to keep existing POST tests green.
 const TOKEN = 'sekret-token';
@@ -43,6 +53,8 @@ function fakeDeps(over: Partial<ServerDeps> = {}): ServerDeps {
     loadDashboard: async () => cannedDashboard,
     loadIssue: async () => cannedIssue,
     addRepo: async () => ({ added: true, repo }) as AddResult,
+    loadOpenIssues: async () => cannedOpenIssues,
+    workOnIssue: async () => ({ ok: true }) as WorkResult,
     writeToken: TOKEN,
     ...over,
   };
@@ -323,6 +335,88 @@ describe('HTML dashboard — browser content-negotiation', () => {
     const res = await call(fakeDeps(), 'GET', '/');
     expect(res.headers['content-type']).toContain('application/json');
     expect(JSON.parse(res.body)).toEqual({ ...cannedDashboard, writesEnabled: true });
+  });
+});
+
+describe('GET /repos/:id/open-issues — the grabbable backlog', () => {
+  it('returns the projected list as { issues }', async () => {
+    const res = await call(
+      fakeDeps(),
+      'GET',
+      `/repos/${encodeURIComponent('gitlab.com/group/api')}/open-issues`,
+    );
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ issues: cannedOpenIssues });
+  });
+
+  it('decodes the repo id and passes it through', async () => {
+    const loadOpenIssues = vi.fn(async () => cannedOpenIssues);
+    await call(
+      fakeDeps({ loadOpenIssues }),
+      'GET',
+      `/repos/${encodeURIComponent('gitlab.com/group/api')}/open-issues`,
+    );
+    expect(loadOpenIssues).toHaveBeenCalledWith('gitlab.com/group/api');
+  });
+});
+
+describe('POST /repos/:id/issues/:iid/work — hand an issue to the bot', () => {
+  const workUrl = `/repos/${encodeURIComponent('gitlab.com/group/api')}/issues/42/work`;
+
+  it('200 + result when the correct bearer token is presented', async () => {
+    const workOnIssue = vi.fn(async () => ({ ok: true }) as WorkResult);
+    const res = await call(fakeDeps({ workOnIssue }), 'POST', workUrl, undefined, TOKEN);
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true });
+    expect(workOnIssue).toHaveBeenCalledWith('gitlab.com/group/api', 42);
+  });
+
+  it('passes the allowlist warning straight through', async () => {
+    const workOnIssue = vi.fn(
+      async () => ({ ok: true, warning: 'actor-allowlist-blocks-autostart' }) as WorkResult,
+    );
+    const res = await call(fakeDeps({ workOnIssue }), 'POST', workUrl, undefined, TOKEN);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, warning: 'actor-allowlist-blocks-autostart' });
+  });
+
+  it('401 when no Authorization header is sent', async () => {
+    const workOnIssue = vi.fn(async () => ({ ok: true }) as WorkResult);
+    const res = await call(fakeDeps({ workOnIssue }), 'POST', workUrl);
+    expect(res.status).toBe(401);
+    expect(workOnIssue).not.toHaveBeenCalled();
+  });
+
+  it('403 when the bearer token does not match', async () => {
+    const workOnIssue = vi.fn(async () => ({ ok: true }) as WorkResult);
+    const res = await call(fakeDeps({ workOnIssue }), 'POST', workUrl, undefined, 'wrong-token');
+    expect(res.status).toBe(403);
+    expect(workOnIssue).not.toHaveBeenCalled();
+  });
+
+  it('404 when writes are disabled (no token configured)', async () => {
+    const workOnIssue = vi.fn(async () => ({ ok: true }) as WorkResult);
+    const res = await call(
+      fakeDeps({ workOnIssue, writeToken: undefined }),
+      'POST',
+      workUrl,
+      undefined,
+      TOKEN,
+    );
+    expect(res.status).toBe(404);
+    expect(workOnIssue).not.toHaveBeenCalled();
+  });
+
+  it('400s a non-integer iid rather than handing garbage to the seam', async () => {
+    const workOnIssue = vi.fn(async () => ({ ok: true }) as WorkResult);
+    const res = await call(
+      fakeDeps({ workOnIssue }),
+      'POST',
+      `/repos/${encodeURIComponent('gitlab.com/group/api')}/issues/abc/work`,
+      undefined,
+      TOKEN,
+    );
+    expect(res.status).toBe(400);
+    expect(workOnIssue).not.toHaveBeenCalled();
   });
 });
 
