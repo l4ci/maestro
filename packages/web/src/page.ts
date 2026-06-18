@@ -78,16 +78,28 @@ export const DASHBOARD_HTML = `<!doctype html>
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    margin: 0;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     background: var(--bg); color: var(--fg);
   }
+  /* GitHub-true type: system sans for chrome, monospace only for the code-like tokens —
+     issue ids, the daemon worker count, log lines. One opt-in rule, applied by selector. */
+  .mono, td.iid, #daemon, ul.logs li { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   header {
-    display: flex; align-items: baseline; gap: 12px;
-    padding: 18px 24px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 12px;
+    padding: 16px 24px; border-bottom: 1px solid var(--line);
   }
-  header h1 { margin: 0; font-size: 18px; letter-spacing: .5px; }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: .3px; }
   header .tag { color: var(--muted); font-size: 12px; }
-  #daemon { margin-left: auto; font-size: 12px; }
+  /* Live client-side filter (the / shortcut focuses it). Right-aligned; pushes the
+     daemon + updated stamps to its right. Filters already-polled rows — no API call. */
+  #filter {
+    margin-left: auto; width: min(220px, 32vw);
+    padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--fg); font: inherit; font-size: 12px;
+  }
+  #filter:focus { outline: none; border-color: var(--accent-ring); }
+  #daemon { font-size: 12px; }
   #daemon.up { color: var(--up); }
   #daemon.down { color: var(--down); }
   #updated { color: var(--muted); font-size: 12px; }
@@ -181,6 +193,40 @@ export const DASHBOARD_HTML = `<!doctype html>
   tr.issue { cursor: pointer; }
   tr.issue:hover td { background: var(--line-soft); }
   tr.issue.open td { background: var(--line-soft); }
+  /* Keyboard selection (j/k). Lives outside the keyed reconcile — reapplied after every
+     poll — so it reads distinctly from :hover and .open: a left accent bar plus a fill. */
+  tr.issue.selected td { background: var(--surface-2); }
+  tr.issue.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+  /* Filter hide: a class, never node removal, so keyed identity + selection survive. */
+  .filtered { display: none; }
+  /* Shortcuts overlay (the ? key). Static text only — no forge data flows through it. */
+  dialog#helpDialog {
+    padding: 0; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); color: var(--fg); width: min(360px, calc(100vw - 32px));
+  }
+  dialog#helpDialog::backdrop { background: rgba(0, 0, 0, .5); }
+  .help { padding: 18px 20px; }
+  .help h3 { margin: 0 0 12px; font-size: 14px; }
+  .help dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; }
+  .help dt { color: var(--fg); }
+  .help dd { margin: 0; color: var(--muted); }
+  .help kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    background: var(--surface-2); border: 1px solid var(--border-soft);
+    border-radius: 4px; padding: 1px 6px;
+  }
+  .help .actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+  .help button.cancel {
+    padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--fg); font: inherit; cursor: pointer;
+  }
+  /* The hint strip under the header: tells a first-time visitor the keys exist. */
+  #hints { color: var(--muted); font-size: 12px; padding: 8px 24px 0; }
+  #hints kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--surface-2); border: 1px solid var(--border-soft);
+    border-radius: 4px; padding: 0 5px; color: var(--fg);
+  }
   td.detail { padding: 0; }
   td.detail[hidden] { display: none; }
   .panel { padding: 14px 16px; border-top: 1px solid var(--accent-line); background: var(--surface); }
@@ -244,9 +290,27 @@ export const DASHBOARD_HTML = `<!doctype html>
 <header>
   <h1>maestro</h1>
   <span class="tag">read-only dashboard</span>
+  <input id="filter" type="search" placeholder="filter issues…  ( / )" autocomplete="off" aria-label="filter issues" />
   <span id="daemon"></span>
   <span id="updated"></span>
 </header>
+<div id="hints"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>o</kbd> open · <kbd>/</kbd> filter · <kbd>?</kbd> shortcuts</div>
+<dialog id="helpDialog">
+  <div class="help">
+    <h3>Keyboard shortcuts</h3>
+    <dl>
+      <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>move selection down / up</dd>
+      <dt><kbd>o</kbd> <kbd>Enter</kbd></dt><dd>open / close the selected issue</dd>
+      <dt><kbd>g</kbd> <kbd>g</kbd> / <kbd>G</kbd></dt><dd>jump to first / last issue</dd>
+      <dt><kbd>c</kbd></dt><dd>collapse / expand the selected repo</dd>
+      <dt><kbd>/</kbd></dt><dd>focus the filter</dd>
+      <dt><kbd>a</kbd></dt><dd>add a repo</dd>
+      <dt><kbd>?</kbd></dt><dd>toggle this help</dd>
+      <dt><kbd>Esc</kbd></dt><dd>close help / clear filter / close issue</dd>
+    </dl>
+    <div class="actions"><button type="button" class="cancel" id="helpClose">close</button></div>
+  </div>
+</dialog>
 <main>
   <button id="addBtn" type="button" hidden>Add Repo</button>
   <dialog id="addDialog">
@@ -507,10 +571,200 @@ function render(view) {
     none.className = 'empty';
     none.textContent = 'no repos watched yet — add one above';
     root.replaceChildren(none); // nothing keyed to preserve on an empty board
+    afterRender();
     return;
   }
   reconcile(root, sortReposByAttention(view.repos), (r) => r.repo.url, createRepoCard, updateRepoCard);
+  afterRender();
 }
+
+// Post-render passes that depend on the freshly reconciled rows. Order matters: filter
+// FIRST (it hides rows), then reapply selection so a now-hidden selected row hands off to
+// the nearest still-visible one. Both run every poll, so keyboard state and the active
+// filter ride across the 5s refresh exactly like collapse/expand do (#34, #41).
+function afterRender() {
+  applyFilter();
+  applySelection();
+}
+
+// --- Keyboard navigation + live filter --------------------------------------------------
+// Selection is a single module-level row key (repoUrl#iid), the SAME key the reconcile
+// uses, kept outside the reconcile so it survives every poll. applySelection() repaints
+// the .selected class from that key after each render; if the row vanished (poll dropped
+// it, or the filter hid it) selection hands off to the first still-visible row.
+let selectedKey = null;
+let pendingG = false; // the 'g' prefix of a 'g g' jump-to-top chord
+let helpOpen = false;
+
+// Only visible issue rows are navigable: not detail rows, not error/empty placeholders,
+// not rows in a collapsed repo (table[hidden]), not rows hidden by the filter. jsdom does
+// no layout, so visibility is judged structurally (classes/hidden), never via offsetParent.
+function visibleIssueRows() {
+  return [...document.querySelectorAll('tr.issue')].filter((tr) => {
+    if (tr.classList.contains('filtered')) return false;
+    const table = tr.closest('table');
+    if (table && table.hidden) return false;
+    const card = tr.closest('.repo');
+    if (card && card.classList.contains('filtered')) return false;
+    return true;
+  });
+}
+
+function applySelection() {
+  for (const tr of document.querySelectorAll('tr.issue.selected')) tr.classList.remove('selected');
+  if (!selectedKey) return;
+  const visible = visibleIssueRows();
+  let node = visible.find((tr) => tr.dataset.key === selectedKey);
+  if (!node) {
+    // The selected row is gone or hidden — fall back to the first still-visible row, or
+    // clear the selection entirely when nothing is visible.
+    node = visible[0] || null;
+    selectedKey = node ? node.dataset.key : null;
+  }
+  if (node) node.classList.add('selected');
+}
+
+function selectRow(node) {
+  if (!node) return;
+  selectedKey = node.dataset.key;
+  applySelection();
+  node.scrollIntoView({ block: 'nearest' });
+}
+
+function moveSelection(delta) {
+  const visible = visibleIssueRows();
+  if (!visible.length) return;
+  const idx = visible.findIndex((tr) => tr.dataset.key === selectedKey);
+  if (idx === -1) return selectRow(visible[0]); // first move lands on the top row
+  selectRow(visible[Math.max(0, Math.min(visible.length - 1, idx + delta))]);
+}
+
+function selectEdge(which) {
+  const visible = visibleIssueRows();
+  if (!visible.length) return;
+  selectRow(which === 'first' ? visible[0] : visible[visible.length - 1]);
+}
+
+function selectedRow() {
+  return selectedKey ? visibleIssueRows().find((tr) => tr.dataset.key === selectedKey) : null;
+}
+
+// Reuse the row's own click wiring (which closes over repoId/iid/forge) to toggle its
+// detail panel — never a second copy of the open/close logic.
+function toggleSelectedDetail() {
+  const tr = selectedRow();
+  if (tr) tr.click();
+}
+
+function toggleSelectedRepo() {
+  const card = selectedRow()?.closest('.repo');
+  if (card) card.querySelector('h2')?.click(); // the existing collapse toggle
+}
+
+// Filter the already-polled rows client-side: hide non-matching issue rows (and their
+// detail siblings), and collapse a repo card whose every issue is filtered out. Hiding via
+// a class — never node removal — keeps keyed identity and the create/update parity intact.
+function applyFilter() {
+  const q = (el('filter').value || '').trim().toLowerCase();
+  for (const card of document.querySelectorAll('#repos > .repo')) {
+    let anyVisible = false;
+    for (const tr of card.querySelectorAll('tr.issue')) {
+      const match = !q || (tr.dataset.hay || '').includes(q);
+      tr.classList.toggle('filtered', !match);
+      const detail = tr.nextElementSibling;
+      if (detail) detail.classList.toggle('filtered', !match);
+      if (match) anyVisible = true;
+    }
+    card.classList.toggle('filtered', Boolean(q) && !anyVisible);
+  }
+}
+
+function isTyping(node) {
+  if (!node) return false;
+  return node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.isContentEditable;
+}
+
+function toggleHelp() {
+  helpOpen = !helpOpen;
+  if (helpOpen) openDialog(el('helpDialog'));
+  else closeDialog(el('helpDialog'));
+}
+
+// Escape is the one key honored even while typing or with a dialog open. It unwinds the
+// most-nested state first: help overlay → add dialog → active/filled filter → open detail.
+function onEscape() {
+  if (helpOpen) {
+    toggleHelp();
+    return;
+  }
+  if (el('addDialog').open) {
+    closeDialog(el('addDialog'));
+    return;
+  }
+  const filter = el('filter');
+  if (document.activeElement === filter || filter.value) {
+    filter.value = '';
+    applyFilter();
+    applySelection();
+    filter.blur();
+    return;
+  }
+  const tr = selectedRow();
+  if (tr && tr.classList.contains('open')) tr.click(); // collapse the open detail
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    onEscape();
+    return;
+  }
+  const typing = isTyping(document.activeElement);
+  // '?' toggles the help overlay from either state (so it also CLOSES while open), but
+  // never while typing — a literal '?' in the filter must reach the field.
+  if (e.key === '?' && !typing) {
+    e.preventDefault();
+    toggleHelp();
+    return;
+  }
+  // Otherwise, while typing in a field or with a modal open, swallow every shortcut so a
+  // repo URL or filter query is never hijacked by a single-key binding.
+  if (typing || el('addDialog').open || helpOpen) return;
+  // Resolve a pending 'g' chord before anything else: 'g g' jumps to the top; 'g'-then-
+  // anything-else is consumed (no accidental action) and the prefix clears.
+  if (pendingG) {
+    pendingG = false;
+    if (e.key === 'g') {
+      e.preventDefault();
+      selectEdge('first');
+    }
+    return;
+  }
+  switch (e.key) {
+    case 'j': moveSelection(1); break;
+    case 'k': moveSelection(-1); break;
+    case 'g': pendingG = true; return;
+    case 'G': selectEdge('last'); break;
+    case 'o': case 'Enter': toggleSelectedDetail(); break;
+    case 'c': toggleSelectedRepo(); break;
+    case '/': el('filter').focus(); break;
+    case 'a': { const b = el('addBtn'); if (!b.hidden) b.click(); break; }
+    default: return; // an unbound key: let the browser have it
+  }
+  e.preventDefault(); // a handled shortcut never also scrolls the page or types
+});
+
+el('filter').addEventListener('input', () => {
+  applyFilter();
+  applySelection();
+});
+el('helpClose').addEventListener('click', () => toggleHelp());
+el('helpDialog').addEventListener('click', (e) => {
+  if (e.target === el('helpDialog')) toggleHelp(); // backdrop click closes
+});
+// Keep the flag honest if the dialog closes by a path other than toggleHelp (native Esc,
+// form method=dialog): the browser fires 'close', jsdom may not, so the flag is the source
+// of truth and this only corrects drift.
+el('helpDialog').addEventListener('close', () => { helpOpen = false; });
 
 // One render path per field (#106). The create* functions below build KEYED SKELETONS
 // only — structure, classes, event wiring — and never touch a view value. Every field
@@ -628,6 +882,9 @@ function updateRow(tr, x) {
     return;
   }
   const [iid, state, title, people] = tr.children;
+  // Searchable haystack for the client-side filter (#/state/title), recomputed each poll
+  // so a renamed issue or a state change re-filters correctly. Lower-cased once here.
+  tr.dataset.hay = ('#' + x.issue.iid + ' ' + x.issue.state + ' ' + x.issue.title).toLowerCase();
   // Issue link + state badge: rebuilt every poll through the same helpers as everything
   // else, so link() → safeUrl() stays the only place an anchor gets a forge href.
   iid.replaceChildren(link('', '#' + x.issue.iid, x.issue.issueUrl));
