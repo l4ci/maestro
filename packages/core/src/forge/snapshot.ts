@@ -27,6 +27,7 @@ import {
   MAESTRO_COMMAND_RE,
   MergeRequestSchema,
 } from '../contracts/index.js';
+import { isHumanComment } from './comments.js';
 import { SnapshotValidationError } from './errors.js';
 
 const CommentsSchema = z.array(CommentSchema);
@@ -157,6 +158,28 @@ function issueCommandAt(recentComments: Comment[]): string | undefined {
   return recentComments.find((c) => MAESTRO_COMMAND_RE.test(c.body))?.createdAt;
 }
 
+/**
+ * The newest body-start `/maestro` issue command the daemon has NOT yet answered (#7).
+ * `computeChangesRequested` retires this signal only on a branch commit that post-dates it —
+ * but a resumed task can legitimately produce NO commit (the requested change already lived in
+ * the target). The command then reads as permanent changes-requested and bounces the MR
+ * in-progress↔in-review on every poll, burning an agent run each time. A DAEMON comment
+ * (bot-authored, non-command) that post-dates the command is independent proof the agent ran
+ * and responded, so the command is addressed even with no push. The push clear is preserved
+ * for the no-daemon-reply case (the original self-clearing path). With `botUser` unknown the
+ * shared-account thread can't tell daemon from operator, so it falls back to push-only
+ * clearing — both adapters always supply it.
+ */
+function unansweredIssueCommandAt(
+  recentComments: Comment[],
+  botUser: string | undefined,
+): string | undefined {
+  const commandAt = issueCommandAt(recentComments);
+  if (commandAt === undefined || botUser === undefined) return commandAt;
+  const answeredAt = recentComments.find((c) => !isHumanComment(c, botUser))?.createdAt;
+  return answeredAt !== undefined && answeredAt > commandAt ? undefined : commandAt;
+}
+
 /** The newer of a blocking review thread vs. the last bot push, tagged with which it was.
  *  Only timestamps already fetched are considered (the push read is short-circuited). */
 function newestMrActivity(
@@ -180,6 +203,7 @@ export async function assembleSnapshot(
   issueIid: number,
   prim: ForgePrimitives,
   commentCap: number,
+  botUser?: string,
   ciGate = false,
 ): Promise<IssueSnapshot> {
   const issue = await prim.issue(issueIid);
@@ -205,7 +229,12 @@ export async function assembleSnapshot(
 
   // Comments are read BEFORE the MR so the issue-thread /maestro signal can feed the MR's
   // changes-requested edge (shared-account rework on the issue thread, self-clearing on push).
-  const found = await findMaestroMr(issueIid, prim, issueCommandAt(recentComments), ciGate);
+  const found = await findMaestroMr(
+    issueIid,
+    prim,
+    unansweredIssueCommandAt(recentComments, botUser),
+    ciGate,
+  );
   // The CHOSEN MR is validated after its approvals are filled, covering both the
   // openMergeRequests and approvalBase primitives. The rest of the candidate pool is
   // not — on GitHub it is repo-wide, and other issues' MRs are other ticks' business.

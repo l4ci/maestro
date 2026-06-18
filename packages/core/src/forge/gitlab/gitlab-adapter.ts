@@ -154,7 +154,14 @@ export class GitlabAdapter implements ForgeAdapter {
   }
 
   async getSnapshot(repo: RepoRef, issueIid: number, ciGate = false): Promise<IssueSnapshot> {
-    return assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap, ciGate);
+    return assembleSnapshot(
+      repo,
+      issueIid,
+      this.#primitives(repo),
+      this.#c.commentCap,
+      this.#c.botUser,
+      ciGate,
+    );
   }
 
   async getIssueState(repo: RepoRef, issueIid: number): Promise<'open' | 'closed' | 'missing'> {

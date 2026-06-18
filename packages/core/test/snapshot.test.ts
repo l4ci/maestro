@@ -407,4 +407,56 @@ describe('assembleSnapshot', () => {
     );
     expect(ignored.mr?.approvals.changesRequested).toBe(false);
   });
+
+  // #7: a /maestro reply that answers a BLOCKED question lingers as a standing command. When
+  // the resumed work is a no-op (the fix already lived in the target → no branch commit), the
+  // push-only clear never fires and the MR bounces in-progress↔in-review forever. A daemon
+  // comment post-dating the command proves the agent responded → the command is addressed.
+  it('RETIRES an issue /maestro command once a daemon comment answers it, even with no push (#7)', async () => {
+    const cmt = (body: string, at: string): Comment => ({
+      id: at,
+      author: user('volker.otto'), // shared account: bot == operator
+      body,
+      createdAt: at,
+    });
+    const snap = await assembleSnapshot(
+      repo,
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr({ isDraft: false })],
+        lastBotPushAt: async () => '2026-01-02', // scaffold commit, BEFORE the command — never clears
+        comments: async () => [
+          cmt('@reporter this is ready for your review', '2026-01-07'), // daemon handoff
+          cmt('### ✅ Proof', '2026-01-06'), // daemon
+          cmt('/maestro 1', '2026-01-05'), // operator's unblock answer
+        ],
+      }),
+      50,
+      'volker.otto', // botUser
+    );
+    expect(snap.mr?.approvals.changesRequested).toBe(false);
+  });
+
+  it('keeps blocking when the only daemon comment PRECEDES the /maestro command (#7 guard)', async () => {
+    const cmt = (body: string, at: string): Comment => ({
+      id: at,
+      author: user('volker.otto'),
+      body,
+      createdAt: at,
+    });
+    const snap = await assembleSnapshot(
+      repo,
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr({ isDraft: false })],
+        comments: async () => [
+          cmt('/maestro fix the spacing', '2026-01-07'), // newest — daemon has not responded yet
+          cmt('### ✅ Proof', '2026-01-06'),
+        ],
+      }),
+      50,
+      'volker.otto',
+    );
+    expect(snap.mr?.approvals.changesRequested).toBe(true);
+  });
 });

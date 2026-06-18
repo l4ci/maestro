@@ -143,7 +143,14 @@ export class GithubAdapter implements ForgeAdapter {
 
   async getSnapshot(repo: RepoRef, issueIid: number, ciGate = false): Promise<IssueSnapshot> {
     return this.#snapMemo.get(`${repo.url}-${issueIid}-${ciGate}`, () =>
-      assembleSnapshot(repo, issueIid, this.#primitives(repo), this.#c.commentCap, ciGate),
+      assembleSnapshot(
+        repo,
+        issueIid,
+        this.#primitives(repo),
+        this.#c.commentCap,
+        this.#c.botUser,
+        ciGate,
+      ),
     );
   }
 
