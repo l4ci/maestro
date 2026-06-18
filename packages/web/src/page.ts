@@ -136,6 +136,36 @@ export const DASHBOARD_HTML = `<!doctype html>
   form.add button.cancel { background: var(--surface); color: var(--fg); }
   #addMsg { min-height: 0; color: var(--down); font-size: 13px; }
   #addMsg:empty { display: none; }
+  .open-badge {
+    margin-left: 8px; padding: 1px 8px; border-radius: 999px; cursor: pointer;
+    font-size: 12px; background: var(--surface-2); color: var(--accent);
+    border: 1px solid var(--border-soft);
+  }
+  .open-badge:hover { border-color: var(--accent); }
+  dialog#issuesDialog {
+    padding: 0; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); color: var(--fg); width: min(640px, calc(100vw - 32px));
+  }
+  dialog#issuesDialog::backdrop { background: rgba(0, 0, 0, .5); }
+  .issues { display: flex; flex-direction: column; gap: 10px; padding: 20px; }
+  .issues-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .issues-head h3 { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+  .issues-list { display: flex; flex-direction: column; gap: 6px; max-height: 60vh; overflow: auto; }
+  .issue-row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface);
+  }
+  .issue-main { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  .issue-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .label-chip {
+    padding: 0 6px; border-radius: 999px; font-size: 11px;
+    background: var(--surface-2); color: var(--muted-2); border: 1px solid var(--border-soft);
+  }
+  .work-btn {
+    padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--btn-bg); color: var(--btn-fg); font: inherit; cursor: pointer; white-space: nowrap;
+  }
+  .work-btn:disabled { opacity: .6; cursor: default; }
   .repo { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 16px; }
   .repo h2 {
     margin: 0; padding: 12px 16px; font-size: 14px; border-bottom: 1px solid var(--line);
@@ -325,12 +355,32 @@ export const DASHBOARD_HTML = `<!doctype html>
       </div>
     </form>
   </dialog>
+  <dialog id="issuesDialog">
+    <div class="issues">
+      <div class="issues-head">
+        <h3 id="issuesTitle"></h3>
+        <button type="button" class="cancel" id="issuesClose">close</button>
+      </div>
+      <div id="issuesList" class="issues-list"></div>
+    </div>
+  </dialog>
   <div id="msg"></div>
   <div id="repos"><div class="empty">loading…</div></div>
 </main>
 <script>
 const STATES = ['new','in-progress','in-review','blocked','done'];
 const el = (id) => document.getElementById(id);
+
+let writesEnabled = false; // mirrors the dashboard view each poll
+let issuesEpoch = 0; // incremented each time the issues modal opens; guards stale fetches
+let dashToken = ''; // cached bearer token for write actions (add-repo / work)
+function getToken() {
+  if (dashToken) return dashToken;
+  const t = window.prompt('dashboard token');
+  if (t === null) return null; // user cancelled
+  dashToken = t.trim();
+  return dashToken;
+}
 
 // Everything below builds DOM via createElement/textContent — forge-controlled text
 // (titles, error messages) never passes through innerHTML, so it stays inert (§13.1).
@@ -701,6 +751,10 @@ function onEscape() {
     closeDialog(el('addDialog'));
     return;
   }
+  if (el('issuesDialog').open) {
+    closeDialog(el('issuesDialog'));
+    return;
+  }
   const filter = el('filter');
   if (document.activeElement === filter || filter.value) {
     filter.value = '';
@@ -728,7 +782,7 @@ document.addEventListener('keydown', (e) => {
   }
   // Otherwise, while typing in a field or with a modal open, swallow every shortcut so a
   // repo URL or filter query is never hijacked by a single-key binding.
-  if (typing || el('addDialog').open || helpOpen) return;
+  if (typing || el('addDialog').open || el('issuesDialog').open || helpOpen) return;
   // Resolve a pending 'g' chord before anything else: 'g g' jumps to the top; 'g'-then-
   // anything-else is consumed (no accidental action) and the prefix clears.
   if (pendingG) {
@@ -781,7 +835,13 @@ function createRepoCard() {
   card.className = 'repo';
   const h2 = document.createElement('h2');
   const chev = span('chev', '▾');
-  h2.append(chev, span('project', ''), span('counts', ''));
+  const openBadge = span('open-badge', '');
+  openBadge.hidden = true;
+  h2.append(chev, span('project', ''), span('counts', ''), openBadge);
+  openBadge.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (card.dataset.repoUrl) openIssuesModal(card.dataset.repoUrl);
+  });
   const table = document.createElement('table');
   table.append(document.createElement('tbody'));
   // Collapse on header click (#34): plain node state — the keyed renderer never
@@ -796,6 +856,15 @@ function createRepoCard() {
 
 function updateRepoCard(card, r) {
   card.querySelector('.project').textContent = r.repo.project;
+  card.dataset.repoUrl = r.repo.url;
+  const ob = card.querySelector('.open-badge');
+  const n = r.grabbableCount;
+  if (!r.error && typeof n === 'number' && n > 0) {
+    ob.hidden = false;
+    ob.textContent = (n >= 100 ? '100+' : n) + ' open';
+  } else {
+    ob.hidden = true;
+  }
   // A repo whose forge call failed carries an error marker — show it as unreachable
   // instead of a misleading idle, so broken auth never looks like a healthy empty repo.
   const counts = card.querySelector('.counts');
@@ -907,6 +976,89 @@ function updateRow(tr, x) {
   if (x.issue.author) avatars.push(avatar('author', x.issue.author));
   if (x.issue.reviewer) avatars.push(avatar('reviewer', x.issue.reviewer));
   people.replaceChildren(...avatars);
+}
+
+// --- Open-issues modal (grabbable issues) -----------------------------------------------
+// A per-repo modal that lists open unassigned issues. Opens on badge click; lazy-loads the
+// list from GET /repos/:id/open-issues on each open. The "Work on this" button POSTs to
+// /repos/:id/issues/:iid/work with the cached bearer token. All forge strings land via
+// textContent / span() / link() / avatar() — never innerHTML (§13.1).
+
+function openIssuesModal(repoUrl) {
+  const dlg = el('issuesDialog');
+  const list = el('issuesList');
+  el('issuesTitle').textContent = repoUrl;
+  list.replaceChildren(span('loading', 'loading…'));
+  openDialog(dlg);
+  loadOpenIssues(list, repoUrl);
+}
+
+async function loadOpenIssues(list, repoUrl) {
+  issuesEpoch += 1;
+  const epoch = issuesEpoch;
+  try {
+    const url = '/repos/' + encodeURIComponent(repoUrl) + '/open-issues';
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (epoch !== issuesEpoch || !el('issuesDialog').open) return;
+    if (!res.ok) throw new Error('open issues returned ' + res.status);
+    const data = await res.json();
+    if (epoch !== issuesEpoch || !el('issuesDialog').open) return;
+    const issues = data.issues || [];
+    if (issues.length === 0) {
+      list.replaceChildren(span('none', 'no open issues to grab'));
+      return;
+    }
+    list.replaceChildren(...issues.map((i) => issueRow(i, repoUrl)));
+  } catch (err) {
+    if (epoch !== issuesEpoch || !el('issuesDialog').open) return;
+    list.replaceChildren(span('none', 'could not load open issues: ' + err.message));
+  }
+}
+
+function issueRow(issue, repoUrl) {
+  const row = document.createElement('div');
+  row.className = 'issue-row';
+  const main = document.createElement('div');
+  main.className = 'issue-main';
+  main.append(link('issue-link', '#' + issue.iid + ' ' + issue.title, issue.issueUrl));
+  if (issue.author) main.append(avatar('author', issue.author));
+  for (const l of issue.labels || []) main.append(span('label-chip', l));
+  row.append(main);
+  if (writesEnabled) {
+    const btn = document.createElement('button');
+    btn.className = 'work-btn';
+    btn.textContent = 'Work on this';
+    btn.addEventListener('click', () => requestWork(btn, repoUrl, issue.iid));
+    row.append(btn);
+  }
+  return row;
+}
+
+async function requestWork(btn, repoUrl, iid) {
+  const token = getToken();
+  if (token === null) return; // cancelled
+  btn.disabled = true;
+  btn.textContent = 'Queued…';
+  try {
+    const url = '/repos/' + encodeURIComponent(repoUrl) + '/issues/' + iid + '/work';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+    });
+    if (!res.ok) throw new Error('work returned ' + res.status);
+    const data = await res.json();
+    if (data.warning === 'actor-allowlist-blocks-autostart') {
+      btn.textContent = 'Assigned (blocked)';
+      btn.title =
+        "Assigned, but this repo's actor allowlist will block auto-start — add the bot to allowed_actors.";
+    } else {
+      btn.textContent = 'Queued ✓';
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'Work on this';
+    btn.title = 'could not assign: ' + err.message;
+  }
 }
 
 // --- Per-issue drill-down (#41) ---------------------------------------------------------
@@ -1050,6 +1202,7 @@ async function refresh() {
     // The add-repo button only exists when the server says writes are enabled; a read-only
     // host (no token configured) never shows an entry point that would just 404 on submit.
     el('addBtn').hidden = !view.writesEnabled;
+    writesEnabled = !!view.writesEnabled;
     render(view);
     el('msg').textContent = '';
     el('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
@@ -1081,12 +1234,17 @@ el('addCancel').addEventListener('click', () => closeDialog(el('addDialog')));
 el('addDialog').addEventListener('click', (e) => {
   if (e.target === el('addDialog')) closeDialog(el('addDialog'));
 });
+el('issuesClose').addEventListener('click', () => closeDialog(el('issuesDialog')));
+el('issuesDialog').addEventListener('click', (e) => {
+  if (e.target === el('issuesDialog')) closeDialog(el('issuesDialog'));
+});
 
 el('addForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = e.target.querySelector('button');
   const url = el('url').value.trim();
   const token = el('token').value.trim();
+  if (token) dashToken = token;
   if (!url) return;
   btn.disabled = true;
   el('addMsg').textContent = '';
