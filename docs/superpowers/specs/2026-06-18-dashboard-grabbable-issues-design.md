@@ -78,38 +78,52 @@ Add to the `ForgeAdapter` interface (`contracts/forge-adapter.ts`), implemented
 for both GitHub (`forge/github/github-adapter.ts`) and GitLab
 (`forge/gitlab/gitlab-adapter.ts`):
 
-- `countGrabbableIssues(repo: RepoRef): Promise<number>`
-  Open issues not assigned to the bot. Uses the forge's native negation filter
-  so it is cheap (no full pagination):
-  - GitHub: search API, `is:issue is:open repo:<repo> -assignee:<bot>`, read
-    `total_count`.
-  - GitLab: `GET /projects/:id/issues?state=opened&not[assignee_username]=<bot>&per_page=1`,
-    read the `X-Total` header.
 - `listGrabbableIssues(repo: RepoRef): Promise<Issue[]>`
-  The full list (reuses the same filter, paginated). Fetched only when a modal
-  opens.
+  Open issues NOT assigned to the bot. One page (`per_page: 100`, no `--paginate`)
+  of open issues, then **client-side filter** out any issue whose `assignees`
+  include the bot (and, on GitHub, drop PRs — exactly as the existing list
+  methods do). The badge count is `list.length`; the modal renders the same list.
 - `assignIssue(repo: RepoRef, issueIid: number, username: string): Promise<void>`
   Idempotent assign of one user to an issue. (`assignMR` only covers MRs today;
   this is the missing primitive.)
 
-**Design tension resolved — count vs. list cost.** Listing every repo's full open
-backlog on every 5s poll is real API load on large repos. So the badge uses the
-cheap header/`total_count` count on each poll, and the full list is fetched
-lazily only when the modal opens (mirrors the per-issue drill-down, #41).
+**Design tension resolved — count vs. list cost, and why ONE method not two.**
+The original design split a cheap "count" call from a lazy "list" call. Ground
+truth killed that: the shared HTTP client (`forge/cli.ts` `ForgeCli.api`) returns
+only the parsed JSON body — it does NOT expose response headers, so GitLab's
+`X-Total` and GitHub's search `total_count` are unreachable without modifying the
+frozen shared transport. Rather than plumb headers through it (or adopt the
+rate-limited GitHub search API, which is used nowhere in the codebase), we use ONE
+method that fetches a single bounded page and filters client-side.
+
+Cost is acceptable because it is marginal next to work the dashboard already does
+every poll: `assembleDashboard` already calls `listAssignedOpenIssues` per repo
+AND a `getSnapshot` (several forge calls) per assigned issue. One extra single-page
+list per repo is noise against that fan-out.
+
+**Bounded-count caveat (documented, not hidden):** the page cap is 100. A repo
+with >100 open issues may under-count grabbable ones, and the badge shows `100+`
+when the page is full. This is a badge, not an accountant — acceptable, and
+surfaced in the UI via the `+`.
 
 ## 2. Web read path
 
 - `RepoView` (`packages/core/src/views/assemble.ts`) gains
-  `grabbableCount: number`, populated during assembly via
-  `countGrabbableIssues`. A per-repo forge error degrades to omitting the count
-  (existing `error` field pattern), never breaks the card.
-- The view also exposes a `writesEnabled: boolean` flag so the frontend can
-  show/hide the "Work on this" button (writes are gated server-side regardless).
+  `grabbableCount: number`, populated during assembly via `listGrabbableIssues`
+  (`= list.length`, capped at the 100 page). It rides in the SAME `try` as the
+  existing assigned-issue assembly, so a per-repo forge error already degrades the
+  whole card to `error` (the existing pattern) rather than half-rendering.
+- The dashboard JSON already carries `writesEnabled` (server.ts:64) — the frontend
+  uses the SAME flag for the "Work on this" button as it does for the add-repo
+  button. No new flag.
 - New route `GET /repos/:repoId/open-issues` (`packages/web/src/server.ts`) →
-  `{ issues: IssueListItem[] }`, driven by `listGrabbableIssues`. `repoId` is the
-  URL-encoded `group/repo` segment, consistent with the existing
-  `/repos/:repoId/issues/:iid` route. `IssueListItem` carries `iid, title,
-  author, labels, issueUrl` — the fields the modal renders.
+  `{ issues: OpenIssueItem[] }`, driven by a new read seam `loadOpenIssues` that
+  calls `listGrabbableIssues`. `repoId` is the URL-encoded `repo.url` segment,
+  consistent with the existing `/repos/:repoId/issues/:iid` route. `OpenIssueItem`
+  carries `iid, title, author, labels, issueUrl` — the fields the modal renders.
+- This route forces a real `repoForId` resolution: `main.ts` currently stubs it to
+  `repos[0]` (single-repo v1). We replace the stub with
+  `repos.find(r => r.url === repoId)`, which also fixes multi-repo drill-down.
 
 ## 3. Web write path
 
@@ -152,22 +166,35 @@ disabled (consistent with `POST /repos`).
 
 ## 5. Testing
 
-- Adapter unit tests (GitHub + GitLab) for `countGrabbableIssues`,
-  `listGrabbableIssues`, `assignIssue` against mocked API responses — including
-  the negation-filter count parsing (`total_count` / `X-Total`).
-- `assemble.ts` test: `grabbableCount` populated; per-repo error degrades to no
-  count without throwing.
-- Server route tests for `GET /open-issues` and `POST .../work`, including auth
-  gating (401 no token, 403 writes disabled) and the allowlist-warning path.
-- Reconciler/daemon: unchanged — no new tests needed; existing coverage applies
-  because the daemon path (assignment → next-tick pickup) is unmodified.
+- Adapter unit tests (GitHub + GitLab) for `listGrabbableIssues` (open issues
+  returned; bot-assigned filtered out; GitHub PRs dropped) and `assignIssue`
+  (idempotent no-op when already assigned; correct endpoint/body otherwise),
+  against the `FakeExec` + `onApi` mock the existing adapter tests use.
+- `core` unit test for `workOnIssue`: assigns the bot; applies `require_label`
+  only when set; returns the `actor-allowlist-blocks-autostart` warning iff
+  `allowed_actors` is non-empty and excludes the bot.
+- `assemble.ts` test (`views.test.ts`): `grabbableCount` populated from the new
+  read method; the existing `roAdapter` fake and its calls-set assertion are
+  updated for the added read method.
+- Server route tests (`server.test.ts`) for `GET /open-issues` and
+  `POST .../work`, including auth gating (401 no token, 403 wrong token, 404 when
+  writes disabled) and the allowlist-warning passthrough.
+- The full-adapter fake `test/helpers/daemon.ts` and any `ReadOnlyForgeAdapter`
+  literal gain the new methods so the suite compiles.
+- Frontend (`page.ts`): no unit harness exists in the repo (it is a static HTML
+  string); covered by the server/core tests plus a manual verification step
+  (load dashboard, open modal, click "Work on this", observe assignment).
+- Reconciler/daemon: unchanged — existing coverage applies because the daemon
+  path (assignment → next-tick pickup) is unmodified.
 
 ## Decisions (locked)
 
 - One-click, no confirm dialog — optimistic feedback instead.
-- Cheap count on every poll, lazy full list on modal open.
+- ONE `listGrabbableIssues` method; count = `list.length` (single bounded page),
+  no separate count call and no header/search plumbing into the shared transport.
 - Trigger label auto-applied only when `require_label` is configured.
 - `allowed_actors` mismatch is surfaced as a warning, not silently worked around.
+- `repoForId` upgraded from the `repos[0]` stub to a real URL lookup.
 
 ## Out of scope (YAGNI)
 
