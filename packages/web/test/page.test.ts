@@ -1345,3 +1345,132 @@ describe('drill-down panel CSS is themed, not hardcoded (#41/#44)', () => {
     expect(css).toContain('.pill.changes { background: var(--s-blocked-bg)');
   });
 });
+
+// Keyboard navigation + live filter. Drive the shipped artifact: render the fixture, then
+// dispatch real KeyboardEvents at document (where the page binds its single handler) and
+// observe the .selected class, the filter's .filtered hides, and the help dialog.
+describe('keyboard navigation (j/k/o/g/G) + live filter', () => {
+  const press = (w: PageWindow, key: string, init: KeyboardEventInit = {}) =>
+    w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key, bubbles: true, ...init }));
+  const selectedKey = (w: PageWindow) =>
+    (w.document.querySelector('tr.issue.selected') as HTMLElement | null)?.dataset.key ?? null;
+  const filterInput = (w: PageWindow) => w.document.getElementById('filter') as HTMLInputElement;
+  const typeFilter = (w: PageWindow, value: string) => {
+    filterInput(w).value = value;
+    filterInput(w).dispatchEvent(new w.Event('input', { bubbles: true }));
+  };
+  const K_API1 = 'gitlab.com/g/api#1';
+  const K_API2 = 'gitlab.com/g/api#2';
+  const K_WEB7 = 'github.com/o/web#7';
+
+  it('first j selects the top row; j/k walk visible rows and clamp at the ends', () => {
+    const w = loadPage();
+    w.render(view());
+    expect(selectedKey(w)).toBeNull();
+    press(w, 'j');
+    expect(selectedKey(w)).toBe(K_API1);
+    press(w, 'j');
+    expect(selectedKey(w)).toBe(K_API2);
+    press(w, 'j');
+    expect(selectedKey(w)).toBe(K_WEB7);
+    press(w, 'j'); // already last → clamp, no wrap
+    expect(selectedKey(w)).toBe(K_WEB7);
+    press(w, 'k');
+    expect(selectedKey(w)).toBe(K_API2);
+  });
+
+  it('g g jumps to the first row, G to the last', () => {
+    const w = loadPage();
+    w.render(view());
+    press(w, 'G');
+    expect(selectedKey(w)).toBe(K_WEB7);
+    press(w, 'g');
+    press(w, 'g');
+    expect(selectedKey(w)).toBe(K_API1);
+  });
+
+  it('a lone g followed by a non-g is consumed without acting', () => {
+    const w = loadPage();
+    w.render(view());
+    press(w, 'g');
+    press(w, 'x'); // not a chord completion, not a binding
+    expect(selectedKey(w)).toBeNull();
+  });
+
+  it('o opens the selected issue detail; Esc closes it', () => {
+    const w = loadPage();
+    w.render(view());
+    press(w, 'j');
+    press(w, 'o');
+    const row = w.document.querySelector('tr.issue.selected') as HTMLElement;
+    expect(row.classList.contains('open')).toBe(true);
+    press(w, 'Escape');
+    expect(row.classList.contains('open')).toBe(false);
+  });
+
+  it('selection survives a poll, and hands off when the selected row vanishes', () => {
+    const w = loadPage();
+    w.render(view());
+    press(w, 'j');
+    press(w, 'j');
+    expect(selectedKey(w)).toBe(K_API2);
+    w.render(view()); // an unchanged poll keeps the same selection
+    expect(selectedKey(w)).toBe(K_API2);
+    // Drop issue #2 from the first repo; selection falls back to a still-visible row.
+    const v = view();
+    v.repos[0]!.issues = v.repos[0]!.issues.filter((i) => i.iid !== 2);
+    w.render(v);
+    expect(selectedKey(w)).toBe(K_API1);
+  });
+
+  it('/ focuses the filter; typing hides non-matching rows by title, #iid, and state', () => {
+    const w = loadPage();
+    w.render(view());
+    press(w, '/');
+    expect(w.document.activeElement).toBe(filterInput(w));
+    typeFilter(w, 'second'); // matches issue #2 only
+    expect(rowByKey(w, K_API2)?.classList.contains('filtered')).toBe(false);
+    expect(rowByKey(w, K_API1)?.classList.contains('filtered')).toBe(true);
+    expect(rowByKey(w, K_WEB7)?.classList.contains('filtered')).toBe(true);
+    // The repo whose every issue is filtered out collapses too.
+    expect(repoCards(w)[1]?.classList.contains('filtered')).toBe(true);
+    typeFilter(w, 'in-review'); // match by state
+    expect(rowByKey(w, K_WEB7)?.classList.contains('filtered')).toBe(false);
+    typeFilter(w, '#7'); // match by issue number
+    expect(rowByKey(w, K_WEB7)?.classList.contains('filtered')).toBe(false);
+    typeFilter(w, ''); // cleared → everything visible again
+    expect(rows(w).filter((r) => r.classList.contains('filtered'))).toHaveLength(0);
+  });
+
+  it('a filter that hides the selected row hands selection to the nearest visible one', () => {
+    const w = loadPage();
+    w.render(view());
+    press(w, 'j'); // selects #1
+    expect(selectedKey(w)).toBe(K_API1);
+    typeFilter(w, 'second'); // hides #1, leaves #2
+    expect(selectedKey(w)).toBe(K_API2);
+  });
+
+  it('single-key shortcuts are inert while typing in the filter (Esc still works)', () => {
+    const w = loadPage();
+    w.render(view());
+    press(w, 'j'); // select #1
+    filterInput(w).focus();
+    press(w, 'j'); // typed into the field, not a nav key
+    expect(selectedKey(w)).toBe(K_API1); // unchanged
+    filterInput(w).value = 'zzz';
+    press(w, 'Escape'); // Esc is the one key honored while typing
+    expect(filterInput(w).value).toBe('');
+  });
+
+  it('? toggles the shortcuts help dialog', () => {
+    const w = loadPage();
+    w.render(view());
+    const help = w.document.getElementById('helpDialog') as HTMLDialogElement;
+    expect(help.open).toBe(false);
+    press(w, '?');
+    expect(help.open).toBe(true);
+    press(w, '?');
+    expect(help.open).toBe(false);
+  });
+});
