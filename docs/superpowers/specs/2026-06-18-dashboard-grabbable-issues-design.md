@@ -181,9 +181,12 @@ disabled (consistent with `POST /repos`).
   writes disabled) and the allowlist-warning passthrough.
 - The full-adapter fake `test/helpers/daemon.ts` and any `ReadOnlyForgeAdapter`
   literal gain the new methods so the suite compiles.
-- Frontend (`page.ts`): no unit harness exists in the repo (it is a static HTML
-  string); covered by the server/core tests plus a manual verification step
-  (load dashboard, open modal, click "Work on this", observe assignment).
+- Frontend (`page.ts`): covered by the existing jsdom harness in
+  `packages/web/test/page.test.ts` (it `eval`s the page script) — add cases for
+  badge visibility/thresholding, modal lazy-fetch, `writesEnabled` button gating,
+  the work POST + warning handling, and token-clear on auth failure. Plus a manual
+  verification step (load dashboard, open modal, click "Work on this", observe
+  assignment).
 - Reconciler/daemon: unchanged — existing coverage applies because the daemon
   path (assignment → next-tick pickup) is unmodified.
 

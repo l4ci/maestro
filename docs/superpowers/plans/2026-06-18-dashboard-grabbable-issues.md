@@ -934,7 +934,7 @@ git commit -m "Wire work-on-issue deps and real repoForId in web composition"
 
 ## Task 7: Frontend — badge, modal, "Work on this" button
 
-> No frontend unit-test harness exists in this repo (`page.ts` is a static HTML string). This task is verified by build + a manual run (Task 8 Step 4). All forge content goes through `span()` / `link()` / `avatar()` (which use `textContent`) — NEVER `innerHTML`.
+> A jsdom test harness exists at `packages/web/test/page.test.ts` (it `eval`s the page script) — add UI cases there for the new badge/modal/work-button logic. Also verified by build + a manual run (Task 8 Step 4). All forge content goes through `span()` / `link()` / `avatar()` (which use `textContent`) — NEVER `innerHTML`.
 
 **Files:**
 - Modify: `packages/web/src/page.ts`
