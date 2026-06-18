@@ -204,6 +204,9 @@ export function recordingAdapter(cfg: AdapterConfig = {}): AdapterRecorder {
       r.calls.push('assignMR');
       r.assigned.push({ mrIid, username });
     },
+    assignIssue: async () => {
+      r.calls.push('assignIssue');
+    },
     requestReview: async (_repo, mrIid, username) => {
       r.calls.push('requestReview');
       maybeThrow('requestReview');

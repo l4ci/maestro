@@ -863,3 +863,22 @@ describe('listGrabbableIssues — open issues not assigned to the bot', () => {
     expect(call?.args).not.toContain('--paginate');
   });
 });
+
+describe('assignIssue — hand an issue to a user', () => {
+  it('resolves the username and PUTs assignee_ids when not already assigned', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/users', [user(7, 'maestro-bot')]);
+    fake.onApi('GET', '/issues/42', rawIssue({ iid: 42, assignees: [] }));
+    fake.onApi('PUT', '/issues/42', rawIssue({ iid: 42 }));
+    await a.assignIssue(repo, 42, 'maestro-bot');
+    expect(bodyOf(fake, 'PUT', '/issues/42')).toEqual({ assignee_ids: [7] });
+  });
+
+  it('is a no-op when the user is already assigned', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/users', [user(7, 'maestro-bot')]);
+    fake.onApi('GET', '/issues/42', rawIssue({ iid: 42, assignees: [user(7, 'maestro-bot')] }));
+    await a.assignIssue(repo, 42, 'maestro-bot');
+    expect(fake.callsTo('PUT', '/issues/42')).toHaveLength(0);
+  });
+});

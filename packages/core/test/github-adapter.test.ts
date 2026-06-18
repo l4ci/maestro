@@ -958,3 +958,20 @@ describe('listGrabbableIssues — open issues not assigned to the bot', () => {
     expect(call?.args).not.toContain('--paginate');
   });
 });
+
+describe('assignIssue — hand an issue to a user', () => {
+  it('POSTs the assignee when not already assigned', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/issues/42', rawIssue({ number: 42, assignees: [] }));
+    fake.onApi('POST', '/issues/42/assignees', rawIssue({ number: 42 }));
+    await a.assignIssue(repo, 42, 'maestro-bot');
+    expect(bodyOf(fake, 'POST', '/issues/42/assignees')).toEqual({ assignees: ['maestro-bot'] });
+  });
+
+  it('is a no-op when the user is already assigned', async () => {
+    const { a, fake } = mk();
+    fake.onApi('GET', '/issues/42', rawIssue({ number: 42, assignees: [user(1, 'maestro-bot')] }));
+    await a.assignIssue(repo, 42, 'maestro-bot');
+    expect(fake.callsTo('POST', '/issues/42/assignees')).toHaveLength(0);
+  });
+});

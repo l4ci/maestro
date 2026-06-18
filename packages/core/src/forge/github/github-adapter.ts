@@ -276,6 +276,15 @@ export class GithubAdapter implements ForgeAdapter {
     await this.#addAssignees(repo, mrIid, [username]);
   }
 
+  async assignIssue(repo: RepoRef, issueIid: number, username: string): Promise<void> {
+    const issue = await this.#c.apiRequired<RawIssue>(
+      'GET',
+      `${this.#base(repo)}/issues/${issueIid}`,
+    );
+    if ((issue.assignees ?? []).some((a) => a.login === username)) return; // already assigned
+    await this.#addAssignees(repo, issueIid, [username]);
+  }
+
   async requestReview(repo: RepoRef, mrIid: number, username: string): Promise<void> {
     // GitHub 422s on a review request from the PR author. maestro always opens the PR as the
     // bot, so a review of the bot account by itself (shared-account setup, bot_user = creator)

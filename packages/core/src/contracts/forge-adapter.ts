@@ -71,6 +71,9 @@ export interface ForgeAdapter {
   updateMRDescription(repo: RepoRef, mrIid: number, body: string): Promise<void>;
   setDraft(repo: RepoRef, mrIid: number, draft: boolean): Promise<void>;
   assignMR(repo: RepoRef, mrIid: number, username: string): Promise<void>;
+  /** Assign one user to an ISSUE (assignMR covers MRs only). Idempotent: a no-op when the
+   *  user is already an assignee. Backs the dashboard "Work on this" hand-off to the bot. */
+  assignIssue(repo: RepoRef, issueIid: number, username: string): Promise<void>;
   /** Request review from a user (GitLab reviewer_ids / GitHub requested_reviewers) — the
    *  handoff ping (§7). Idempotent. A forge that refuses (GitHub 422: the requested user is
    *  the PR author on a shared bot account, or a non-collaborator) treats it as a no-op; the

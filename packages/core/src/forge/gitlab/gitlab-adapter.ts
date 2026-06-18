@@ -279,6 +279,19 @@ export class GitlabAdapter implements ForgeAdapter {
     });
   }
 
+  async assignIssue(repo: RepoRef, issueIid: number, username: string): Promise<void> {
+    const pid = this.#pid(repo);
+    const id = Number(await this.#resolveUserId(username));
+    const issue = await this.#c.apiRequired<RawIssue & { assignees?: RawUser[] }>(
+      'GET',
+      `/projects/${pid}/issues/${issueIid}`,
+    );
+    if ((issue.assignees ?? []).some((u) => String(u.id) === String(id))) return; // already assigned
+    await this.#c.api('PUT', `/projects/${pid}/issues/${issueIid}`, {
+      body: { assignee_ids: [id] },
+    });
+  }
+
   async requestReview(repo: RepoRef, mrIid: number, username: string): Promise<void> {
     const pid = this.#pid(repo);
     const id = Number(await this.#resolveUserId(username));
