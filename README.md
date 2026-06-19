@@ -261,6 +261,10 @@ flowchart TD
   settings, skills, and permission modes. Set `defaults.agent.kind: codex` to run
   OpenAI's Codex CLI (`codex exec`) instead — the daemon-global choice is the only
   difference; the cold-session, status-contract, and proof flow are identical.
+  > ⚠️ **Codex is unverified.** The Codex backend is unit-tested against the
+  > published Codex SDK types but has not yet been run against a live `codex` CLI.
+  > Treat it as experimental until [#122](https://github.com/l4ci/maestro/issues/122)
+  > is closed.
 - **Proof generator** — Pluggable per repo. Pick `playwright`, `test-output`,
   `diff-summary`, or `none`.
 - **CLI and Web** — Thin shells over the shared core (see below).
@@ -352,6 +356,7 @@ defaults:
   agent:
     kind: claude              # coding agent: 'claude' (default) or 'codex' (OpenAI Codex CLI)
     # command: /usr/local/bin/claude   # optional: override the binary/path (defaults to the kind name)
+    # NOTE: 'codex' is experimental and not yet verified against a live codex CLI — see issue #122.
 forges:
   # Single entry per forge (shorthand)…
   github: { host: github.com, token_env: MAESTRO_GITHUB_TOKEN }
