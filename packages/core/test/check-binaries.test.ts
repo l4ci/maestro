@@ -70,26 +70,38 @@ describe('checkBinaries', () => {
 });
 
 describe('requiredBinaries', () => {
-  const base = (forges: MaestroConfig['forges']): MaestroConfig =>
-    ({ forges }) as unknown as MaestroConfig;
+  const base = (
+    forges: MaestroConfig['forges'],
+    agent?: { kind: 'claude' | 'codex'; command?: string },
+  ): MaestroConfig =>
+    ({ forges, defaults: agent ? { agent } : undefined }) as unknown as MaestroConfig;
 
-  it('always needs git + claude, and only the configured forge binaries', () => {
+  it('defaults to git + claude when no agent is configured, plus configured forges', () => {
     const gitlabOnly = requiredBinaries(base({ gitlab: { host: 'gitlab.com', token_env: 'X' } }));
     expect(gitlabOnly.map((r) => r.bin)).toEqual(['git', 'claude', 'glab']);
 
     const githubOnly = requiredBinaries(base({ github: { host: 'github.com', token_env: 'Y' } }));
     expect(githubOnly.map((r) => r.bin)).toEqual(['git', 'claude', 'gh']);
-
-    const both = requiredBinaries(
-      base({
-        gitlab: { host: 'gitlab.com', token_env: 'X' },
-        github: { host: 'github.com', token_env: 'Y' },
-      }),
-    );
-    expect(both.map((r) => r.bin)).toEqual(['git', 'claude', 'glab', 'gh']);
   });
 
-  it('allBinaries lists the full superset', () => {
-    expect(allBinaries().map((r) => r.bin)).toEqual(['git', 'claude', 'glab', 'gh']);
+  it('requires codex instead of claude when agent.kind is codex', () => {
+    const r = requiredBinaries(
+      base({ github: { host: 'github.com', token_env: 'Y' } }, { kind: 'codex' }),
+    );
+    expect(r.map((x) => x.bin)).toEqual(['git', 'codex', 'gh']);
+  });
+
+  it('requires the explicit command override binary', () => {
+    const r = requiredBinaries(
+      base(
+        { github: { host: 'github.com', token_env: 'Y' } },
+        { kind: 'codex', command: '/opt/codex' },
+      ),
+    );
+    expect(r.map((x) => x.bin)).toEqual(['git', '/opt/codex', 'gh']);
+  });
+
+  it('allBinaries lists the full superset including codex', () => {
+    expect(allBinaries().map((r) => r.bin)).toEqual(['git', 'claude', 'codex', 'glab', 'gh']);
   });
 });
