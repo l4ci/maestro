@@ -92,21 +92,27 @@ agent: z.object({
 `daemon.ts` replaces `new ClaudeRunner(...)` with a factory keyed on
 `config.defaults.agent.kind`, passing the same `secretEnvKeys` / `onStall`.
 
-### `RunnerInput` generalize
+### `RunnerInput` unchanged; resolution moves to `ExecutorContext`
 
-`input.claude` → `input.agent`:
+(Refined during planning — simpler and consistent with keeping the `claude:` block
+name.) `RunnerInput.claude` is **not** renamed: it already carries `command`,
+`permissionMode`, and `stallTimeoutMs`, which are exactly what both agents need (Codex
+keys off `permissionMode === 'bypassPermissions'` and ignores `maxTurns`). Renaming it
+to `agent` while the config block stays `claude` would only create a mismatch.
+
+Instead, `ExecutorContext` gains `agent: AgentSelection` (the daemon-global selection),
+and `buildRunnerInput` / `buildMrRunnerInput` (executor.ts) resolve the binary:
 
 ```ts
-agent: {
-  command: string;
-  stallTimeoutMs?: number;
-  claude: { maxTurns: number; permissionMode: string }; // Claude-only; Codex ignores
+function resolveAgentCommand(ctx) {
+  if (ctx.agent.command) return ctx.agent.command;          // explicit override wins
+  return ctx.agent.kind === 'claude'                         // else kind name…
+    ? ctx.workflow.claude.command                            // …with claude back-compat
+    : ctx.agent.kind;                                        // (per-repo WORKFLOW override)
 }
 ```
 
-`buildRunnerInput` (executor.ts) fills `command` from the global agent config,
-falling back to WORKFLOW `claude.command` when `kind === 'claude'` (back-compat);
-`stallTimeoutMs` still from WORKFLOW `claude.stall_timeout_seconds`.
+`stallTimeoutMs` still comes from WORKFLOW `claude.stall_timeout_seconds`.
 
 ### Codex specifics
 
