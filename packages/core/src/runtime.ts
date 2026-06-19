@@ -8,6 +8,7 @@
 export * from './daemon/index.js';
 export * from './workflow/workflow-source.js';
 export * from './runner/claude-runner.js';
+export * from './runner/codex-runner.js';
 export * from './proof/strategies.js';
 export * from './handoff/handoff.js';
 export * from './bootstrap/infer-workflow-seed.js';

@@ -6,6 +6,7 @@ import { vi } from 'vitest';
 import { resolveRepoSettings } from '../../src/config/resolve-settings.js';
 import type {
   AgentResult,
+  AgentSelection,
   CiFailureLogs,
   Comment,
   CreateMRArgs,
@@ -390,6 +391,7 @@ export function buildContext(
     workspace?: WorkspaceFake;
     settings?: RepoSettings;
     workflow?: WorkflowFrontMatter;
+    agent?: AgentSelection;
     claims?: Claims;
     handoff?: ReturnType<typeof vi.fn>;
     proofAndHandoff?: ReturnType<typeof vi.fn>;
@@ -418,6 +420,7 @@ export function buildContext(
     exec: { run: async () => ({ code: 0, stdout: '', stderr: '' }) } as never,
     settings,
     workflow: partial.workflow ?? defaultWorkflow(),
+    agent: partial.agent ?? { kind: 'claude' },
     promptBody: partial.promptBody ?? 'do the work',
     claims,
     rateGate: partial.rateGate ?? new RateLimitGate(),

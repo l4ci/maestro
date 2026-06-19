@@ -165,7 +165,10 @@ async function dispatch(cmd: ParsedCommand, env: Env): Promise<number> {
         workspace.workspaceExists(repo, iid)
           ? workspace.listWorkspaces(repo).find((w) => w.iid === iid)?.dir
           : undefined;
-      return attach(cmd.issue, { exec, resolveWorkspace });
+      // Attach has no per-repo WORKFLOW loaded, so use the global agent selection:
+      // an explicit command override, else the kind name (claude|codex).
+      const agentCommand = config.defaults.agent.command ?? config.defaults.agent.kind;
+      return attach(cmd.issue, { exec, agentCommand, resolveWorkspace });
     }
   }
 }

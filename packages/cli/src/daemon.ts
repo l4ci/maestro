@@ -43,6 +43,7 @@ import {
   Claims,
   ClaudeRunner,
   type Clock,
+  CodexRunner,
   ConfigStore,
   HeartbeatWriter,
   type Logger,
@@ -51,6 +52,7 @@ import {
   type RepoUnit,
   type Rng,
   Scheduler,
+  type StallInfo,
   type TickContext,
   WatchedConfig,
   WorkflowCells,
@@ -155,17 +157,22 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
     ...(config.forges.gitlab ?? []).map((e) => e.token_env),
     ...(config.forges.github ?? []).map((e) => e.token_env),
   ];
-  const runner = new ClaudeRunner(exec, {
+  const agentSel = config.defaults.agent;
+  const runnerCfg = {
     secretEnvKeys,
     // Surface stall kills (previously invisible) so a false-positive kill during a long
     // no-event tool call — e.g. a cold `pnpm install` — is diagnosable in the journal.
-    onStall: ({ attempt, willRetry, timeoutMs }) =>
+    onStall: ({ attempt, willRetry, timeoutMs }: StallInfo) =>
       log.warn('runner: stall watchdog fired — no agent output, killed', {
         attempt,
         willRetry,
         timeoutMs,
       }),
-  });
+  };
+  const runner =
+    agentSel.kind === 'codex'
+      ? new CodexRunner(exec, runnerCfg)
+      : new ClaudeRunner(exec, runnerCfg);
   const globalMax = config.defaults.concurrency.global_max;
   // Work admission (#91): per-issue uniqueness (#18) + slot capacity (§14) in one seam.
   const claims = new Claims(globalMax);
@@ -233,6 +240,7 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
         exec,
         settings: cell.settings,
         workflow: cell.frontMatter,
+        agent: agentSel,
         promptBody: cell.promptBody,
         claims,
         rateGate,

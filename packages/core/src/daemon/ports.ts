@@ -6,6 +6,7 @@
 // frozen seams (§0.3 adapter, §0.9 runner, M4 handoff) only.
 
 import type {
+  AgentSelection,
   Exec,
   ForgeAdapter,
   HandoffFn,
@@ -88,6 +89,7 @@ export interface TickContext {
   exec: Exec; // §0.8 — proof generation runs commands through this
   settings: RepoSettings; // resolved; carries git / labels / trigger / concurrency
   workflow: WorkflowFrontMatter; // proof / environment / claude live here, not RepoSettings
+  agent: AgentSelection; // daemon-global agent selection (#codex); resolves RunnerInput command
   promptBody: string; // WORKFLOW body → RunnerInput.promptBody
   claims: Claims; // process-wide work admission: uniqueness + slot capacity (§14, #18, #91)
   rateGate: RateLimitGate; // process-wide Claude usage-limit backoff (#47)

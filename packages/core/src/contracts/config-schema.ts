@@ -36,6 +36,17 @@ export const ConfigSchema = z.object({
         clone_filter: z.string().nullable().default('blob:none'),
       })
       .default({}),
+    // Which coding agent the daemon runs (daemon-global, #codex). 'claude' (default)
+    // or 'codex' (OpenAI Codex CLI). `command` overrides the binary/path; absent →
+    // the kind name. Per-repo WORKFLOW.md keeps its `claude:` block for tuning
+    // (stall_timeout/max_turns); max_turns/permission_mode are claude-only and ignored
+    // under codex (codex exec has no turn cap; it uses --sandbox instead).
+    agent: z
+      .object({
+        kind: z.enum(['claude', 'codex']).default('claude'),
+        command: z.string().optional(),
+      })
+      .default({}),
   }),
   forges: ForgeConfigSchema,
   repos: z.array(
@@ -63,6 +74,9 @@ export interface MaestroConfig extends Omit<_RawConfig, 'forges'> {
     github?: ForgeEntry[];
   };
 }
+
+/** Daemon-global agent selection. */
+export type AgentSelection = _RawConfig['defaults']['agent'];
 
 /** Normalize a single forge entry or array into an array. */
 function normalizeForgeEntry(v: ForgeEntry | ForgeEntry[] | undefined): ForgeEntry[] | undefined {

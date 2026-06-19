@@ -7,6 +7,10 @@ defaults:
   poll_interval_idle: 5m # repos with nothing in flight (adaptive polling)
   poll_jitter: 5s # spread requests to avoid bursts/rate limits
   bot_user: maestro-bot
+  # Coding agent the daemon runs (daemon-global). 'claude' (default) or 'codex'.
+  # `command` overrides the binary/path; defaults to the kind name.
+  agent:
+    kind: claude
   concurrency:
     global_max: 2 # concurrent ACTIVE workers — size to RAM (§14)
   workspaces:
