@@ -235,7 +235,7 @@ flowchart TD
     Forge["Forge adapter<br/>GitLab + GitHub, one shared shape"]
     Rec["Reconciler<br/>(snapshot) to one action"]
     WSM["Workspace manager<br/>clone · branch · cleanup"]
-    Run["Claude runner<br/>headless 'claude -p'"]
+    Run["Agent runner<br/>headless cold session"]
     Proof["Proof generator<br/>playwright · tests · diff · none"]
 
     Config --> Rec
@@ -256,9 +256,11 @@ flowchart TD
 - **Workspace manager** — Clones a repo into a per-ticket folder, handles the
   branch, cleans up when the ticket is done. This is also the seam where, later,
   you could swap host folders for isolated containers.
-- **Claude runner** — Runs the same `claude` binary you use interactively, but
+- **Agent runner** — Runs the same `claude` binary you use interactively, but
   headless. Locally it uses your existing login and still loads your `CLAUDE.md`,
-  settings, skills, and permission modes.
+  settings, skills, and permission modes. Set `defaults.agent.kind: codex` to run
+  OpenAI's Codex CLI (`codex exec`) instead — the daemon-global choice is the only
+  difference; the cold-session, status-contract, and proof flow are identical.
 - **Proof generator** — Pluggable per repo. Pick `playwright`, `test-output`,
   `diff-summary`, or `none`.
 - **CLI and Web** — Thin shells over the shared core (see below).
@@ -275,7 +277,8 @@ daemon will run:
 |---|---|---|
 | **Node.js ≥ 20** + **pnpm** | runs Maestro itself | [nodejs.org](https://nodejs.org) · [pnpm.io](https://pnpm.io/installation) |
 | **git** | clone and branch each ticket's workspace | your package manager |
-| **claude** | the coding agent, run headless | [Claude Code](https://claude.com/claude-code) |
+| **claude** | the default coding agent, run headless — *unless you set `agent.kind: codex`* | [Claude Code](https://claude.com/claude-code) |
+| **codex** | alternative coding agent, run headless — *only if you set `agent.kind: codex`* | [OpenAI Codex CLI](https://github.com/openai/codex) |
 | **glab** | talk to the GitLab API — *only if you watch GitLab repos* | [gitlab.com/gitlab-org/cli](https://gitlab.com/gitlab-org/cli) |
 | **gh** | talk to the GitHub API — *only if you watch GitHub repos* | [cli.github.com](https://cli.github.com) |
 
@@ -346,6 +349,9 @@ defaults:
   bot_user: maestro-bot
   concurrency:
     global_max: 2             # how many tickets to actively work at once
+  agent:
+    kind: claude              # coding agent: 'claude' (default) or 'codex' (OpenAI Codex CLI)
+    # command: /usr/local/bin/claude   # optional: override the binary/path (defaults to the kind name)
 forges:
   # Single entry per forge (shorthand)…
   github: { host: github.com, token_env: MAESTRO_GITHUB_TOKEN }
@@ -782,7 +788,7 @@ support for them is deliberately opt-in (`--public`):
 It's a pnpm + TypeScript monorepo.
 
 ```
-packages/core   the brain: reconciler, forge adapters, Claude runner, proof,
+packages/core   the brain: reconciler, forge adapters, agent runner, proof,
                 config + workflow loaders, daemon loop, tool preflight
 packages/cli    maestro add | status | list | logs | run | dashboard | doctor + daemon entry
 packages/web    read-only dashboard (HTML page + JSON API) + add-repo form
