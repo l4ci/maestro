@@ -701,6 +701,26 @@ describe('P — #29 stage pipeline (only when the WORKFLOW declares roles)', () 
     expect(reconcile(pin({ snapshot: snap })).kind).toBe('run-plan');
   });
 
+  it('P4c dedicated account: @<bot> approve from a human after the draft gates → run-plan', () => {
+    const snap = snapshot({
+      recentComments: [
+        comment('reporter', `@${BOT} approve`, '2026-06-05T12:00:00Z'),
+        comment(BOT, `### 📋 AC draft\n${AC_DRAFT}`, '2026-06-05T11:00:00Z'),
+      ],
+    });
+    expect(reconcile(pin({ snapshot: snap })).kind).toBe('run-plan');
+  });
+
+  it('P4d a @<bot> approve authored BY the bot does NOT gate (shared account)', () => {
+    const snap = snapshot({
+      recentComments: [
+        comment(BOT, `@${BOT} approve`, '2026-06-05T12:00:00Z'),
+        comment(BOT, `### 📋 AC draft\n${AC_DRAFT}`, '2026-06-05T11:00:00Z'),
+      ],
+    });
+    expect(reconcile(pin({ snapshot: snap })).kind).toBe('run-define');
+  });
+
   it('P5 approve BEFORE the draft does not gate (must answer the draft)', () => {
     const snap = snapshot({
       recentComments: [

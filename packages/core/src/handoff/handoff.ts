@@ -42,12 +42,13 @@ const READY_SENTINEL = '<!-- maestro:ready-for-review -->';
 /** The handoff ping: a single comment that always @-mentions the ticket creator, so it
  *  notifies whether or not the forge review request landed (a non-collaborator creator, or a
  *  GitHub 422 on a shared bot account). Carries the MR link and the three response channels. */
-function readyBody(ticketCreator: string, mrUrl: string | undefined): string {
+function readyBody(ticketCreator: string, mrUrl: string | undefined, botUser: string): string {
   const link = mrUrl ? ` (${mrUrl})` : '';
-  const channels =
-    'To respond, pick whichever is natural:\n' +
-    '- **Approve** or **request changes** on the MR, or\n' +
-    '- start a comment with `/maestro <feedback>` on the MR or this issue.';
+  const channels = [
+    'To respond, pick whichever is natural:',
+    '- **Approve** or **request changes** on the MR, or',
+    `- start a comment with \`/maestro <feedback>\` — or \`@${botUser} <feedback>\` from your own account — on the MR or this issue.`,
+  ].join('\n');
   return `@${ticketCreator} this is ready for your review${link}. Proof is posted above.\n\n${channels}\n\n${READY_SENTINEL}`;
 }
 
@@ -82,7 +83,11 @@ export async function handoff(input: HandoffInput): Promise<void> {
   // double-ping (#115).
   const pinged = snap.recentComments.some((c) => c.body.includes(READY_SENTINEL));
   if (!pinged) {
-    await adapter.commentIssue(repo, issueIid, readyBody(ticketCreator, mr?.webUrl));
+    await adapter.commentIssue(
+      repo,
+      issueIid,
+      readyBody(ticketCreator, mr?.webUrl, settings.botUser),
+    );
   }
 
   // 5. Un-draft — guarded by draft state.

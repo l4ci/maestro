@@ -276,7 +276,7 @@ async function runDefine(snapshot: IssueSnapshot, ctx: ExecutorContext): Promise
       await ctx.adapter.commentIssue(
         repo,
         issue.iid,
-        `### 📋 Acceptance criteria (draft)\n\n${result.planComment}\n\n_Approve by applying the \`${ctx.settings.labels.todo}\` label or replying \`/maestro approve\`._\n\n${AC_DRAFT_SENTINEL}`,
+        `### 📋 Acceptance criteria (draft)\n\n${result.planComment}\n\n_Approve by applying the \`${ctx.settings.labels.todo}\` label or replying \`/maestro approve\` (or \`@${ctx.settings.botUser} approve\` from your own account)._\n\n${AC_DRAFT_SENTINEL}`,
       );
     }
     await applyIntentMove('run-define', snapshot, ctx);
@@ -827,7 +827,7 @@ export async function executeMrCommand(
     await ctx.workspace.pushBranch(handle, mr.sourceBranch);
     pushed = unpushed;
   }
-  await ctx.adapter.commentMR(repo, mr.iid, mrReply(result, pushed));
+  await ctx.adapter.commentMR(repo, mr.iid, mrReply(result, pushed, ctx.settings.botUser));
 }
 
 function buildMrRunnerInput(
@@ -852,7 +852,7 @@ function buildMrRunnerInput(
 
 /** The reply body (§5). Every terminal status posts it WITH the sentinel, so the edge
  *  clears on every path — success, no-op, needs_input, ran-out-of-turns. */
-function mrReply(result: AgentResult, pushed: number): string {
+function mrReply(result: AgentResult, pushed: number, botUser: string): string {
   const head =
     result.status === 'done'
       ? pushed > 0
@@ -860,6 +860,6 @@ function mrReply(result: AgentResult, pushed: number): string {
         : '✅ Done — no code changes were needed.'
       : result.status === 'needs_input'
         ? '🙋 I need a decision before continuing:'
-        : '⏳ Ran out of turns before finishing — re-comment `/maestro …` to continue.';
+        : `⏳ Ran out of turns before finishing — re-comment \`/maestro …\` (or \`@${botUser} …\`) to continue.`;
   return `🎼 ${head}\n\n${result.summary}\n\n${MR_COMMAND_REPLY_SENTINEL}`;
 }

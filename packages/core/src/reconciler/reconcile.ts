@@ -23,7 +23,7 @@ import {
   REVIEW_PASS_SENTINEL,
 } from '../contracts/index.js';
 import { branchName, mrTitle } from '../contracts/naming.js';
-import { isHumanComment } from '../forge/comments.js';
+import { isApproveCommand, isHumanComment } from '../forge/comments.js';
 import { isAuthorizedActor } from '../security/authorized-actor.js';
 
 function assertNever(x: never): never {
@@ -187,9 +187,10 @@ export function deriveStage(snapshot: IssueSnapshot, settings: RepoSettings): St
 }
 
 /** The definition gate (#29): a human applied the todo label (possibly at creation —
- *  the explicit skip-define escape hatch), or replied `/maestro approve` after the
- *  define agent's AC draft. Agent/daemon comments can never approve (isHumanComment:
- *  a same-account approve must carry the command at body start). */
+ *  the explicit skip-define escape hatch), or replied `/maestro approve` (or `@<bot>
+ *  approve` from a dedicated bot account) after the define agent's AC draft. Agent/daemon
+ *  comments can never approve (isHumanComment: a same-account approve must carry the
+ *  command at body start). */
 function acApproved(snapshot: IssueSnapshot, settings: RepoSettings): boolean {
   if (snapshot.issue.labels.includes(settings.labels.todo)) return true;
   const draftAt = snapshot.recentComments.find((c) =>
@@ -200,7 +201,7 @@ function acApproved(snapshot: IssueSnapshot, settings: RepoSettings): boolean {
     (c) =>
       isHumanComment(c, settings.botUser) &&
       c.createdAt > draftAt &&
-      /^\/maestro approve\b/m.test(c.body),
+      isApproveCommand(c, settings.botUser),
   );
 }
 

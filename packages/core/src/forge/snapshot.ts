@@ -21,13 +21,8 @@ import type {
   MrActivity,
   RepoRef,
 } from '../contracts/index.js';
-import {
-  CommentSchema,
-  IssueSchema,
-  MAESTRO_COMMAND_RE,
-  MergeRequestSchema,
-} from '../contracts/index.js';
-import { isHumanComment } from './comments.js';
+import { CommentSchema, IssueSchema, MergeRequestSchema } from '../contracts/index.js';
+import { isHumanComment, isMaestroCommand } from './comments.js';
 import { SnapshotValidationError } from './errors.js';
 
 const CommentsSchema = z.array(CommentSchema);
@@ -151,11 +146,16 @@ export async function findMaestroMr(
   };
 }
 
-/** The newest body-start `/maestro` comment timestamp, or undefined. Any author: the daemon
- *  leads every comment with a heading and the agent has no forge access (§13.1), so a
- *  body-start command can only be a human keystroke. Comments are newest-first. */
-function issueCommandAt(recentComments: Comment[]): string | undefined {
-  return recentComments.find((c) => MAESTRO_COMMAND_RE.test(c.body))?.createdAt;
+/** The newest body-start command timestamp, or undefined. A body-start `/maestro` (any
+ *  author — the daemon leads every comment with a heading and the agent has no forge access,
+ *  §13.1, so it can only be a human keystroke), or a body-start `@<botUser>` mention from a
+ *  non-bot author (the dedicated-account trigger, isMaestroCommand). Comments are
+ *  newest-first; `botUser` may be undefined on the shared-account path. */
+function issueCommandAt(
+  recentComments: Comment[],
+  botUser: string | undefined,
+): string | undefined {
+  return recentComments.find((c) => isMaestroCommand(c, botUser))?.createdAt;
 }
 
 /**
@@ -174,7 +174,7 @@ function unansweredIssueCommandAt(
   recentComments: Comment[],
   botUser: string | undefined,
 ): string | undefined {
-  const commandAt = issueCommandAt(recentComments);
+  const commandAt = issueCommandAt(recentComments, botUser);
   if (commandAt === undefined || botUser === undefined) return commandAt;
   const answeredAt = recentComments.find((c) => !isHumanComment(c, botUser))?.createdAt;
   return answeredAt !== undefined && answeredAt > commandAt ? undefined : commandAt;

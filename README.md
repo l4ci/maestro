@@ -9,11 +9,6 @@ It works on top of **GitLab** and **GitHub**. You keep using issues and merge
 requests the way you already do. Maestro just becomes another contributor on the
 team — one that happens to be an AI.
 
-> **Where the build is:** the full v1 lifecycle (M0–M8) is implemented and
-> tested. The pieces that talk to a *live* forge and run a *real* Claude session
-> end-to-end are gated behind environment flags and wait on a scratch repo +
-> token to exercise. Everything below describes the intended, built behaviour.
-
 ---
 
 ## The one-paragraph version
@@ -121,8 +116,10 @@ In words:
   notified even if the review request can't land (no access to the repo, or a
   shared bot account). From here you reply wherever is natural: approve or
   request changes on the MR, or steer with a `/maestro` comment on either the
-  MR or the issue — all three channels reach the agent. The order matters:
-  you're pinged last, when there's actually something to look at.
+  MR or the issue (on a dedicated bot account, a leading `@bot` mention works
+  too — see [Addressing the bot by name](#driving-maestro-from-a-merge-request--no-ticket-required)) —
+  all these channels reach the agent. The order matters: you're pinged last,
+  when there's actually something to look at.
 - **In review** — Maestro waits. If you approve, it merges using that repo's own
   git rules and the ticket auto-closes. If you request changes, it flips back to
   in-progress and feeds your feedback to the agent. Three channels count as
@@ -210,6 +207,16 @@ The same trust rules as tickets apply: on a shared bot account the body-start
 Maestro ticket (a `maestro/issue-*` branch, or one that `Closes #N`) are *not*
 picked up here — those stay with their ticket's lifecycle, where the same
 `/maestro` comment counts as review feedback.
+
+> **Addressing the bot by name.** If the bot runs on its **own dedicated
+> account** (not shared with you), you can start a command with an `@`-mention of
+> that account instead of `/maestro` — `@maestro-bot fix the failing test` works
+> anywhere a `/maestro` command does. It's an alias, nothing more: the mention
+> must lead the comment (a passing `@maestro-bot` mid-sentence stays ordinary
+> chatter), and it only counts from someone *other than* the bot — which is
+> exactly why it's a dedicated-account feature. On a **shared** account every
+> comment is authored by the bot itself, so the mention can't prove a human typed
+> it and `/maestro` stays the only hatch.
 
 ---
 

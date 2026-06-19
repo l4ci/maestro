@@ -3,8 +3,8 @@
 // intent. NO I/O, NO async; imports only contracts + the shared comment predicate.
 
 import type { Comment, TriggerGuard } from '../contracts/index.js';
-import { MAESTRO_COMMAND_RE, MR_COMMAND_REPLY_SENTINEL } from '../contracts/index.js';
-import { isHumanComment } from '../forge/comments.js';
+import { MR_COMMAND_REPLY_SENTINEL } from '../contracts/index.js';
+import { isHumanComment, isMaestroCommand, stripCommandPrefix } from '../forge/comments.js';
 import { isAuthorizedActor } from '../security/authorized-actor.js';
 
 export type MrCommandIntent = { kind: 'run-mr-command'; instruction: string } | { kind: 'none' };
@@ -16,9 +16,11 @@ export type MrCommandIntent = { kind: 'run-mr-command'; instruction: string } | 
  * and the next tick derives `none` — the edge can never loop (the issue #5 lesson, stronger
  * here because the clear is a reply, not a push that may never happen).
  *
- * Authorized = a human comment under the shared-account rule (isHumanComment: a different
- * author, OR a body-start `/maestro`), AND — when guard.allowedActors is non-empty — the
- * author is on the allowlist (fail-closed). `thread` is newest-first.
+ * A command is a body-start `/maestro` OR a body-start `@<botUser>` mention from a non-bot
+ * author (the dedicated-account trigger — see {@link isMaestroCommand}). Authorized = the
+ * comment is human under the shared-account rule (isHumanComment), AND — when
+ * guard.allowedActors is non-empty — the author is on the allowlist (fail-closed). `thread`
+ * is newest-first.
  */
 export function decideMrCommand(
   thread: Comment[],
@@ -31,11 +33,11 @@ export function decideMrCommand(
   const authorized = (c: Comment): boolean =>
     isHumanComment(c, botUser) && isAuthorizedActor(c.author.username, guard.allowedActors);
   const command = thread.find(
-    (c) => MAESTRO_COMMAND_RE.test(c.body) && authorized(c) && c.createdAt > lastReplyAt,
+    (c) => isMaestroCommand(c, botUser) && authorized(c) && c.createdAt > lastReplyAt,
   );
   if (!command) return { kind: 'none' };
   return {
     kind: 'run-mr-command',
-    instruction: command.body.replace(MAESTRO_COMMAND_RE, '').trim(),
+    instruction: stripCommandPrefix(command.body, botUser),
   };
 }

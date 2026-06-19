@@ -408,6 +408,46 @@ describe('assembleSnapshot', () => {
     expect(ignored.mr?.approvals.changesRequested).toBe(false);
   });
 
+  it('dedicated account: a body-start @<bot> issue comment feeds the changes-requested edge', async () => {
+    const cmt = (body: string, at: string): Comment => ({
+      id: at,
+      author: user('volker.otto'), // a human, distinct from the bot account
+      body,
+      createdAt: at,
+    });
+    const requested = await assembleSnapshot(
+      repo,
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr({ isDraft: false })],
+        comments: async () => [cmt('@maestro-bot make the badges greener', '2026-01-05')],
+      }),
+      50,
+      'maestro-bot', // dedicated bot account → the mention is provably human
+    );
+    expect(requested.mr?.approvals.changesRequested).toBe(true);
+
+    // The SAME mention authored by the bot account (shared-account) must NOT count.
+    const ignored = await assembleSnapshot(
+      repo,
+      42,
+      fakePrimitives({
+        openMergeRequests: async () => [mr({ isDraft: false })],
+        comments: async () => [
+          {
+            id: 'x',
+            author: user('maestro-bot'),
+            body: '@maestro-bot do it',
+            createdAt: '2026-01-05',
+          },
+        ],
+      }),
+      50,
+      'maestro-bot',
+    );
+    expect(ignored.mr?.approvals.changesRequested).toBe(false);
+  });
+
   // #7: a /maestro reply that answers a BLOCKED question lingers as a standing command. When
   // the resumed work is a no-op (the fix already lived in the target → no branch commit), the
   // push-only clear never fires and the MR bounces in-progress↔in-review forever. A daemon

@@ -102,4 +102,32 @@ describe('decideMrCommand — react-once self-clearing edge', () => {
     expect(got).toEqual({ kind: 'run-mr-command', instruction: 'fix the lint' });
     if (got.kind === 'run-mr-command') expect(got.instruction.startsWith('/maestro')).toBe(false);
   });
+
+  it('(i) dedicated account: a body-start @bot mention from a human triggers, prefix stripped', () => {
+    expect(
+      decideMrCommand([cmd('@bot fix the e2e tests', '2026-02-02', 'maintainer')], 'bot', guard),
+    ).toEqual({ kind: 'run-mr-command', instruction: 'fix the e2e tests' });
+  });
+
+  it('(j) shared account: a @bot mention authored BY the bot is NOT a command', () => {
+    expect(decideMrCommand([cmdBy('@bot fix it', '2026-02-02', 'bot')], 'bot', guard).kind).toBe(
+      'none',
+    );
+  });
+
+  it('(k) a mid-body @bot mention (casual chatter) does not trigger', () => {
+    expect(
+      decideMrCommand([cmd('I think @bot missed a case', '2026-02-02', 'maintainer')], 'bot', guard)
+        .kind,
+    ).toBe('none');
+  });
+
+  it('(l) @bot mention still respects the allowlist (fail-closed)', () => {
+    expect(
+      decideMrCommand([cmd('@bot x', '2026-02-02', 'stranger')], 'bot', {
+        requireLabel: null,
+        allowedActors: ['maintainer'],
+      }).kind,
+    ).toBe('none');
+  });
 });
