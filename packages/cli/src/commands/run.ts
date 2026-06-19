@@ -1,14 +1,16 @@
-// Part D — `maestro run <issue> --attach`. Launches an INTERACTIVE claude in the issue's
-// live workspace through the TTY-inherited Exec.attach seam (AM-8) so a human drives it at
-// the keyboard. This is explicitly NOT the daemon/headless path (§8): no `-p`, no
-// `--output-format stream-json`, and ClaudeRunner is never constructed. A missing
-// workspace is a clear typed error (the daemon must start the issue first), never a
-// silent claude launch in the wrong directory.
+// Part D — `maestro run <issue> --attach`. Launches the CONFIGURED INTERACTIVE agent
+// (claude or codex) in the issue's live workspace through the TTY-inherited Exec.attach
+// seam (AM-8) so a human drives it at the keyboard. This is explicitly NOT the
+// daemon/headless path (§8): no `-p`, no `--output-format stream-json`, and no runner
+// is constructed. A missing workspace is a clear typed error (the daemon must start the
+// issue first), never a silent agent launch in the wrong directory.
 
 import type { Exec } from '@maestro/core';
 
 export interface AttachDeps {
   exec: Exec;
+  /** The configured agent binary to launch interactively (claude or codex). */
+  agentCommand: string;
   /** Resolve the issue's live workspace dir, or undefined if none exists yet. */
   resolveWorkspace: (iid: number) => string | undefined;
 }
@@ -22,10 +24,10 @@ export class NoWorkspaceError extends Error {
   }
 }
 
-/** Resolve the workspace, then hand the terminal to an interactive claude. Returns the
- *  child exit code. Interactive flags ONLY — keep the argv minimal (no headless flags). */
+/** Resolve the workspace, then hand the terminal to the configured interactive agent.
+ *  Returns the child exit code. Interactive flags ONLY — keep the argv minimal (no headless flags). */
 export async function attach(issueIid: number, deps: AttachDeps): Promise<number> {
   const dir = deps.resolveWorkspace(issueIid);
   if (dir === undefined) throw new NoWorkspaceError(issueIid);
-  return deps.exec.attach('claude', [], { cwd: dir });
+  return deps.exec.attach(deps.agentCommand, [], { cwd: dir });
 }
