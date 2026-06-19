@@ -13,6 +13,7 @@
 import {
   AC_DRAFT_SENTINEL,
   type AgentResult,
+  type AgentSelection,
   CI_FAIL_SENTINEL,
   type CiFailureLogs,
   type Comment,
@@ -80,6 +81,7 @@ export interface ExecutorContext {
   exec: Exec; // §0.8 — proof generation runs commands through this
   settings: RepoSettings;
   workflow: WorkflowFrontMatter;
+  agent: AgentSelection; // daemon-global agent selection (#codex); resolves RunnerInput command
   promptBody: string; // WORKFLOW body → RunnerInput.promptBody
   rateGate: RateGateRecorder; // #47 — outcome recording only
   proofStreaks: ProofStreaks; // #109 — per-issue consecutive proof-failure streak
@@ -765,6 +767,12 @@ async function runRecoveryHandoff(snapshot: IssueSnapshot, ctx: ExecutorContext)
   });
 }
 
+/** The selected agent's binary: explicit override → kind name → (claude) WORKFLOW override. */
+function resolveAgentCommand(ctx: ExecutorContext): string {
+  if (ctx.agent.command) return ctx.agent.command;
+  return ctx.agent.kind === 'claude' ? ctx.workflow.claude.command : ctx.agent.kind;
+}
+
 function buildRunnerInput(
   workspaceDir: string,
   snapshot: IssueSnapshot,
@@ -782,7 +790,7 @@ function buildRunnerInput(
       ? { issue: snapshot.issue, mr, recentComments }
       : { issue: snapshot.issue, recentComments },
     claude: {
-      command: ctx.workflow.claude.command,
+      command: resolveAgentCommand(ctx),
       maxTurns: ctx.workflow.claude.max_turns,
       permissionMode: ctx.workflow.claude.permission_mode,
       stallTimeoutMs: ctx.workflow.claude.stall_timeout_seconds * 1000,
@@ -842,7 +850,7 @@ function buildMrRunnerInput(
     promptBody: buildMrCommandPrompt({ instruction, mr, workflowBody: ctx.promptBody }),
     context: { mr, recentComments: thread }, // no issue — a command MR has none
     claude: {
-      command: ctx.workflow.claude.command,
+      command: resolveAgentCommand(ctx),
       maxTurns: ctx.workflow.claude.max_turns,
       permissionMode: ctx.workflow.claude.permission_mode,
       stallTimeoutMs: ctx.workflow.claude.stall_timeout_seconds * 1000,

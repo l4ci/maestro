@@ -54,6 +54,7 @@ function escalationContext(parts: {
     exec: { run: async () => ({ code: 0, stdout: '', stderr: '' }) } as never,
     settings: defaultSettings(),
     workflow: defaultWorkflow(),
+    agent: { kind: 'claude' },
     promptBody: parts.promptBody ?? 'do the work',
     rateGate: { trip: () => 1_000, clear: () => {} },
     proofStreaks: streaks,

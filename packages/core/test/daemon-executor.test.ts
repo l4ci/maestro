@@ -76,6 +76,8 @@ function executorContext(parts: {
   runner: RunnerSpy;
   workspace?: ReturnType<typeof executorWorkspace>;
   gate?: ReturnType<typeof gateRecorder>;
+  agent?: ExecutorContext['agent'];
+  workflow?: ExecutorContext['workflow'];
 }) {
   const workspace = parts.workspace ?? executorWorkspace();
   const gate = parts.gate ?? gateRecorder();
@@ -88,9 +90,11 @@ function executorContext(parts: {
     proofOnly: vi.fn(async () => []),
     exec: { run: async () => ({ code: 0, stdout: '', stderr: '' }) } as never,
     settings: defaultSettings(),
-    workflow: defaultWorkflow(),
+    workflow: parts.workflow ?? defaultWorkflow(),
+    agent: parts.agent ?? { kind: 'claude' },
     promptBody: 'do the work',
     rateGate: gate,
+    proofStreaks: { fail: () => 0, clear: () => {} } as never,
     log: silentLogger(),
   };
   return { ctx, workspace, gate };
@@ -321,5 +325,60 @@ describe('executeMrCommand — the command-MR run sequence (#105, spec §5)', ()
     expect(gate.trips).toEqual([9_999]);
     expect(adapter.mrComments).toHaveLength(0);
     expect(workspace.pushed).toEqual([]);
+  });
+});
+
+describe('resolveAgentCommand — runner receives the correct binary (#codex)', () => {
+  it('codex kind → runner receives command: "codex" (workflow claude.command ignored)', async () => {
+    const adapter = recordingAdapter({ snapshot: makeSnapshot() });
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    const { ctx } = executorContext({ adapter, runner, agent: { kind: 'codex' } });
+
+    await executeIntent(
+      { kind: 'start-new', branch: 'maestro/issue-42', mrTitle: 'Draft: Add OAuth' },
+      makeSnapshot({ mr: null }),
+      ctx,
+    );
+
+    expect(runner.inputs[0]?.claude.command).toBe('codex');
+  });
+
+  it('claude kind → runner receives the per-repo workflow claude.command (back-compat)', async () => {
+    const adapter = recordingAdapter({ snapshot: makeSnapshot() });
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    // Non-default workflow command proves the claude path reads ctx.workflow.claude.command
+    // (not just the kind name) — a bug returning the kind would yield 'claude' and fail here.
+    const { ctx } = executorContext({
+      adapter,
+      runner,
+      agent: { kind: 'claude' },
+      workflow: defaultWorkflow({ claude: { command: '/usr/local/bin/claude-custom' } }),
+    });
+
+    await executeIntent(
+      { kind: 'start-new', branch: 'maestro/issue-42', mrTitle: 'Draft: Add OAuth' },
+      makeSnapshot({ mr: null }),
+      ctx,
+    );
+
+    expect(runner.inputs[0]?.claude.command).toBe('/usr/local/bin/claude-custom');
+  });
+
+  it('explicit command override wins over kind name', async () => {
+    const adapter = recordingAdapter({ snapshot: makeSnapshot() });
+    const runner = scriptedRunner({ status: 'in_progress', summary: '' });
+    const { ctx } = executorContext({
+      adapter,
+      runner,
+      agent: { kind: 'codex', command: '/usr/local/bin/codex' },
+    });
+
+    await executeIntent(
+      { kind: 'start-new', branch: 'maestro/issue-42', mrTitle: 'Draft: Add OAuth' },
+      makeSnapshot({ mr: null }),
+      ctx,
+    );
+
+    expect(runner.inputs[0]?.claude.command).toBe('/usr/local/bin/codex');
   });
 });
