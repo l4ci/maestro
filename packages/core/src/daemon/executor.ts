@@ -794,6 +794,7 @@ function buildRunnerInput(
       maxTurns: ctx.workflow.claude.max_turns,
       permissionMode: ctx.workflow.claude.permission_mode,
       stallTimeoutMs: ctx.workflow.claude.stall_timeout_seconds * 1000,
+      runTimeoutMs: ctx.workflow.claude.run_timeout_seconds * 1000,
     },
   };
 }
@@ -854,6 +855,7 @@ function buildMrRunnerInput(
       maxTurns: ctx.workflow.claude.max_turns,
       permissionMode: ctx.workflow.claude.permission_mode,
       stallTimeoutMs: ctx.workflow.claude.stall_timeout_seconds * 1000,
+      runTimeoutMs: ctx.workflow.claude.run_timeout_seconds * 1000,
     },
   };
 }

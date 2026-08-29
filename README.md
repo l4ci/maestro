@@ -265,6 +265,25 @@ flowchart TD
   > published Codex SDK types but has not yet been run against a live `codex` CLI.
   > Treat it as experimental until [#122](https://github.com/l4ci/maestro/issues/122)
   > is closed.
+
+  Set `defaults.agent.runner: herdr` to host the agent in a named
+  [herdr](https://github.com/l4ci/herdr) TUI session instead of a headless `-p`
+  call — a human can attach and watch (or intervene) mid-run while the daemon
+  still drives the lifecycle (provision, prompt, poll, read result, teardown)
+  through the herdr CLI. `runner` is orthogonal to `kind`: herdr can host either
+  agent. Each run is still cold (a fresh tab, no session resume) and the tab is
+  torn down on every exit path — including a stall, which is a whole-run ceiling
+  here (`claude.run_timeout_seconds` in WORKFLOW.md, default 1800s) rather than
+  the headless runner's `max_turns`. Limitations:
+  - `agent.command`/`claude.command` binary overrides have **no effect** — herdr
+    resolves the binary from `--kind` on its own side.
+  - `max_turns` is ignored (a print-mode-only flag); the budget is
+    `run_timeout_seconds`.
+  - Token scrubbing is name-based blanking (`--env KEY=`) of the configured
+    `token_env`s in the pane; the pane otherwise inherits the **herdr server's
+    own env**, which the daemon cannot audit or blank secrets it doesn't know
+    about. Run the herdr server itself under a minimal env carrying no forge/git
+    credentials.
 - **Proof generator** — Pluggable per repo. Pick `playwright`, `test-output`,
   `diff-summary`, or `none`.
 - **CLI and Web** — Thin shells over the shared core (see below).
@@ -283,6 +302,7 @@ daemon will run:
 | **git** | clone and branch each ticket's workspace | your package manager |
 | **claude** | the default coding agent, run headless — *unless you set `agent.kind: codex`* | [Claude Code](https://claude.com/claude-code) |
 | **codex** | alternative coding agent, run headless — *only if you set `agent.kind: codex`* | [OpenAI Codex CLI](https://github.com/openai/codex) |
+| **herdr** | hosts the agent in a TUI session — *only if you set `agent.runner: herdr`* | [herdr](https://github.com/l4ci/herdr) |
 | **glab** | talk to the GitLab API — *only if you watch GitLab repos* | [gitlab.com/gitlab-org/cli](https://gitlab.com/gitlab-org/cli) |
 | **gh** | talk to the GitHub API — *only if you watch GitHub repos* | [cli.github.com](https://cli.github.com) |
 
@@ -357,6 +377,14 @@ defaults:
     kind: claude              # coding agent: 'claude' (default) or 'codex' (OpenAI Codex CLI)
     # command: /usr/local/bin/claude   # optional: override the binary/path (defaults to the kind name)
     # NOTE: 'codex' is experimental and not yet verified against a live codex CLI — see issue #122.
+    runner: headless          # 'headless' (default) or 'herdr' — host the agent in a TUI session
+    # herdr:
+    #   command: herdr                 # optional: override the herdr binary/path
+    #   workspace_label: maestro       # herdr workspace the daemon's tabs live in
+    #   env:                           # pane env vars — the pane inherits the herdr SERVER's
+    #     # env, so select the agent account here (else the pane's claude is NOT logged in);
+    #     # forge token_env names are always blanked in the pane regardless (§13.1)
+    #     CLAUDE_CONFIG_DIR: /home/bot/.claude-bot
 forges:
   # Single entry per forge (shorthand)…
   github: { host: github.com, token_env: MAESTRO_GITHUB_TOKEN }

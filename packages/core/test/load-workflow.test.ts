@@ -28,6 +28,7 @@ describe('C1 — validate front matter via WorkflowSchema', () => {
       expect(r.value.frontMatter.git.merge_strategy).toBe('squash');
       expect(r.value.frontMatter.manage_board).toBe(true);
       expect(r.value.frontMatter.claude.max_turns).toBe(40);
+      expect(r.value.frontMatter.claude.run_timeout_seconds).toBe(1800); // HerdrRunner poll ceiling
       expect(r.value.promptBody).toContain('atomic commit');
     }
   });

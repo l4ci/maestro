@@ -26,6 +26,7 @@ export function allBinaries(): BinaryReq[] {
     { bin: 'git', reason: 'clone and branch per-issue workspaces' },
     { bin: 'claude', reason: 'run the Claude coding agent headless' },
     { bin: 'codex', reason: 'run the Codex coding agent headless' },
+    { bin: 'herdr', reason: 'host the coding agent in a herdr tab (runner: herdr)' },
     { bin: 'glab', reason: 'reach the GitLab API' },
     { bin: 'gh', reason: 'reach the GitHub API' },
   ];
@@ -33,15 +34,28 @@ export function allBinaries(): BinaryReq[] {
 
 /** The subset actually required by this install: git + selected agent always, plus only
  *  the forge binaries for forges the config declares. Proof commands (npx/playwright/…)
- *  are per-repo and out of scope here — they fail per-tick, not at boot. */
+ *  are per-repo and out of scope here — they fail per-tick, not at boot.
+ *
+ *  Under `runner: herdr` the daemon shells out to `herdr` itself, not `claude`/`codex`
+ *  directly — herdr resolves the agent binary from `--kind` on its own side (a
+ *  documented limitation: `agent.command`/`claude.command` have no effect there), so
+ *  preflighting the agent binary here would check the wrong (or an absent-by-design)
+ *  local binary. */
 export function requiredBinaries(config: MaestroConfig): BinaryReq[] {
   // Optional-chained: a no-defaults config (some test fixtures) → the claude default.
   const agent = config.defaults?.agent;
-  const agentBin = agent?.command ?? agent?.kind ?? 'claude';
-  const reqs: BinaryReq[] = [
-    { bin: 'git', reason: 'clone and branch per-issue workspaces' },
-    { bin: agentBin, reason: 'run the coding agent headless' },
-  ];
+  const reqs: BinaryReq[] = [{ bin: 'git', reason: 'clone and branch per-issue workspaces' }];
+  if (agent?.runner === 'herdr') {
+    reqs.push({
+      bin: agent.herdr?.command ?? 'herdr',
+      reason: 'host the coding agent in a herdr tab',
+    });
+  } else {
+    reqs.push({
+      bin: agent?.command ?? agent?.kind ?? 'claude',
+      reason: 'run the coding agent headless',
+    });
+  }
   if (config.forges.gitlab) reqs.push({ bin: 'glab', reason: 'reach the GitLab API' });
   if (config.forges.github) reqs.push({ bin: 'gh', reason: 'reach the GitHub API' });
   return reqs;

@@ -45,6 +45,23 @@ export const ConfigSchema = z.object({
       .object({
         kind: z.enum(['claude', 'codex']).default('claude'),
         command: z.string().optional(),
+        // Deployment knob (opt-in): headless (default, §8/§10 cold `claude -p`) or herdr
+        // (host the agent in a named herdr session — TUI, human-attachable; HerdrRunner,
+        // spec §8 amendment). Orthogonal to `kind`: herdr hosts EITHER agent kind. No
+        // duration knob here — that's WORKFLOW.md's claude.run_timeout_seconds (per-repo).
+        runner: z.enum(['headless', 'herdr']).default('headless'),
+        herdr: z
+          .object({
+            command: z.string().default('herdr'),
+            workspace_label: z.string().default('maestro'),
+            // Env vars SET on every run's pane at tab create (`--env K=V`). Pane env
+            // comes from the herdr SERVER, which does NOT carry the operator shell's
+            // exports — so the agent ACCOUNT is selected here (e.g. CLAUDE_CONFIG_DIR),
+            // never inherited. Keys matching a forge token_env are ignored: those are
+            // always blanked (§13.1).
+            env: z.record(z.string()).default({}),
+          })
+          .default({}),
       })
       .default({}),
   }),

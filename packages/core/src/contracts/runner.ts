@@ -87,6 +87,10 @@ export interface RunnerInput {
     /** Per-run stall window (ms). No agent stream events past this → kill + retry once.
      *  From WORKFLOW.md `claude.stall_timeout_seconds`; absent → the runner's default. */
     stallTimeoutMs?: number;
+    /** Whole-run ceiling (ms), consumed only by HerdrRunner's poll loop (spec §8
+     *  amendment). From WORKFLOW.md `claude.run_timeout_seconds`; absent → the runner's
+     *  default. The headless runner ignores this (max_turns bounds that run instead). */
+    runTimeoutMs?: number;
   };
 }
 

@@ -46,6 +46,7 @@ import {
   CodexRunner,
   ConfigStore,
   HeartbeatWriter,
+  HerdrRunner,
   type Logger,
   ProofStreaks,
   RateLimitGate,
@@ -169,10 +170,27 @@ export function startDaemon(opts: DaemonOptions = {}): { stop: () => void } {
         timeoutMs,
       }),
   };
+  // `runner` (headless vs herdr) is orthogonal to `kind` (claude vs codex): herdr can
+  // host either agent kind in a named, human-attachable tab (spec §8 amendment).
   const runner =
-    agentSel.kind === 'codex'
-      ? new CodexRunner(exec, runnerCfg)
-      : new ClaudeRunner(exec, runnerCfg);
+    agentSel.runner === 'herdr'
+      ? new HerdrRunner(exec, {
+          ...runnerCfg,
+          kind: agentSel.kind,
+          command: agentSel.herdr.command,
+          workspaceLabel: agentSel.herdr.workspace_label,
+          env: agentSel.herdr.env,
+        })
+      : agentSel.kind === 'codex'
+        ? new CodexRunner(exec, runnerCfg)
+        : new ClaudeRunner(exec, runnerCfg);
+  if (agentSel.runner === 'herdr') {
+    // Startup bulk sweep (correction #9): close any `m-*` tab left LIVE by a crash mid-run
+    // on a prior daemon process — best-effort, never blocks boot.
+    void (runner as HerdrRunner)
+      .sweepOrphans()
+      .catch((err) => log.warn('herdr: startup orphan sweep failed', { err: String(err) }));
+  }
   const globalMax = config.defaults.concurrency.global_max;
   // Work admission (#91): per-issue uniqueness (#18) + slot capacity (§14) in one seam.
   const claims = new Claims(globalMax);

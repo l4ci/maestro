@@ -79,6 +79,61 @@ repos: []
   });
 });
 
+describe('B0d — defaults.agent.runner selection (herdr support)', () => {
+  it('defaults to the headless runner with herdr defaults filled in unused', () => {
+    const r = parseConfig(sample);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.defaults.agent.runner).toBe('headless');
+      expect(r.value.defaults.agent.herdr).toEqual({
+        command: 'herdr',
+        workspace_label: 'maestro',
+        env: {},
+      });
+    }
+  });
+
+  it('parses runner: herdr with a herdr command/workspace_label override', () => {
+    const yaml = `
+defaults:
+  bot_user: maestro-bot
+  agent:
+    kind: claude
+    runner: herdr
+    herdr:
+      command: /opt/bin/herdr
+      workspace_label: acme
+forges:
+  github:
+    host: github.com
+    token_env: T
+repos: []
+`;
+    const r = parseConfig(yaml);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.defaults.agent.runner).toBe('herdr');
+      expect(r.value.defaults.agent.herdr).toEqual({
+        command: '/opt/bin/herdr',
+        workspace_label: 'acme',
+        env: {},
+      });
+    }
+  });
+
+  it('rejects an unknown runner value', () => {
+    const yaml = `
+defaults:
+  bot_user: b
+  agent:
+    runner: tmux
+forges: {}
+repos: []
+`;
+    expect(parseConfig(yaml).ok).toBe(false);
+  });
+});
+
 describe('B1 — invalid config rejected with a useful error', () => {
   it('rejects config missing required bot_user and carries the issue path', () => {
     const bad = 'defaults:\n  poll_interval_active: 30s\nforges: {}\nrepos: []\n';

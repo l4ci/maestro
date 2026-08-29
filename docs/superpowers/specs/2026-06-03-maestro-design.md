@@ -77,6 +77,10 @@ defaults:
   poll_interval_idle: 5m             # repos with nothing in flight (adaptive polling)
   poll_jitter: 5s                    # spread requests to avoid bursts/rate limits
   bot_user: maestro-bot
+  agent:
+    kind: claude                     # claude | codex
+    runner: headless                 # headless (default, §8) | herdr — host the agent in a
+                                      # named herdr TUI session instead of a cold `-p` call
   concurrency: { global_max: 2 }     # concurrent ACTIVE workers — size to RAM (see §14)
   workspaces:
     root: ./workspaces
@@ -126,6 +130,8 @@ claude:
   command: "claude"                    # same binary as interactive; daemon runs it headless (-p)
   max_turns: 40
   permission_mode: acceptEdits
+  run_timeout_seconds: 1800            # whole-run ceiling under `agent.runner: herdr` (§8); the
+                                        # headless runner ignores this (max_turns bounds it instead)
 concurrency: { max_active: 2 }
 ---
 # Prompt body — the agent operating protocol (see §9) + repo-specific conventions:
@@ -172,12 +178,24 @@ review with state `APPROVED`. MR≡PR throughout.
   No I/O; takes a snapshot, emits intents. Fully unit-testable.
 - **Workspace manager** — clone/reuse a per-issue dir under `workspaces/`, branch
   handling, cleanup on terminal. The single seam for future container isolation.
-- **Claude runner** — invokes `claude -p --output-format stream-json`; parses the
-  final result into the agent contract (§10). Cold session each time. Same binary
-  as the interactive CLI, run headless; locally it uses the existing logged-in
-  auth (your subscription) and still loads CLAUDE.md, settings, MCP, skills, and
-  permission modes. Interactive mode can't be daemon-driven (TTY + blocking
-  permission prompts + no parseable result).
+- **Runner** — invokes the coding agent and parses the final result into the agent
+  contract (§10). Cold session every time either way. Two implementations, chosen
+  by `defaults.agent.runner` (§5):
+  - **headless (default)** — `claude -p --output-format stream-json` (or `codex
+    exec - --json`); a piped one-shot subprocess. Same binary as the interactive
+    CLI, run headless; locally it uses the existing logged-in auth (your
+    subscription) and still loads CLAUDE.md, settings, MCP, skills, and permission
+    modes.
+  - **herdr** — hosts the agent as an interactive TUI in its own named herdr tab
+    instead: a human can attach and watch mid-run while the daemon still drives
+    provisioning, prompting, waiting on agent state, reading the result, and
+    teardown through the herdr CLI. Same cold-per-run contract as headless — no
+    session resume, the tab is torn down on every exit path. This is what makes
+    interactive mode daemon-drivable (headless mode alone can't be: a bare TTY has
+    blocking permission prompts and no parseable result). Unlike headless, the
+    pane's env comes from the herdr SERVER, not the daemon — so the agent account
+    is selected explicitly via `agent.herdr.env` (e.g. `CLAUDE_CONFIG_DIR`);
+    without it the pane's claude runs logged-out.
 - **Proof generator** — pluggable strategies selected by WORKFLOW.md
   (`playwright` | `test-output` | `diff-summary` | `none`). Returns artifacts the
   adapter attaches.
@@ -282,6 +300,15 @@ Two distinct concerns; the second is the serious one.
   support is explicit opt-in**. Proper isolation (per-issue containers, the
   deferred §17 item) is the real fix and should precede any serious public-repo
   use.
+- **`agent.runner: herdr` residual risk.** The headless runner scrubs the forge
+  token from the agent's env directly (`ExecOptions.env` removal). Herdr has no
+  such seam: `--env <TOKEN>=` only SETS an empty value in the pane, which is
+  enough to blank what the persisted git credential helper (§13.1 above) would
+  otherwise expand — but the pane's env otherwise still inherits from the **herdr
+  server's own env**, which the daemon does not control and cannot audit. A herdr
+  server started with forge/git credentials in its own environment leaks them to
+  every pane it hosts, regardless of `--env`. Operational requirement: run the
+  herdr server under a minimal env carrying no forge/git credentials.
 
 ## 14. Capacity & operations
 

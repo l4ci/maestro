@@ -66,6 +66,11 @@ export const WorkflowSchema = z.object({
       // minutes, so a too-short window false-kills a healthy agent mid-command. Size it
       // ABOVE that floor; 120s suits a warm, fast repo.
       stall_timeout_seconds: z.number().int().positive().default(120),
+      // Whole-run ceiling under `runner: herdr` (HerdrRunner's poll loop, spec §8
+      // amendment) — distinct from stall_timeout_seconds (per-event window): 120s would
+      // false-timeout every real run, hence its own per-repo knob with a generous
+      // default. Ignored under the default headless runner (max_turns bounds that run).
+      run_timeout_seconds: z.number().int().positive().default(1800),
       // Constrained to Claude's real modes (no free string). bypassPermissions maps to
       // --dangerously-skip-permissions in the runner; the rest pass through verbatim.
       permission_mode: z

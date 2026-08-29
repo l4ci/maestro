@@ -72,7 +72,12 @@ describe('checkBinaries', () => {
 describe('requiredBinaries', () => {
   const base = (
     forges: MaestroConfig['forges'],
-    agent?: { kind: 'claude' | 'codex'; command?: string },
+    agent?: {
+      kind: 'claude' | 'codex';
+      command?: string;
+      runner?: 'headless' | 'herdr';
+      herdr?: { command?: string };
+    },
   ): MaestroConfig =>
     ({ forges, defaults: agent ? { agent } : undefined }) as unknown as MaestroConfig;
 
@@ -101,7 +106,31 @@ describe('requiredBinaries', () => {
     expect(r.map((x) => x.bin)).toEqual(['git', '/opt/codex', 'gh']);
   });
 
-  it('allBinaries lists the full superset including codex', () => {
-    expect(allBinaries().map((r) => r.bin)).toEqual(['git', 'claude', 'codex', 'glab', 'gh']);
+  it('allBinaries lists the full superset including codex and herdr', () => {
+    expect(allBinaries().map((r) => r.bin)).toEqual([
+      'git',
+      'claude',
+      'codex',
+      'herdr',
+      'glab',
+      'gh',
+    ]);
+  });
+
+  it('requires herdr instead of the agent binary under runner: herdr', () => {
+    const r = requiredBinaries(
+      base({ github: { host: 'github.com', token_env: 'Y' } }, { kind: 'claude', runner: 'herdr' }),
+    );
+    expect(r.map((x) => x.bin)).toEqual(['git', 'herdr', 'gh']);
+  });
+
+  it('requires the herdr command override, not the agent command override', () => {
+    const r = requiredBinaries(
+      base(
+        { github: { host: 'github.com', token_env: 'Y' } },
+        { kind: 'codex', command: '/opt/codex', runner: 'herdr', herdr: { command: '/opt/herdr' } },
+      ),
+    );
+    expect(r.map((x) => x.bin)).toEqual(['git', '/opt/herdr', 'gh']);
   });
 });

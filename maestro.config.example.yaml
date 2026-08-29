@@ -11,6 +11,18 @@ defaults:
   # `command` overrides the binary/path; defaults to the kind name.
   agent:
     kind: claude
+    # runner: herdr controls HOW the agent runs, orthogonal to `kind` (which one):
+    # 'headless' (default) is a cold `claude -p`/`codex exec` call; 'herdr' hosts the
+    # agent in a named herdr TUI session instead, so a human can attach mid-run.
+    # runner: herdr
+    # herdr:
+    #   command: herdr             # optional: override the herdr binary/path
+    #   workspace_label: maestro   # herdr workspace the daemon's tabs live in
+    #   env:                       # set on every run's pane — the pane inherits the herdr
+    #     # SERVER's env, not the daemon's, so the agent ACCOUNT must be selected here;
+    #     # without it the pane's claude is NOT LOGGED IN. Forge token_env names are
+    #     # always blanked in the pane regardless of what env says (§13.1).
+    #     CLAUDE_CONFIG_DIR: /home/bot/.claude-bot
   concurrency:
     global_max: 2 # concurrent ACTIVE workers — size to RAM (§14)
   workspaces:

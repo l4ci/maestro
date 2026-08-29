@@ -391,7 +391,7 @@ export function buildContext(
     workspace?: WorkspaceFake;
     settings?: RepoSettings;
     workflow?: WorkflowFrontMatter;
-    agent?: AgentSelection;
+    agent?: Partial<AgentSelection>;
     claims?: Claims;
     handoff?: ReturnType<typeof vi.fn>;
     proofAndHandoff?: ReturnType<typeof vi.fn>;
@@ -420,7 +420,14 @@ export function buildContext(
     exec: { run: async () => ({ code: 0, stdout: '', stderr: '' }) } as never,
     settings,
     workflow: partial.workflow ?? defaultWorkflow(),
-    agent: partial.agent ?? { kind: 'claude' },
+    // Merge over full defaults so a caller passing only `{ kind: 'codex' }` still gets a
+    // complete AgentSelection (runner/herdr defaults #codex — added for HerdrRunner).
+    agent: {
+      kind: 'claude',
+      runner: 'headless',
+      herdr: { command: 'herdr', workspace_label: 'maestro' },
+      ...partial.agent,
+    },
     promptBody: partial.promptBody ?? 'do the work',
     claims,
     rateGate: partial.rateGate ?? new RateLimitGate(),
