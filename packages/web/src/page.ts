@@ -141,6 +141,29 @@ export const DASHBOARD_HTML = `<!doctype html>
     font-size: 12px; background: var(--surface-2); color: var(--accent);
     border: 1px solid var(--border-soft);
   }
+  /* Forge mark before the repo name: a monochrome GitHub/GitLab glyph drawn as a CSS mask
+     so it picks up a themed color via background-color. The mask-image data-URI is set in
+     JS (updateRepoCard) keyed by repo.forge — the value-bearing bit lands on the one update
+     path; only the static box lives here. */
+  .forge {
+    display: inline-block; flex: none; width: 15px; height: 15px;
+    margin-right: 7px; vertical-align: -2px; background-color: var(--muted-2);
+    -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+    -webkit-mask-position: center; mask-position: center;
+    -webkit-mask-size: contain; mask-size: contain;
+  }
+  .repo h2:hover .forge { background-color: var(--fg); }
+  /* Quick repo filters: toggle chips that hide whole repo cards by forge / state. They run
+     alongside the issue text filter in applyFilter() every poll — forge chips OR together,
+     the rest AND, so the chips narrow the board the way a human reads them. */
+  #filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 24px 0; }
+  #filters .chip {
+    font: inherit; font-size: 12px; line-height: 1.6; padding: 2px 10px;
+    border-radius: 999px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--muted); cursor: pointer; user-select: none;
+  }
+  #filters .chip:hover { border-color: var(--accent); color: var(--fg); }
+  #filters .chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
   .open-badge:hover { border-color: var(--accent); }
   dialog#issuesDialog {
     padding: 0; border: 1px solid var(--border); border-radius: 8px;
@@ -304,6 +327,7 @@ export const DASHBOARD_HTML = `<!doctype html>
      just goes full width. */
   @media (max-width: 600px) {
     header { padding: 14px 16px; flex-wrap: wrap; gap: 6px 10px; }
+    #filters { padding: 10px 16px 0; }
     #daemon { flex-basis: 100%; margin-left: 0; }
     main { padding: 16px; }
     #addBtn { width: 100%; }
@@ -324,6 +348,15 @@ export const DASHBOARD_HTML = `<!doctype html>
   <span id="daemon"></span>
   <span id="updated"></span>
 </header>
+<div id="filters" role="group" aria-label="quick filters">
+  <button type="button" class="chip" data-filter="github" aria-pressed="false">GitHub</button>
+  <button type="button" class="chip" data-filter="gitlab" aria-pressed="false">GitLab</button>
+  <button type="button" class="chip" data-filter="open" aria-pressed="false">Open issues</button>
+  <button type="button" class="chip" data-filter="working" aria-pressed="false">Working</button>
+  <button type="button" class="chip" data-filter="review" aria-pressed="false">In review</button>
+  <button type="button" class="chip" data-filter="blocked" aria-pressed="false">Blocked</button>
+  <button type="button" class="chip" data-filter="unreachable" aria-pressed="false">Unreachable</button>
+</div>
 <div id="hints"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>o</kbd> open · <kbd>/</kbd> filter · <kbd>?</kbd> shortcuts</div>
 <dialog id="helpDialog">
   <div class="help">
@@ -370,6 +403,20 @@ export const DASHBOARD_HTML = `<!doctype html>
 <script>
 const STATES = ['new','in-progress','in-review','blocked','done'];
 const el = (id) => document.getElementById(id);
+
+// Brand glyphs for the repo's forge mark (the official GitHub / GitLab logos). Drawn as a
+// CSS mask so background-color themes them; the value is keyed by the forge ENUM, never by
+// forge-controlled free text, so encoding it into a data-URI is safe. forgeMask() is called
+// from updateRepoCard so the value-bearing choice rides the single update path (§ create/
+// update parity) — encodeURIComponent handles every reserved char, spaces included.
+const FORGE_SVG = {
+  github: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222 0 1.606-.014 2.898-.014 3.293 0 .322.216.694.825.576C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12'/></svg>",
+  gitlab: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='m23.6004 9.5927-.0337-.0862L20.3.9814a.851.851 0 0 0-.3362-.405.8748.8748 0 0 0-.9997.0539.8748.8748 0 0 0-.29.4399l-2.2055 6.748H7.5375l-2.2057-6.748a.8573.8573 0 0 0-.29-.4412.8748.8748 0 0 0-.9997-.0539.8585.8585 0 0 0-.3362.405L.4332 9.5015l-.0325.0862a6.0657 6.0657 0 0 0 2.0119 7.0105l.0113.0087.03.0213 4.976 3.7264 2.462 1.8633 1.4995 1.1321a1.0085 1.0085 0 0 0 1.2197 0l1.4995-1.1321 2.462-1.8633 5.006-3.7489.0125-.01a6.0682 6.0682 0 0 0 2.0094-7.003z'/></svg>",
+};
+function forgeMask(forge) {
+  const svg = FORGE_SVG[forge];
+  return svg ? 'url("data:image/svg+xml,' + encodeURIComponent(svg) + '")' : '';
+}
 
 let writesEnabled = false; // mirrors the dashboard view each poll
 let issuesEpoch = 0; // incremented each time the issues modal opens; guards stale fetches
@@ -714,9 +761,31 @@ function toggleSelectedRepo() {
 // Filter the already-polled rows client-side: hide non-matching issue rows (and their
 // detail siblings), and collapse a repo card whose every issue is filtered out. Hiding via
 // a class — never node removal — keeps keyed identity and the create/update parity intact.
+// The active quick-filter chips, by their data-filter id.
+function activeChips() {
+  return [...document.querySelectorAll('#filters .chip.active')].map((c) => c.dataset.filter);
+}
+
+// A repo card clears the chips when: it matches one of the selected forges (forge chips OR
+// among themselves), AND it carries every selected state flag (the rest AND together). No
+// chips → everything passes.
+const CHIP_FLAG = { open: 'fOpen', working: 'fWorking', review: 'fReview', blocked: 'fBlocked', unreachable: 'fError' };
+function cardPassesChips(card, chips) {
+  if (!chips.length) return true;
+  const forges = chips.filter((c) => c === 'github' || c === 'gitlab');
+  if (forges.length && !forges.includes(card.dataset.forge)) return false;
+  for (const c of chips) {
+    const flag = CHIP_FLAG[c];
+    if (flag && !card.dataset[flag]) return false;
+  }
+  return true;
+}
+
 function applyFilter() {
   const q = (el('filter').value || '').trim().toLowerCase();
+  const chips = activeChips();
   for (const card of document.querySelectorAll('#repos > .repo')) {
+    const passesChips = cardPassesChips(card, chips);
     let anyVisible = false;
     for (const tr of card.querySelectorAll('tr.issue')) {
       const match = !q || (tr.dataset.hay || '').includes(q);
@@ -725,7 +794,9 @@ function applyFilter() {
       if (detail) detail.classList.toggle('filtered', !match);
       if (match) anyVisible = true;
     }
-    card.classList.toggle('filtered', Boolean(q) && !anyVisible);
+    // Hide the whole card when it fails the quick filters, or (with a text query active) no
+    // issue in it matched the text.
+    card.classList.toggle('filtered', !passesChips || (Boolean(q) && !anyVisible));
   }
 }
 
@@ -761,6 +832,18 @@ function onEscape() {
     applyFilter();
     applySelection();
     filter.blur();
+    return;
+  }
+  // With no text filter to clear, Esc next drops any active quick-filter chips — one keypress
+  // back to the full board.
+  const active = [...document.querySelectorAll('#filters .chip.active')];
+  if (active.length) {
+    for (const chip of active) {
+      chip.classList.remove('active');
+      chip.setAttribute('aria-pressed', 'false');
+    }
+    applyFilter();
+    applySelection();
     return;
   }
   const tr = selectedRow();
@@ -811,6 +894,16 @@ el('filter').addEventListener('input', () => {
   applyFilter();
   applySelection();
 });
+// Quick-filter chips: toggle the chip, then re-run the same filter pass the text input uses
+// so chip + text + the 5s poll all reconcile through one path (afterRender → applyFilter).
+for (const chip of document.querySelectorAll('#filters .chip')) {
+  chip.addEventListener('click', () => {
+    const on = chip.classList.toggle('active');
+    chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+    applyFilter();
+    applySelection();
+  });
+}
 el('helpClose').addEventListener('click', () => toggleHelp());
 el('helpDialog').addEventListener('click', (e) => {
   if (e.target === el('helpDialog')) toggleHelp(); // backdrop click closes
@@ -835,9 +928,11 @@ function createRepoCard() {
   card.className = 'repo';
   const h2 = document.createElement('h2');
   const chev = span('chev', '▾');
+  const forge = span('forge', '');
+  forge.hidden = true;
   const openBadge = span('open-badge', '');
   openBadge.hidden = true;
-  h2.append(chev, span('project', ''), span('counts', ''), openBadge);
+  h2.append(chev, forge, span('project', ''), span('counts', ''), openBadge);
   openBadge.addEventListener('click', (e) => {
     e.stopPropagation();
     if (card.dataset.repoUrl) openIssuesModal(card.dataset.repoUrl);
@@ -857,6 +952,23 @@ function createRepoCard() {
 function updateRepoCard(card, r) {
   card.querySelector('.project').textContent = r.repo.project;
   card.dataset.repoUrl = r.repo.url;
+  // Forge mark: a known github/gitlab glyph, hidden for any unrecognised forge so a bad
+  // value degrades to no icon rather than a broken mask.
+  const fi = card.querySelector('.forge');
+  const forge = r.repo.forge;
+  const mask = forgeMask(forge);
+  if (mask) {
+    fi.hidden = false;
+    fi.className = 'forge ' + forge;
+    fi.title = forge === 'github' ? 'GitHub' : 'GitLab';
+    fi.style.webkitMaskImage = mask;
+    fi.style.maskImage = mask;
+  } else {
+    fi.hidden = true;
+    fi.className = 'forge';
+    fi.removeAttribute('title');
+    fi.removeAttribute('style'); // drop the mask cleanly — no residual empty style attr
+  }
   const ob = card.querySelector('.open-badge');
   const n = r.grabbableCount;
   if (!r.error && typeof n === 'number' && n > 0) {
@@ -865,6 +977,15 @@ function updateRepoCard(card, r) {
   } else {
     ob.hidden = true;
   }
+  // Quick-filter signals as data-* on the card, so applyFilter() can hide whole cards by
+  // forge / state without re-reading the view. An errored repo only carries the error flag.
+  const cnt = r.counts || {};
+  card.dataset.forge = forge || '';
+  card.dataset.fOpen = !r.error && typeof n === 'number' && n > 0 ? '1' : '';
+  card.dataset.fWorking = !r.error && cnt['in-progress'] > 0 ? '1' : '';
+  card.dataset.fReview = !r.error && cnt['in-review'] > 0 ? '1' : '';
+  card.dataset.fBlocked = !r.error && cnt.blocked > 0 ? '1' : '';
+  card.dataset.fError = r.error ? '1' : '';
   // A repo whose forge call failed carries an error marker — show it as unreachable
   // instead of a misleading idle, so broken auth never looks like a healthy empty repo.
   const counts = card.querySelector('.counts');

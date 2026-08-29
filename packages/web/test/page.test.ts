@@ -1801,3 +1801,135 @@ describe('keyboard navigation (j/k/o/g/G) + live filter', () => {
     expect(help.open).toBe(false);
   });
 });
+
+// Forge mark + quick repo filters. The mark is a CSS-mask glyph keyed by repo.forge; the
+// chips hide whole repo cards by forge / state, riding the same applyFilter() pass as the
+// text filter so chip state survives the 5s poll.
+describe('forge mark + quick repo filters', () => {
+  type FView = View & { repos: Array<View['repos'][number] & { grabbableCount?: number }> };
+  const card = (w: PageWindow, url: string) =>
+    w.document.querySelector(`#repos > [data-key="${url}"]`) as HTMLElement;
+  const forgeMark = (w: PageWindow, url: string) =>
+    card(w, url).querySelector('.forge') as HTMLElement;
+  const chip = (w: PageWindow, name: string) =>
+    w.document.querySelector(`#filters .chip[data-filter="${name}"]`) as HTMLElement;
+  const filteredOut = (w: PageWindow, url: string) => card(w, url).classList.contains('filtered');
+  const press = (w: PageWindow, key: string) =>
+    w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key, bubbles: true }));
+
+  it('stamps each repo card with its forge glyph class and hover title', () => {
+    const w = loadPage();
+    w.render(view());
+    expect(forgeMark(w, 'gitlab.com/g/api').className).toContain('gitlab');
+    expect(forgeMark(w, 'gitlab.com/g/api').title).toBe('GitLab');
+    expect(forgeMark(w, 'github.com/o/web').className).toContain('github');
+    expect(forgeMark(w, 'github.com/o/web').title).toBe('GitHub');
+  });
+
+  it('hides the forge mark for an unrecognised forge', () => {
+    const w = loadPage();
+    const v = view();
+    if (v.repos[0]) v.repos[0].repo.forge = undefined;
+    w.render(v);
+    expect(forgeMark(w, 'gitlab.com/g/api').hidden).toBe(true);
+  });
+
+  it('the github chip keeps only github repos; gitlab only gitlab', () => {
+    const w = loadPage();
+    w.render(view());
+    chip(w, 'github').click();
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(true);
+    expect(filteredOut(w, 'github.com/o/web')).toBe(false);
+  });
+
+  it('forge chips OR together: both selected shows every repo', () => {
+    const w = loadPage();
+    w.render(view());
+    chip(w, 'github').click();
+    chip(w, 'gitlab').click();
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(false);
+    expect(filteredOut(w, 'github.com/o/web')).toBe(false);
+  });
+
+  it('the open-issues chip keeps only repos with a grabbable backlog', () => {
+    const w = loadPage();
+    const v = view() as FView;
+    if (v.repos[0]) v.repos[0].grabbableCount = 3; // gitlab has a backlog, github does not
+    w.render(v);
+    chip(w, 'open').click();
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(false);
+    expect(filteredOut(w, 'github.com/o/web')).toBe(true);
+  });
+
+  it('the working chip keeps only repos with in-progress work', () => {
+    const w = loadPage();
+    w.render(view()); // gitlab: in-progress 1, github: in-review 1
+    chip(w, 'working').click();
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(false);
+    expect(filteredOut(w, 'github.com/o/web')).toBe(true);
+  });
+
+  it('the in-review chip keeps only repos with issues in review', () => {
+    const w = loadPage();
+    w.render(view());
+    chip(w, 'review').click();
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(true);
+    expect(filteredOut(w, 'github.com/o/web')).toBe(false);
+  });
+
+  it('the unreachable chip keeps only errored repos', () => {
+    const w = loadPage();
+    const v = view();
+    if (v.repos[1]) {
+      v.repos[1].error = 'auth failed (401)';
+      v.repos[1].issues = [];
+    }
+    w.render(v);
+    chip(w, 'unreachable').click();
+    expect(filteredOut(w, 'github.com/o/web')).toBe(false);
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(true);
+  });
+
+  it('attribute chips AND together across groups', () => {
+    const w = loadPage();
+    const v = view() as FView;
+    if (v.repos[0]) v.repos[0].grabbableCount = 2; // gitlab: open backlog AND in-progress work
+    w.render(v);
+    chip(w, 'open').click();
+    chip(w, 'working').click();
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(false);
+    expect(filteredOut(w, 'github.com/o/web')).toBe(true);
+  });
+
+  it('a forge chip composes with the text filter (both must match)', () => {
+    const w = loadPage();
+    w.render(view());
+    chip(w, 'gitlab').click(); // only gitlab repo
+    const filter = w.document.getElementById('filter') as HTMLInputElement;
+    filter.value = 'nomatch';
+    filter.dispatchEvent(new w.Event('input', { bubbles: true }));
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(true); // forge ok but no issue text match
+    expect(filteredOut(w, 'github.com/o/web')).toBe(true); // wrong forge
+  });
+
+  it('chip filter state survives a poll re-render', () => {
+    const w = loadPage();
+    w.render(view());
+    chip(w, 'github').click();
+    w.render(view()); // poll
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(true);
+    expect(filteredOut(w, 'github.com/o/web')).toBe(false);
+    expect(chip(w, 'github').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('Esc clears active chips when there is no text filter to clear', () => {
+    const w = loadPage();
+    w.render(view());
+    chip(w, 'github').click();
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(true);
+    press(w, 'Escape');
+    expect(filteredOut(w, 'gitlab.com/g/api')).toBe(false);
+    expect(chip(w, 'github').classList.contains('active')).toBe(false);
+    expect(chip(w, 'github').getAttribute('aria-pressed')).toBe('false');
+  });
+});
