@@ -284,6 +284,9 @@ flowchart TD
     own env**, which the daemon cannot audit or blank secrets it doesn't know
     about. Run the herdr server itself under a minimal env carrying no forge/git
     credentials.
+
+  Operating it day to day (enabling, what a run looks like, troubleshooting) is
+  covered in the [herdr runner runbook](docs/herdr-runner.md).
 - **Proof generator** — Pluggable per repo. Pick `playwright`, `test-output`,
   `diff-summary`, or `none`.
 - **CLI and Web** — Thin shells over the shared core (see below).
