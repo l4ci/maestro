@@ -200,6 +200,13 @@ describe('HR-1 — happy path: full argv sequence, call order, teardown', () => 
       ]),
     );
 
+    // dispatch waits for a SUBMISSION ack (--until working), not turn completion — the
+    // default idle|done|blocked match outruns the ack timeout on any real turn
+    const dispatchCall = fake.calls.find(
+      (c) => c.args[1] === 'prompt' && c.args.includes('--wait'),
+    );
+    expect(dispatchCall?.args.join(' ')).toContain('--until working');
+
     // result.json is consumed (deleted) after a successful parse
     expect(existsSync(join(ws, '.maestro', 'result.json'))).toBe(false);
     // .maestro/ is git-excluded idempotently

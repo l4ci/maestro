@@ -551,12 +551,25 @@ async function dispatch(
   name: string,
 ): Promise<{ ok: true } | { ok: false; diagnostic: string }> {
   for (let attempt = 0; attempt < 2; attempt++) {
+    // --until working makes --wait a SUBMISSION ack. Without it, --wait's default match
+    // (idle|done|blocked) is turn COMPLETION — a real multi-minute turn outruns any sane
+    // ack timeout, the dispatch reads as failed, and teardown kills a healthy working
+    // agent ~15s in (observed live on the first real daemon run). The completion states
+    // stay listed so an instant turn (or an immediate dialog) still matches.
     const r = await runHerdr(exec, cfg, [
       'agent',
       'prompt',
       name,
       DISPATCH_POINTER,
       '--wait',
+      '--until',
+      'working',
+      '--until',
+      'idle',
+      '--until',
+      'done',
+      '--until',
+      'blocked',
       '--timeout',
       String(DISPATCH_TIMEOUT_MS),
     ]);
